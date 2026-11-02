@@ -314,6 +314,12 @@ Its block buffers stay for reading; `rexel-attach' reuses them."
 (defvar-local rexel--requested-size nil
   "Last (COLS . ROWS) requested from the server for this block.")
 
+(defvar-local rexel--size-take nil
+  "Non-nil when the next size request takes ownership of the block.")
+
+(defvar-local rexel--size-inflight nil
+  "The connection a size request is in flight on, or nil.")
+
 (defvar-local rexel--out-pending nil
   "Bytes typed while a write to the server is in flight.")
 
@@ -382,12 +388,14 @@ A buffer whose stream ended earlier is reset and streamed again."
     (setq rexel--session-id sid
           rexel--block-id bid
           rexel--requested-size nil
+          rexel--size-take nil
+          rexel--size-inflight nil
           rexel--out-pending nil
           rexel--out-inflight nil
           ghostel--pty-out-function #'rexel--pty-out)
     (rexel-block-mode 1)
-    (add-hook 'window-size-change-functions #'rexel--window-changed nil t)
-    (add-hook 'window-buffer-change-functions #'rexel--window-changed nil t)
+    (add-hook 'window-size-change-functions #'rexel--window-resized nil t)
+    (add-hook 'window-buffer-change-functions #'rexel--window-shown nil t)
     (add-hook 'kill-buffer-hook #'rexel--block-buffer-killed nil t)
     (rexel--open-data-connection conn buf))
   buf)
@@ -570,7 +578,7 @@ holding a u16 tag and a u32 payload length, until the FINISH tag."
         (ghostel--invalidate)
         (when (> (length pending) consumed)
           (rexel--on-live-bytes (substring pending consumed)))
-        (rexel--sync-size)))))
+        (rexel--sync-size t)))))
 
 (defun rexel--marker-prefix-length (data marker)
   "Return how many trailing bytes of DATA are a proper prefix of MARKER."
@@ -646,32 +654,67 @@ must be prepended to the next chunk."
               (size (window-adjust-process-window-size-smallest nil windows)))
     (and (> (car size) 0) (> (cdr size) 0) size)))
 
-(defun rexel--sync-size ()
-  "Ask the server to size this block to the windows showing it, if needed."
+(defun rexel--sync-size (&optional take)
+  "Ask the server to size this block to the windows showing it, if needed.
+With TAKE, also take ownership of the block from other clients."
   (when (and rexel--conn (eq rexel--data-state 'live))
     (let ((size (rexel--desired-size)))
-      (when (and size (not (equal size rexel--requested-size)))
-        (setq rexel--requested-size size)
-        (rexel--request-size rexel--conn rexel--session-id rexel--block-id
-                             (car size) (cdr size))))))
+      (when (and size (or take (not (equal size rexel--requested-size))))
+        (setq rexel--requested-size size
+              rexel--size-take (or take rexel--size-take))
+        (rexel--send-size (current-buffer))))))
 
-(defun rexel--window-changed (window)
-  "Sync the block size after WINDOW, showing a block buffer, changed."
+(defun rexel--window-resized (window)
+  "Sync the block size after WINDOW, showing a block buffer, changed size."
   (with-current-buffer (window-buffer window)
     (rexel--sync-size)))
 
-(defun rexel--request-size (conn sid bid cols rows)
-  "Take block BID of session SID on CONN and resize it to COLS by ROWS.
-The size applies when the server reports it back in the stream."
-  (rexel--request
-   conn "session.own_block"
-   `((session_id . ,sid) (block_ids . ,(vector bid)) (mode . "take"))
-   (lambda (_result err)
-     (if err
-         (message "rexel: session.own_block: %s" (rexel--error-string err))
-       (rexel--request conn "com.superlogical.terminal.resize"
-                       `((session_id . ,sid) (block_id . ,bid)
-                         (args . ((columns . ,cols) (rows . ,rows)))))))))
+(defun rexel--window-shown (window)
+  "Take the block and sync its size after WINDOW started showing it."
+  (with-current-buffer (window-buffer window)
+    (rexel--sync-size t)))
+
+(defun rexel--send-size (buf)
+  "Send BUF's requested size, taking the block first if asked to.
+Resizes run concurrently on the server, so one is sent at a time and
+the latest requested size follows when it completes.  The size applies
+once this client owns the block, when the server reports it in the
+stream."
+  (with-current-buffer buf
+    (unless (eq rexel--size-inflight rexel--conn)
+      (let* ((conn rexel--conn)
+             (sid rexel--session-id)
+             (bid rexel--block-id)
+             (size rexel--requested-size)
+             (take rexel--size-take)
+             (done (lambda (_result err)
+                     (when err
+                       (message "rexel: resize: %s" (rexel--error-string err)))
+                     (when (buffer-live-p buf)
+                       (with-current-buffer buf
+                         (setq rexel--size-inflight nil)
+                         (when (or rexel--size-take
+                                   (not (equal size rexel--requested-size)))
+                           (rexel--send-size buf))))))
+             (resize (lambda ()
+                       (when (buffer-live-p buf)
+                         (setq size (buffer-local-value 'rexel--requested-size buf)))
+                       (rexel--request
+                        conn "com.superlogical.terminal.resize"
+                        `((session_id . ,sid) (block_id . ,bid)
+                          (args . ((columns . ,(car size)) (rows . ,(cdr size)))))
+                        done))))
+        (setq rexel--size-take nil)
+        (if (not take)
+            (funcall resize)
+          (rexel--request
+           conn "session.own_block"
+           `((session_id . ,sid) (block_ids . ,(vector bid)) (mode . "take"))
+           (lambda (result err)
+             (if err
+                 (funcall done result err)
+               (funcall resize)))))
+        (setq rexel--size-inflight conn)))))
 
 
 ;;; Commands

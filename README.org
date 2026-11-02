@@ -40,8 +40,11 @@ In a block buffer =C-t= (=rexel-prefix-key=) prefixes:
 
 Killing a block buffer only closes the stream; the block keeps running.
 
-Emacs takes ownership of a block it displays, so the terminal is sized to
-the smallest Emacs window showing it, as a tmux client would.
+Emacs takes ownership of a block when a window starts showing it or its
+stream reconnects, so the terminal is sized to the smallest Emacs window
+showing it, as a tmux client would.  Another client such as Rex.app can
+take the block back; the terminal then follows that client's size until
+Emacs takes it again.
 
 * Development
 
