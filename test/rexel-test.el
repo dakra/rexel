@@ -167,6 +167,24 @@
     (should (eq rexel--data-state 'closed))
     (should-not rexel--stream)))
 
+(ert-deftest rexel-test-control-welcome-checks-revision ()
+  (pcase-dolist (`(,protocol ,revision ,ok)
+                 '(("rex.control.v1" 8 t) ("rex.control.v1" 7 nil)
+                   ("rex.control.v1" nil nil) ("other" 8 nil)))
+    (let ((conn (rexel--make-conn :socket "none"))
+          (ready nil)
+          (closed nil))
+      (push (lambda (_conn) (setq ready t)) (rexel--conn-on-ready conn))
+      (cl-letf (((symbol-function 'websocket-close)
+                 (lambda (_ws) (setq closed t))))
+        (rexel--on-control-message
+         conn (json-serialize
+               `((type . "welcome") (protocol . ,protocol)
+                 ,@(when revision `((api_revision . ,revision)))))))
+      (should (eq ready ok))
+      (should (eq closed (not ok)))
+      (should (eq (and (rexel--conn-client-id conn) t) ok)))))
+
 (defmacro rexel-test--with-fake-conn (sent &rest body)
   "Run BODY with a fake connection whose sent objects collect in SENT."
   (declare (indent 1))

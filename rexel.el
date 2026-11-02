@@ -206,13 +206,19 @@ Without CALLBACK an error is shown as a message."
   (let ((msg (rexel--parse-json text)))
     (pcase (alist-get 'type msg)
       ("welcome"
-       (unless (equal (alist-get 'protocol msg) "rex.control.v1")
-         (message "rexel: unexpected control protocol %s" (alist-get 'protocol msg)))
-       (setf (rexel--conn-client-id conn)
-             (or (alist-get 'id (alist-get 'client msg)) t))
-       (let ((callbacks (nreverse (rexel--conn-on-ready conn))))
-         (setf (rexel--conn-on-ready conn) nil)
-         (dolist (callback callbacks) (funcall callback conn))))
+       (let ((protocol (alist-get 'protocol msg))
+             (revision (or (alist-get 'api_revision msg) 0)))
+         (if (not (and (equal protocol "rex.control.v1")
+                       (eql revision rexel--api-revision)))
+             (progn
+               (websocket-close (rexel--conn-ws conn))
+               (message "rexel: server speaks %s revision %s, rexel needs %s revision %d; update Rex"
+                        protocol revision "rex.control.v1" rexel--api-revision))
+           (setf (rexel--conn-client-id conn)
+                 (or (alist-get 'id (alist-get 'client msg)) t))
+           (let ((callbacks (nreverse (rexel--conn-on-ready conn))))
+             (setf (rexel--conn-on-ready conn) nil)
+             (dolist (callback callbacks) (funcall callback conn))))))
       ("response"
        (let* ((id (alist-get 'id msg))
               (callback (gethash id (rexel--conn-pending conn))))
