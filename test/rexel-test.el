@@ -185,6 +185,23 @@
       (should (eq closed (not ok)))
       (should (eq (and (rexel--conn-client-id conn) t) ok)))))
 
+(ert-deftest rexel-test-apply-view-renames-on-label-change ()
+  (let* ((conn (rexel--make-conn :socket "none"))
+         (buf (generate-new-buffer "rexel-test"))
+         (view '((label . "work")
+                 (windows . [((layers . [((blocks . [((block_id . "block:123456")
+                                                      (creator_name . "com.superlogical.terminal"))]))]))]))))
+    (with-current-buffer buf
+      (setq rexel--session-id "label-test" rexel--block-id "block:123456"))
+    (puthash "block:123456" buf (rexel--conn-blocks conn))
+    (unwind-protect
+        (progn
+          (rexel--apply-view conn "label-test" view)
+          (should (equal "*rex:work:123456*" (buffer-name buf)))
+          (rexel--apply-view conn "label-test" `((label . "play") ,@(cdr view)))
+          (should (equal "*rex:play:123456*" (buffer-name buf))))
+      (kill-buffer buf))))
+
 (defmacro rexel-test--with-fake-conn (sent &rest body)
   "Run BODY with a fake connection whose sent objects collect in SENT."
   (declare (indent 1))

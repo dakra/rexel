@@ -240,7 +240,9 @@ Its block buffers stay for reading; `rexel-attach' reuses them."
   (message "rexel: control connection to %s closed" (rexel--conn-socket conn)))
 
 (defun rexel--on-event (conn event)
-  "Handle EVENT received on CONN."
+  "Handle EVENT received on CONN.
+Handlers must tolerate events that arrive before the `session.attach'
+response or repeat a change the view already has."
   (let ((payload (alist-get 'payload event)))
     (pcase (alist-get 'type event)
       ("session_event"
@@ -361,8 +363,12 @@ already applied is ignored."
         (pcase-dolist (`(,bid . ,_) blocks)
           (rexel--ensure-block-buffer conn sid bid))
         (dolist (buf (rexel--session-buffers conn sid))
-          (unless (assoc (buffer-local-value 'rexel--block-id buf) blocks)
-            (kill-buffer buf)))))))
+          (with-current-buffer buf
+            (if (not (assoc rexel--block-id blocks))
+                (kill-buffer buf)
+              (let ((name (rexel--buffer-name conn sid rexel--block-id)))
+                (unless (equal name (buffer-name))
+                  (rename-buffer name t))))))))))
 
 (defun rexel--buffer-name (conn sid bid)
   "Return the buffer name for block BID of session SID on CONN."
