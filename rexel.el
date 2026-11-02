@@ -299,26 +299,20 @@ Its block buffers stay for reading; `rexel-attach' reuses them."
 (defvar-local rexel--block-id nil
   "ID of the Rex block shown in this buffer.")
 
-(defvar-local rexel--data-ws nil
-  "WebSocket streaming this block's terminal.")
+(cl-defstruct (rexel--stream (:constructor rexel--make-stream) (:copier nil))
+  "One data connection streaming a block's terminal.
+WS is its WebSocket and MARKER the prefix of its control messages,
+including the channel nonce.  SNAPSHOT holds the complete snapshot chunks
+received so far and TAIL the chunks of the incomplete record after them,
+both newest first; TAIL is walked again once it holds NEED bytes.
+PENDING holds live bytes that may begin a control message."
+  ws marker snapshot tail (need 10) (pending ""))
+
+(defvar-local rexel--stream nil
+  "This block's current `rexel--stream', or nil.")
 
 (defvar-local rexel--data-state nil
   "Where the data connection is: `welcome', `snapshot', `live' or `closed'.")
-
-(defvar-local rexel--pending ""
-  "Live stream bytes not yet consumed: a partial control message.")
-
-(defvar-local rexel--snapshot nil
-  "The complete snapshot chunks received so far, newest first.")
-
-(defvar-local rexel--snapshot-tail nil
-  "Chunks of the incomplete snapshot record, newest first.")
-
-(defvar-local rexel--snapshot-need 10
-  "Bytes `rexel--snapshot-tail' needs before it is walked again.")
-
-(defvar-local rexel--marker nil
-  "Prefix of this stream's control messages, including the channel nonce.")
 
 (defvar-local rexel--requested-size nil
   "Last (COLS . ROWS) requested from the server for this block.")
@@ -414,9 +408,7 @@ A buffer whose stream ended earlier is reset and streamed again."
 The block itself keeps running on the server."
   (when rexel--conn
     (remhash rexel--block-id (rexel--conn-blocks rexel--conn)))
-  (setq rexel--data-state 'closed)
-  (when rexel--data-ws
-    (ignore-errors (websocket-close rexel--data-ws))))
+  (rexel--close-stream))
 
 (defun rexel--pty-out (data)
   "Type DATA, bytes from ghostel's key encoder, into this block.
@@ -470,14 +462,12 @@ at a time and bytes typed meanwhile are coalesced into the next."
         (err (rexel--data-failed buf (format "data.connect: %s"
                                              (rexel--error-string err))))
         ((buffer-live-p buf)
-         (let ((ticket (base64-decode-string (alist-get 'ticket result) t)))
+         (let ((ticket (base64-decode-string (alist-get 'ticket result) t))
+               (stream (rexel--make-stream)))
            (with-current-buffer buf
              (setq rexel--data-state 'welcome
-                   rexel--pending ""
-                   rexel--snapshot nil
-                   rexel--snapshot-tail nil
-                   rexel--snapshot-need 10)
-             (setq rexel--data-ws
+                   rexel--stream stream)
+             (setf (rexel--stream-ws stream)
                    (rexel--ws-open
                     (rexel--conn-socket conn) "ws://rex/api/data"
                     "rex.data.terminal.v1"
@@ -487,14 +477,21 @@ at a time and bytes typed meanwhile are coalesced into the next."
                                           :payload (concat "\x01" ticket)
                                           :completep t)))
                     (lambda (_ws frame)
-                      (rexel--on-data buf (websocket-frame-payload frame)))
-                    (lambda (_ws) (rexel--on-data-close buf))))))))))))
+                      (rexel--on-data buf stream (websocket-frame-payload frame)))
+                    (lambda (_ws) (rexel--on-data-close buf stream))))))))))))
+
+(defun rexel--close-stream ()
+  "Mark this buffer's stream closed and close its WebSocket."
+  (setq rexel--data-state 'closed)
+  (when rexel--stream
+    (ignore-errors (websocket-close (rexel--stream-ws rexel--stream)))
+    (setq rexel--stream nil)))
 
 (defun rexel--data-failed (buf reason)
   "Mark BUF's stream as failed for REASON."
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (setq rexel--data-state 'closed)
+      (rexel--close-stream)
       (message "rexel: %s: %s" (buffer-name) reason))))
 
 (defun rexel--end-stream (buf reason)
@@ -502,22 +499,17 @@ at a time and bytes typed meanwhile are coalesced into the next."
   (when (and (buffer-live-p buf)
              (not (eq (buffer-local-value 'rexel--data-state buf) 'closed)))
     (with-current-buffer buf
-      (setq rexel--data-state 'closed
-            rexel--pending ""
-            rexel--snapshot nil
-            rexel--snapshot-tail nil)
-      (when rexel--data-ws
-        (ignore-errors (websocket-close rexel--data-ws)))
+      (rexel--close-stream)
       (when ghostel--term
         (ghostel--write-vt ghostel--term (format "\r\n[rexel: %s]\r\n" reason))
         (ghostel--invalidate)))))
 
-(defun rexel--on-data-close (buf)
-  "Note that BUF's data connection closed.
+(defun rexel--on-data-close (buf stream)
+  "Note that BUF's data connection STREAM closed.
 While the control connection is up and the block still exists, the
 next view refresh streams the block into BUF again."
   (when (and (buffer-live-p buf)
-             (not (eq (buffer-local-value 'rexel--data-state buf) 'closed)))
+             (eq stream (buffer-local-value 'rexel--stream buf)))
     (rexel--end-stream buf "stream closed")
     (with-current-buffer buf
       (when (and rexel--conn (websocket-openp (rexel--conn-ws rexel--conn))
@@ -525,11 +517,11 @@ next view refresh streams the block into BUF again."
         (remhash rexel--block-id (rexel--conn-blocks rexel--conn))
         (rexel--schedule-view-refresh rexel--conn rexel--session-id)))))
 
-(defun rexel--on-data (buf bytes)
-  "Handle BYTES, one binary message of BUF's data connection."
+(defun rexel--on-data (buf stream bytes)
+  "Handle BYTES, one binary message of BUF's data connection STREAM."
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (pcase rexel--data-state
+      (pcase (and (eq stream rexel--stream) rexel--data-state)
         ('welcome (rexel--on-welcome bytes))
         ('snapshot (rexel--on-snapshot-bytes bytes))
         ('live (rexel--on-live-bytes bytes))))))
@@ -545,8 +537,9 @@ next view refresh streams the block into BUF again."
   "Read the data handshake answer BYTES."
   (cond
    ((and (>= (length bytes) 32) (= (aref bytes 0) #x81))
-    (setq rexel--marker (format "\e_rex1;%d;" (rexel--u64le bytes 24))
-          rexel--data-state 'snapshot)
+    (setf (rexel--stream-marker rexel--stream)
+          (format "\e_rex1;%d;" (rexel--u64le bytes 24)))
+    (setq rexel--data-state 'snapshot)
     (when (> (length bytes) 32)
       (rexel--on-snapshot-bytes (substring bytes 32))))
    ((and (>= (length bytes) 2) (= (aref bytes 0) #x82))
@@ -561,11 +554,11 @@ next view refresh streams the block into BUF again."
 (defun rexel--snapshot-walk (bytes pos)
   "Walk the snapshot records in BYTES from the record header at POS.
 A header is 10 bytes: a u16 tag and a u32 payload length, then a CRC.
-Return (t END) when the FINISH record ends at END.  Otherwise return
-\(nil END NEED): END is the start of the first incomplete record and
-NEED the bytes from END that complete it, or its header if that is
-cut off.  Signal an error on a record longer than
-`rexel--max-record-bytes'."
+Return (t END) when the FINISH record ends at END.
+Otherwise return \(nil END NEED): END is the start of the first
+incomplete record and NEED the bytes from END that complete it,
+or its header if that is cut off.
+Signal an error on a record longer than `rexel--max-record-bytes'."
   (let ((len (length bytes)))
     (catch 'done
       (while t
@@ -585,37 +578,36 @@ cut off.  Signal an error on a record longer than
           (setq pos next))))))
 
 (defun rexel--on-snapshot-bytes (bytes)
-  "Collect snapshot BYTES and restore the terminal once it is complete.
-Complete records collect in `rexel--snapshot'.  Chunks of the
-incomplete record after them collect in `rexel--snapshot-tail' and
-are walked again once `rexel--snapshot-need' bytes have arrived."
-  (push bytes rexel--snapshot-tail)
-  (when (>= (apply #'+ (mapcar #'length rexel--snapshot-tail))
-            rexel--snapshot-need)
-    (let* ((data (apply #'concat (nreverse rexel--snapshot-tail)))
-           (walk (if (and (null rexel--snapshot)
-                          (not (string-prefix-p "GHOSTSNP" data)))
-                     "stream is not a terminal snapshot"
-                   (condition-case err
-                       (rexel--snapshot-walk data (if rexel--snapshot 0 10))
-                     (error (error-message-string err))))))
-      (if (stringp walk)
-          (rexel--end-stream (current-buffer) walk)
-        (pcase-let ((`(,finished ,end ,need) walk))
-          (when (> end 0)
-            (push (substring data 0 end) rexel--snapshot))
-          (setq rexel--snapshot-tail (list (substring data end))
-                rexel--snapshot-need need)
-          (when finished
-            (rexel--restore-snapshot)))))))
+  "Collect snapshot BYTES and restore the terminal once it is complete."
+  (let ((s rexel--stream))
+    (push bytes (rexel--stream-tail s))
+    (when (>= (apply #'+ (mapcar #'length (rexel--stream-tail s)))
+              (rexel--stream-need s))
+      (let* ((data (apply #'concat (nreverse (rexel--stream-tail s))))
+             (first (null (rexel--stream-snapshot s)))
+             (walk (if (and first (not (string-prefix-p "GHOSTSNP" data)))
+                       "stream is not a terminal snapshot"
+                     (condition-case err
+                         (rexel--snapshot-walk data (if first 10 0))
+                       (error (error-message-string err))))))
+        (if (stringp walk)
+            (rexel--end-stream (current-buffer) walk)
+          (pcase-let ((`(,finished ,end ,need) walk))
+            (when (> end 0)
+              (push (substring data 0 end) (rexel--stream-snapshot s)))
+            (setf (rexel--stream-tail s) (list (substring data end))
+                  (rexel--stream-need s) need)
+            (when finished
+              (rexel--restore-snapshot))))))))
 
 (defun rexel--restore-snapshot ()
   "Restore the collected snapshot and go live with the bytes after it."
-  (let ((snapshot (apply #'concat (nreverse rexel--snapshot)))
-        (rest (car rexel--snapshot-tail))
-        (term ghostel--term))
-    (setq rexel--snapshot nil
-          rexel--snapshot-tail nil)
+  (let* ((s rexel--stream)
+         (snapshot (apply #'concat (nreverse (rexel--stream-snapshot s))))
+         (rest (car (rexel--stream-tail s)))
+         (term ghostel--term))
+    (setf (rexel--stream-snapshot s) nil
+          (rexel--stream-tail s) nil)
     (condition-case err
         (progn
           (ghostel--restore-snapshot term snapshot)
@@ -677,9 +669,11 @@ after `rexel--max-message-bytes' passes through as output."
 
 (defun rexel--on-live-bytes (bytes)
   "Feed stream BYTES to the terminal, applying embedded control messages."
-  (pcase-let ((`(,items . ,pending)
-               (rexel--split-stream (concat rexel--pending bytes) rexel--marker)))
-    (setq rexel--pending pending)
+  (pcase-let* ((s rexel--stream)
+               (`(,items . ,pending)
+                (rexel--split-stream (concat (rexel--stream-pending s) bytes)
+                                     (rexel--stream-marker s))))
+    (setf (rexel--stream-pending s) pending)
     (dolist (item items)
       (if (consp item)
           (rexel--handle-message (cdr item))
@@ -737,8 +731,7 @@ With TAKE, also take ownership of the block from other clients."
   "Send BUF's requested size, taking the block first if asked to.
 Resizes run concurrently on the server, so one is sent at a time and
 the latest requested size follows when it completes.  The size applies
-once this client owns the block, when the server reports it in the
-stream."
+once this client owns the block, when the server reports it in the stream."
   (with-current-buffer buf
     (unless (eq rexel--size-inflight rexel--conn)
       (let* ((conn rexel--conn)

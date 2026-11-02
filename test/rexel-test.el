@@ -52,7 +52,7 @@
   (with-temp-buffer
     (let ((stream (concat rexel-test--snapshot "live"))
           restored live)
-      (setq rexel--data-state 'snapshot)
+      (setq rexel--data-state 'snapshot rexel--stream (rexel--make-stream))
       (cl-letf (((symbol-function 'ghostel--restore-snapshot)
                  (lambda (_term s) (setq restored s)))
                 ((symbol-function 'ghostel--apply-palette) #'ignore)
@@ -69,26 +69,25 @@
 
 (ert-deftest rexel-test-snapshot-rejects-other-streams ()
   (with-temp-buffer
-    (setq rexel--data-state 'snapshot)
+    (setq rexel--data-state 'snapshot rexel--stream (rexel--make-stream))
     (rexel--on-snapshot-bytes "not a snapshot at all")
     (should (eq 'closed rexel--data-state))
-    (should-not rexel--snapshot-tail)))
+    (should-not rexel--stream)))
 
 (ert-deftest rexel-test-snapshot-ends-on-oversized-record ()
   (with-temp-buffer
-    (setq rexel--data-state 'snapshot)
+    (setq rexel--data-state 'snapshot rexel--stream (rexel--make-stream))
     (rexel--on-snapshot-bytes (substring rexel-test--snapshot 0 100))
-    (should rexel--snapshot)
+    (should (rexel--stream-snapshot rexel--stream))
     (rexel--on-snapshot-bytes
      (concat (substring rexel-test--snapshot 100 320)
              (unibyte-string 1 0 0 0 0 #x20 0 0 0 0)))
     (should (eq 'closed rexel--data-state))
-    (should-not rexel--snapshot)
-    (should-not rexel--snapshot-tail)))
+    (should-not rexel--stream)))
 
 (ert-deftest rexel-test-snapshot-restore-failure-ends-stream ()
   (with-temp-buffer
-    (setq rexel--data-state 'snapshot)
+    (setq rexel--data-state 'snapshot rexel--stream (rexel--make-stream))
     (cl-letf (((symbol-function 'ghostel--restore-snapshot)
                (lambda (&rest _) (error "Bad CRC"))))
       (rexel--on-snapshot-bytes rexel-test--snapshot))
@@ -139,24 +138,34 @@
     (should (equal (cons nil data)
                    (rexel--split-stream data rexel-test--marker)))))
 
+(ert-deftest rexel-test-old-stream-is-ignored ()
+  (with-temp-buffer
+    (let ((stream (rexel--make-stream)))
+      (setq rexel--data-state 'snapshot rexel--stream stream)
+      (rexel--on-data (current-buffer) (rexel--make-stream) "not a snapshot at all")
+      (rexel--on-data-close (current-buffer) (rexel--make-stream))
+      (should (eq 'snapshot rexel--data-state))
+      (should (eq stream rexel--stream)))))
+
 (ert-deftest rexel-test-u64le ()
   (should (= 1 (rexel--u64le (unibyte-string 1 0 0 0 0 0 0 0) 0)))
   (should (= (ash 1 56) (rexel--u64le (unibyte-string 9 0 0 0 0 0 0 0 1) 1))))
 
 (ert-deftest rexel-test-welcome-reads-nonce ()
   (with-temp-buffer
-    (setq rexel--data-state 'welcome)
+    (setq rexel--data-state 'welcome rexel--stream (rexel--make-stream))
     (rexel--on-welcome (concat (unibyte-string #x81) (make-string 16 ?t)
                                (unibyte-string 0 0 0 1 0 0 0)
                                (unibyte-string 2 1 0 0 0 0 0 0)))
     (should (eq rexel--data-state 'snapshot))
-    (should (equal "\e_rex1;258;" rexel--marker))))
+    (should (equal "\e_rex1;258;" (rexel--stream-marker rexel--stream)))))
 
 (ert-deftest rexel-test-welcome-reject ()
   (with-temp-buffer
-    (setq rexel--data-state 'welcome)
+    (setq rexel--data-state 'welcome rexel--stream (rexel--make-stream))
     (rexel--on-welcome (unibyte-string #x82 3))
-    (should (eq rexel--data-state 'closed))))
+    (should (eq rexel--data-state 'closed))
+    (should-not rexel--stream)))
 
 (defmacro rexel-test--with-fake-conn (sent &rest body)
   "Run BODY with a fake connection whose sent objects collect in SENT."
