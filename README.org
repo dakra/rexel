@@ -1,0 +1,49 @@
+#+TITLE: rexel
+
+Rex multiplexer client for Emacs, built on [[https://github.com/dakra/ghostel][ghostel]].
+
+[[https://www.superlogical.com/rex][Rex]] streams each terminal to its clients as a libghostty snapshot
+followed by the raw PTY bytes.  ghostel runs libghostty, so rexel feeds
+that stream straight into a ghostel buffer: scrollback, search, copy mode
+and key encoding work as in a local terminal, and the session keeps
+running on the Rex server when Emacs goes away.
+
+Prototype status: attaching, typing, resizing and the basic layout
+commands work against a local Rex server.  Reconnecting after a dropped
+connection, remote servers and theme sync are not implemented.
+
+* Requirements
+
+- A running Rex server (the Rex app on macOS, or =rex server= on Linux).
+- ghostel 0.60.0 or later with a native module built from a source that
+  has =ghostel--restore-snapshot=.
+- [[https://github.com/ahyatt/emacs-websocket][websocket]] 1.15 or later.
+- Emacs with native JSON support (=json-serialize=): built in since Emacs 30,
+  libjansson on 28 and 29.
+
+* Usage
+
+=M-x rexel-attach= lists the server's sessions and opens one ghostel buffer
+per terminal block.  The server socket comes from =rex server status= when
+=rexel-program= is on =exec-path=; set =rexel-server-socket= otherwise.
+
+In a block buffer =C-t= (=rexel-prefix-key=) prefixes:
+
+| Key   | Command                                  |
+|-------+------------------------------------------|
+| =%=   | =rexel-split=, new shell to the right    |
+| ="=   | =rexel-split-below=                      |
+| =c=   | =rexel-new-window=                       |
+| =x=   | =rexel-close-block=, ends the program    |
+| =d=   | =rexel-detach=, keeps the session running|
+| =C-t= | send =C-t= to the terminal               |
+
+Killing a block buffer only closes the stream; the block keeps running.
+
+Emacs takes ownership of a block it displays, so the terminal is sized to
+the smallest Emacs window showing it, as a tmux client would.
+
+* Development
+
+=make= byte-compiles, runs the tests and lints.  The tests cover the stream
+parsing; everything else needs a live server.
