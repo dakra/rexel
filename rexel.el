@@ -306,7 +306,16 @@ Its block buffers stay for reading; `rexel-attach' reuses them."
   "Where the data connection is: `welcome', `snapshot', `live' or `closed'.")
 
 (defvar-local rexel--pending ""
-  "Stream bytes not yet consumed: the snapshot so far, or a partial message.")
+  "Live stream bytes not yet consumed: a partial control message.")
+
+(defvar-local rexel--snapshot nil
+  "The complete snapshot chunks received so far, newest first.")
+
+(defvar-local rexel--snapshot-tail nil
+  "Chunks of the incomplete snapshot record, newest first.")
+
+(defvar-local rexel--snapshot-need 10
+  "Bytes `rexel--snapshot-tail' needs before it is walked again.")
 
 (defvar-local rexel--marker nil
   "Prefix of this stream's control messages, including the channel nonce.")
@@ -464,7 +473,10 @@ at a time and bytes typed meanwhile are coalesced into the next."
          (let ((ticket (base64-decode-string (alist-get 'ticket result) t)))
            (with-current-buffer buf
              (setq rexel--data-state 'welcome
-                   rexel--pending "")
+                   rexel--pending ""
+                   rexel--snapshot nil
+                   rexel--snapshot-tail nil
+                   rexel--snapshot-need 10)
              (setq rexel--data-ws
                    (rexel--ws-open
                     (rexel--conn-socket conn) "ws://rex/api/data"
@@ -490,7 +502,10 @@ at a time and bytes typed meanwhile are coalesced into the next."
   (when (and (buffer-live-p buf)
              (not (eq (buffer-local-value 'rexel--data-state buf) 'closed)))
     (with-current-buffer buf
-      (setq rexel--data-state 'closed)
+      (setq rexel--data-state 'closed
+            rexel--pending ""
+            rexel--snapshot nil
+            rexel--snapshot-tail nil)
       (when rexel--data-ws
         (ignore-errors (websocket-close rexel--data-ws)))
       (when ghostel--term
@@ -540,45 +555,85 @@ next view refresh streams the block into BUF again."
                                 (aref bytes 1))))
    (t (rexel--data-failed (current-buffer) "malformed data handshake"))))
 
-(defun rexel--snapshot-end (bytes)
-  "Return the length of the snapshot at the start of BYTES, or nil if incomplete.
-Walks the 10-byte envelope and the 10-byte record headers, each
-holding a u16 tag and a u32 payload length, until the FINISH tag."
-  (let ((len (length bytes))
-        (pos 10))
-    (catch 'end
-      (while (<= (+ pos 10) len)
-        (let ((tag (logior (aref bytes pos) (ash (aref bytes (1+ pos)) 8)))
-              (payload-len (logior (aref bytes (+ pos 2))
-                                   (ash (aref bytes (+ pos 3)) 8)
-                                   (ash (aref bytes (+ pos 4)) 16)
-                                   (ash (aref bytes (+ pos 5)) 24))))
-          (setq pos (+ pos 10 payload-len))
-          (when (= tag 6)
-            (throw 'end (and (<= pos len) pos))))))))
+(defconst rexel--max-record-bytes (ash 1 28)
+  "Snapshot records claiming more bytes than this end the stream.")
+
+(defun rexel--snapshot-walk (bytes pos)
+  "Walk the snapshot records in BYTES from the record header at POS.
+A header is 10 bytes: a u16 tag and a u32 payload length, then a CRC.
+Return (t END) when the FINISH record ends at END.  Otherwise return
+\(nil END NEED): END is the start of the first incomplete record and
+NEED the bytes from END that complete it, or its header if that is
+cut off.  Signal an error on a record longer than
+`rexel--max-record-bytes'."
+  (let ((len (length bytes)))
+    (catch 'done
+      (while t
+        (when (> (+ pos 10) len)
+          (throw 'done (list nil pos 10)))
+        (let* ((payload-len (logior (aref bytes (+ pos 2))
+                                    (ash (aref bytes (+ pos 3)) 8)
+                                    (ash (aref bytes (+ pos 4)) 16)
+                                    (ash (aref bytes (+ pos 5)) 24)))
+               (next (+ pos 10 payload-len)))
+          (when (> payload-len rexel--max-record-bytes)
+            (error "Snapshot record of %d bytes" payload-len))
+          (when (> next len)
+            (throw 'done (list nil pos (- next pos))))
+          (when (= 6 (logior (aref bytes pos) (ash (aref bytes (1+ pos)) 8)))
+            (throw 'done (list t next)))
+          (setq pos next))))))
 
 (defun rexel--on-snapshot-bytes (bytes)
-  "Collect snapshot BYTES and restore the terminal once it is complete."
-  ;; Chunks are 64 KiB and snapshots a few MiB, so re-walking the
-  ;; headers on every chunk is cheap enough.
-  (setq rexel--pending (concat rexel--pending bytes))
-  (when (and (>= (length rexel--pending) 8)
-             (not (string-prefix-p "GHOSTSNP" rexel--pending)))
-    (setq rexel--pending "")
-    (rexel--end-stream (current-buffer) "stream is not a terminal snapshot"))
-  (when (rexel--snapshot-end rexel--pending)
-    (let ((pending rexel--pending)
-          (term ghostel--term))
-      (setq rexel--pending ""
-            rexel--data-state 'live)
-      (let ((consumed (ghostel--restore-snapshot term pending)))
-        (ghostel--apply-palette term)
-        (ghostel--apply-bold-config term)
-        (setq ghostel--force-next-redraw t)
-        (ghostel--invalidate)
-        (when (> (length pending) consumed)
-          (rexel--on-live-bytes (substring pending consumed)))
-        (rexel--sync-size t)))))
+  "Collect snapshot BYTES and restore the terminal once it is complete.
+Complete records collect in `rexel--snapshot'.  Chunks of the
+incomplete record after them collect in `rexel--snapshot-tail' and
+are walked again once `rexel--snapshot-need' bytes have arrived."
+  (push bytes rexel--snapshot-tail)
+  (when (>= (apply #'+ (mapcar #'length rexel--snapshot-tail))
+            rexel--snapshot-need)
+    (let* ((data (apply #'concat (nreverse rexel--snapshot-tail)))
+           (walk (if (and (null rexel--snapshot)
+                          (not (string-prefix-p "GHOSTSNP" data)))
+                     "stream is not a terminal snapshot"
+                   (condition-case err
+                       (rexel--snapshot-walk data (if rexel--snapshot 0 10))
+                     (error (error-message-string err))))))
+      (if (stringp walk)
+          (rexel--end-stream (current-buffer) walk)
+        (pcase-let ((`(,finished ,end ,need) walk))
+          (when (> end 0)
+            (push (substring data 0 end) rexel--snapshot))
+          (setq rexel--snapshot-tail (list (substring data end))
+                rexel--snapshot-need need)
+          (when finished
+            (rexel--restore-snapshot)))))))
+
+(defun rexel--restore-snapshot ()
+  "Restore the collected snapshot and go live with the bytes after it."
+  (let ((snapshot (apply #'concat (nreverse rexel--snapshot)))
+        (rest (car rexel--snapshot-tail))
+        (term ghostel--term))
+    (setq rexel--snapshot nil
+          rexel--snapshot-tail nil)
+    (condition-case err
+        (progn
+          (ghostel--restore-snapshot term snapshot)
+          (setq rexel--data-state 'live))
+      (error (rexel--end-stream (current-buffer)
+                                (format "bad snapshot: %s"
+                                        (error-message-string err)))))
+    (when (eq rexel--data-state 'live)
+      (ghostel--apply-palette term)
+      (ghostel--apply-bold-config term)
+      (setq ghostel--force-next-redraw t)
+      (ghostel--invalidate)
+      (when (> (length rest) 0)
+        (rexel--on-live-bytes rest))
+      (rexel--sync-size t))))
+
+(defconst rexel--max-message-bytes 65536
+  "Longest stream control message held back waiting for its end.")
 
 (defun rexel--marker-prefix-length (data marker)
   "Return how many trailing bytes of DATA are a proper prefix of MARKER."
@@ -592,7 +647,8 @@ holding a u16 tag and a u32 payload length, until the FINISH tag."
 MARKER introduces a control message, which ends at ST.  Returns
 \(ITEMS . PENDING): ITEMS are output strings and (message . JSON)
 conses in order; PENDING is the tail that may begin a message and
-must be prepended to the next chunk."
+must be prepended to the next chunk.  A message still unterminated
+after `rexel--max-message-bytes' passes through as output."
   (let ((start 0)
         (len (length data))
         (pending "")
@@ -609,8 +665,11 @@ must be prepended to the next chunk."
             (push (substring data start pos) items))
           (let ((end (string-search "\e\\" data (+ pos (length marker)))))
             (if (null end)
-                (setq pending (substring data pos)
-                      start len)
+                (progn
+                  (if (> (- len pos) rexel--max-message-bytes)
+                      (push (substring data pos) items)
+                    (setq pending (substring data pos)))
+                  (setq start len))
               (push (cons 'message (substring data (+ pos (length marker)) end))
                     items)
               (setq start (+ end 2)))))))

@@ -29,17 +29,70 @@
           (rexel-test--record 6 ""))
   "A fake snapshot: envelope, one 300-byte record, READY, FINISH.")
 
-(ert-deftest rexel-test-snapshot-end ()
-  (should (= (length rexel-test--snapshot)
-             (rexel--snapshot-end rexel-test--snapshot)))
-  (should (= (length rexel-test--snapshot)
-             (rexel--snapshot-end (concat rexel-test--snapshot "live bytes"))))
-  (should-not (rexel--snapshot-end (substring rexel-test--snapshot 0 100)))
-  ;; FINISH header seen but a byte short of complete.
-  (should-not (rexel--snapshot-end
-               (substring rexel-test--snapshot 0 -1)))
-  (should-not (rexel--snapshot-end "GHOST"))
-  (should-not (rexel--snapshot-end "not a snapshot at all")))
+(ert-deftest rexel-test-snapshot-walk ()
+  (let ((len (length rexel-test--snapshot)))
+    (should (equal (list t len) (rexel--snapshot-walk rexel-test--snapshot 10)))
+    (should (equal (list t len) (rexel--snapshot-walk
+                                 (concat rexel-test--snapshot "live bytes") 10)))
+    ;; Stops at the start of the incomplete 300-byte record.
+    (should (equal '(nil 10 310) (rexel--snapshot-walk
+                                  (substring rexel-test--snapshot 0 100) 10)))
+    ;; Its header is cut off.
+    (should (equal '(nil 10 10) (rexel--snapshot-walk
+                                 (substring rexel-test--snapshot 0 15) 10)))
+    ;; FINISH header seen but a byte short of complete.
+    (should (equal (list nil (- len 10) 10)
+                   (rexel--snapshot-walk (substring rexel-test--snapshot 0 -1) 10)))
+    (should-error (rexel--snapshot-walk
+                   (concat (make-string 10 ?e) (rexel-test--record 1 "")
+                           (unibyte-string 1 0 0 0 0 #x20 0 0 0 0))
+                   20))))
+
+(ert-deftest rexel-test-snapshot-in-chunks ()
+  (with-temp-buffer
+    (let ((stream (concat rexel-test--snapshot "live"))
+          restored live)
+      (setq rexel--data-state 'snapshot)
+      (cl-letf (((symbol-function 'ghostel--restore-snapshot)
+                 (lambda (_term s) (setq restored s)))
+                ((symbol-function 'ghostel--apply-palette) #'ignore)
+                ((symbol-function 'ghostel--apply-bold-config) #'ignore)
+                ((symbol-function 'ghostel--invalidate) #'ignore)
+                ((symbol-function 'rexel--sync-size) #'ignore)
+                ((symbol-function 'rexel--on-live-bytes)
+                 (lambda (b) (setq live b))))
+        (dolist (range '((0 . 5) (5 . 50) (50 . 320) (320 . 335) (335 . nil)))
+          (rexel--on-snapshot-bytes (substring stream (car range) (cdr range))))
+        (should (equal rexel-test--snapshot restored))
+        (should (equal "live" live))
+        (should (eq 'live rexel--data-state))))))
+
+(ert-deftest rexel-test-snapshot-rejects-other-streams ()
+  (with-temp-buffer
+    (setq rexel--data-state 'snapshot)
+    (rexel--on-snapshot-bytes "not a snapshot at all")
+    (should (eq 'closed rexel--data-state))
+    (should-not rexel--snapshot-tail)))
+
+(ert-deftest rexel-test-snapshot-ends-on-oversized-record ()
+  (with-temp-buffer
+    (setq rexel--data-state 'snapshot)
+    (rexel--on-snapshot-bytes (substring rexel-test--snapshot 0 100))
+    (should rexel--snapshot)
+    (rexel--on-snapshot-bytes
+     (concat (substring rexel-test--snapshot 100 320)
+             (unibyte-string 1 0 0 0 0 #x20 0 0 0 0)))
+    (should (eq 'closed rexel--data-state))
+    (should-not rexel--snapshot)
+    (should-not rexel--snapshot-tail)))
+
+(ert-deftest rexel-test-snapshot-restore-failure-ends-stream ()
+  (with-temp-buffer
+    (setq rexel--data-state 'snapshot)
+    (cl-letf (((symbol-function 'ghostel--restore-snapshot)
+               (lambda (&rest _) (error "Bad CRC"))))
+      (rexel--on-snapshot-bytes rexel-test--snapshot))
+    (should (eq 'closed rexel--data-state))))
 
 (defconst rexel-test--marker "\e_rex1;42;")
 
@@ -76,6 +129,15 @@
     (should (equal '((message . "{\"type\":\"theme\"}") "y")
                    (car (rexel--split-stream (concat pending "pe\":\"theme\"}\e\\y")
                                              rexel-test--marker))))))
+
+(ert-deftest rexel-test-split-stream-passes-overlong-message ()
+  (let ((data (concat rexel-test--marker (make-string rexel--max-message-bytes ?j))))
+    (should (equal (cons (list data) "")
+                   (rexel--split-stream data rexel-test--marker)))
+    ;; At the limit it is still held back.
+    (setq data (substring data 0 rexel--max-message-bytes))
+    (should (equal (cons nil data)
+                   (rexel--split-stream data rexel-test--marker)))))
 
 (ert-deftest rexel-test-u64le ()
   (should (= 1 (rexel--u64le (unibyte-string 1 0 0 0 0 0 0 0) 0)))
