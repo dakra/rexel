@@ -217,6 +217,31 @@
       (should (eq closed (not ok)))
       (should (eq (and (rexel--conn-client-id conn) t) ok)))))
 
+(ert-deftest rexel-test-hosts-merge ()
+  (let* ((rexel-hosts '(("studio" . "/tmp/studio.sock")))
+         (local (make-temp-file "rexel"))
+         (endpoint (concat "unix://" (url-hexify-string local))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'rexel--rex-json)
+                   (lambda (&rest args)
+                     (if (equal (car args) "server")
+                         `((endpoint . ,endpoint))
+                       '((hosts . [((label . "studio") (endpoints . ["unix:///x.sock"]))
+                                   ((label . "far") (endpoints . ["far.ts.net"]))
+                                   ((label . "near")
+                                    (endpoints . ["near.ts.net" "unix:///tmp/near.sock"]))]))))))
+          (should (equal `((nil . ,local)
+                           ("studio" . "/tmp/studio.sock")
+                           ("near" . "/tmp/near.sock"))
+                         (rexel--hosts))))
+      (delete-file local))))
+
+(ert-deftest rexel-test-buffer-name-carries-host ()
+  (let ((conn (rexel--make-conn :socket "none" :host "studio")))
+    (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work")
+    (should (equal "*rex:work@studio:123456*"
+                   (rexel--buffer-name conn "s" "block:123456")))))
+
 (ert-deftest rexel-test-apply-view-renames-on-label-change ()
   (let* ((conn (rexel--make-conn :socket "none"))
          (buf (generate-new-buffer "rexel-test"))

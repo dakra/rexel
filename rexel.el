@@ -24,8 +24,9 @@
 ;; (C-t) prefixes the layout commands: `%' and `"' split, `c' opens a
 ;; window, `x' closes the block, `d' detaches.
 ;;
-;; Both connections are WebSockets on the server's Unix socket, found
-;; through `rexel-program' or `rexel-server-socket'.
+;; Both connections are WebSockets on a server's Unix socket.  Servers
+;; come from `rexel-program' and `rexel-hosts'; a remote server is
+;; reached through an ssh forward of its socket.
 
 ;;; Code:
 
@@ -45,13 +46,15 @@
   :prefix "rexel-")
 
 (defcustom rexel-program "rex"
-  "The rex command-line program, used to locate the server socket."
+  "The rex command-line program, used to find servers."
   :type 'string)
 
-(defcustom rexel-server-socket nil
-  "Path of the Rex server's Unix socket, or nil to ask `rexel-program'.
-Without the program the platform default is used."
-  :type '(choice (const :tag "Ask rex" nil) file))
+(defcustom rexel-hosts nil
+  "Rex servers to offer besides those `rexel-program' knows.
+Each entry is (LABEL . SOCKET), the Unix socket path of the server, for
+a remote server the local end of an ssh forward of its socket.  An entry
+replaces a host of the same label known to Rex."
+  :type '(alist :key-type string :value-type file))
 
 (defcustom rexel-prefix-key "C-t"
   "Prefix key for `rexel-prefix-map' in block buffers."
@@ -70,8 +73,9 @@ Without the program the platform default is used."
 ;;; Server connection
 
 (cl-defstruct (rexel--conn (:constructor rexel--make-conn))
-  "One control connection to a Rex server."
-  ws socket client-id
+  "One control connection to a Rex server.
+HOST is the server's label, nil for this machine's server."
+  ws socket host client-id
   (next-id 0)
   (pending (make-hash-table :test #'equal))
   (sessions nil)
@@ -80,23 +84,46 @@ Without the program the platform default is used."
   (on-ready nil)
   (refresh-timers nil))
 
-(defvar rexel--conn nil
-  "The current server connection, or nil.")
+(defvar rexel--conns nil
+  "Open server connections, one per host.")
 
-(defun rexel--socket-path ()
-  "Return the server's Unix socket path."
-  (or rexel-server-socket
-      (when-let* ((rex (executable-find rexel-program))
-                  (status (with-temp-buffer
-                            (when (zerop (call-process rex nil t nil
-                                                       "server" "status" "--json"))
-                              (buffer-string))))
-                  (endpoint (alist-get 'endpoint (rexel--parse-json status)))
-                  ((string-prefix-p "unix://" endpoint)))
-        (url-unhex-string (substring endpoint (length "unix://"))))
-      (if (eq system-type 'darwin)
-          (expand-file-name "~/Library/Application Support/rex/server.sock")
-        "/run/rex/server.sock")))
+(defvar-local rexel--conn nil
+  "The server connection of this block buffer.")
+
+(defun rexel--rex-json (&rest args)
+  "Return the parsed JSON output of `rexel-program' run with ARGS, or nil."
+  (when-let* ((rex (executable-find rexel-program)))
+    (with-temp-buffer
+      (when (zerop (apply #'call-process rex nil t nil
+                          "--autostart=false" "--timeout" "2s" args))
+        (ignore-errors (rexel--parse-json (buffer-string)))))))
+
+(defun rexel--unix-endpoint (endpoints)
+  "Return the socket path of the first unix:// endpoint in ENDPOINTS, or nil."
+  (seq-some (lambda (e)
+              (and (stringp e) (string-prefix-p "unix://" e)
+                   (url-unhex-string (substring e (length "unix://")))))
+            endpoints))
+
+(defun rexel--hosts ()
+  "Return the servers to attach to as (LABEL . SOCKET) pairs.
+This machine's server has label nil and is listed when its socket exists.
+Hosts without a Unix socket endpoint are left out."
+  (let ((local (or (rexel--unix-endpoint
+                    (list (alist-get 'endpoint
+                                     (rexel--rex-json "server" "status" "--json"))))
+                   (if (eq system-type 'darwin)
+                       (expand-file-name "~/Library/Application Support/rex/server.sock")
+                     "/run/rex/server.sock")))
+        (hosts (mapcar (lambda (h)
+                         (cons (alist-get 'label h)
+                               (rexel--unix-endpoint (alist-get 'endpoints h))))
+                       (alist-get 'hosts (rexel--rex-json "hosts" "list" "--json")))))
+    (append (and (file-exists-p local) (list (cons nil local)))
+            rexel-hosts
+            (seq-remove (lambda (h) (or (null (cdr h))
+                                        (assoc-string (car h) rexel-hosts t)))
+                        hosts))))
 
 (defun rexel--parse-json (string)
   "Parse JSON STRING into alists with symbol keys; null and false are nil."
@@ -172,9 +199,12 @@ Without CALLBACK an error is shown as a message."
     (rexel--send conn `((type . "request") (id . ,id) (method . ,method)
                         ,@(when payload `((payload . ,payload)))))))
 
-(defun rexel--connect (callback)
-  "Call CALLBACK with a ready connection, opening one if needed."
-  (let ((conn rexel--conn))
+(defun rexel--connect (host callback)
+  "Call CALLBACK with a ready connection to HOST, opening one if needed.
+HOST is a (LABEL . SOCKET) pair as `rexel--hosts' returns them."
+  (let* ((path (cdr host))
+         (conn (seq-find (lambda (c) (equal (rexel--conn-socket c) path))
+                         rexel--conns)))
     (cond
      ((and conn (websocket-openp (rexel--conn-ws conn))
            (rexel--conn-client-id conn))
@@ -182,25 +212,24 @@ Without CALLBACK an error is shown as a message."
      ((and conn (websocket-openp (rexel--conn-ws conn)))
       (push callback (rexel--conn-on-ready conn)))
      (t
-      (let* ((path (rexel--socket-path))
-             (conn (rexel--make-conn :socket path)))
-        (unless (file-exists-p path)
-          (user-error "Rex server socket %s does not exist" path))
-        (push callback (rexel--conn-on-ready conn))
-        (setq rexel--conn conn)
-        (setf (rexel--conn-ws conn)
-              (rexel--ws-open
-               path "ws://rex/api/control" "rex.control.v1"
-               (lambda (_ws)
-                 (rexel--send conn `((type . "hello")
-                                     (api_revision . ,rexel--api-revision)
-                                     (client . ((kind . "other")
-                                                (name . "rexel")
-                                                (version . ,(or (package-get-version)
-                                                                "unknown")))))))
-               (lambda (_ws frame)
-                 (rexel--on-control-message conn (websocket-frame-text frame)))
-               (lambda (_ws) (rexel--on-control-close conn)))))))))
+      (unless (file-exists-p path)
+        (user-error "Rex server socket %s does not exist" path))
+      (setq conn (rexel--make-conn :socket path :host (car host)))
+      (push callback (rexel--conn-on-ready conn))
+      (setf (rexel--conn-ws conn)
+            (rexel--ws-open
+             path "ws://rex/api/control" "rex.control.v1"
+             (lambda (_ws)
+               (rexel--send conn `((type . "hello")
+                                   (api_revision . ,rexel--api-revision)
+                                   (client . ((kind . "other")
+                                              (name . "rexel")
+                                              (version . ,(or (package-get-version)
+                                                              "unknown")))))))
+             (lambda (_ws frame)
+               (rexel--on-control-message conn (websocket-frame-text frame)))
+             (lambda (_ws) (rexel--on-control-close conn))))
+      (push conn rexel--conns)))))
 
 (defun rexel--on-control-message (conn text)
   "Dispatch the control message TEXT received on CONN."
@@ -231,13 +260,13 @@ Without CALLBACK an error is shown as a message."
 (defun rexel--on-control-close (conn)
   "Forget CONN after its control connection closed.
 Its block buffers stay for reading; `rexel-attach' reuses them."
-  (when (eq conn rexel--conn)
-    (setq rexel--conn nil))
+  (setq rexel--conns (delq conn rexel--conns))
   (pcase-dolist (`(,_sid . ,timer) (rexel--conn-refresh-timers conn))
     (cancel-timer timer))
-  (maphash (lambda (_bid buf)
-             (rexel--end-stream buf "control connection closed"))
-           (rexel--conn-blocks conn))
+  (dolist (buf (buffer-list))
+    (when (eq (buffer-local-value 'rexel--conn buf) conn)
+      (rexel--end-stream buf "control connection closed")
+      (with-current-buffer buf (setq rexel--conn nil))))
   (message "rexel: control connection to %s closed" (rexel--conn-socket conn)))
 
 (defun rexel--on-event (conn event)
@@ -376,8 +405,9 @@ already applied is ignored."
 
 (defun rexel--buffer-name (conn sid bid)
   "Return the buffer name for block BID of session SID on CONN."
-  (format "*rex:%s:%s*"
+  (format "*rex:%s%s:%s*"
           (or (alist-get sid (rexel--conn-sessions conn) nil nil #'equal) "?")
+          (if (rexel--conn-host conn) (concat "@" (rexel--conn-host conn)) "")
           (substring bid -6)))
 
 (defun rexel--stale-block-buffer (bid)
@@ -404,7 +434,8 @@ A buffer whose stream ended earlier is reset and streamed again."
   "Make BUF show block BID of session SID on CONN and return it."
   (puthash bid buf (rexel--conn-blocks conn))
   (with-current-buffer buf
-    (setq rexel--session-id sid
+    (setq rexel--conn conn
+          rexel--session-id sid
           rexel--block-id bid
           rexel--requested-size nil
           rexel--size-take nil
@@ -851,9 +882,14 @@ once this client owns the block, when the server reports it in the stream."
 (defun rexel-attach ()
   "Attach to a Rex session and show its terminals as ghostel buffers."
   (interactive)
-  (rexel--connect
-   (lambda (conn)
-     (rexel--pick-session conn (lambda (sid) (rexel--attach-session conn sid))))))
+  (let* ((hosts (rexel--hosts))
+         (names (mapcar (lambda (h) (cons (or (car h) "this machine") h)) hosts)))
+    (rexel--connect
+     (cond ((null hosts) (user-error "No Rex server found; see `rexel-hosts'"))
+           ((null (cdr hosts)) (car hosts))
+           (t (cdr (assoc (completing-read "Rex host: " names nil t) names))))
+     (lambda (conn)
+       (rexel--pick-session conn (lambda (sid) (rexel--attach-session conn sid)))))))
 
 (defun rexel--ensure-block-buffer-context ()
   "Signal an error unless the current buffer shows a live Rex block."

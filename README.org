@@ -9,9 +9,8 @@ and key encoding work as in a local terminal, and the session keeps
 running on the Rex server when Emacs goes away.
 
 Prototype status: attaching, typing, resizing and the basic layout
-commands work against a local Rex server.  A dropped data connection
-resumes its stream; after a lost control connection, run =rexel-attach=
-again.  Remote servers are not implemented.  Colors follow the
+commands work.  A dropped data connection resumes its stream; after a
+lost control connection, run =rexel-attach= again.  Colors follow the
 Emacs theme as in any ghostel buffer; the theme set in Rex is not applied.
 
 * Requirements
@@ -25,9 +24,23 @@ Emacs theme as in any ghostel buffer; the theme set in Rex is not applied.
 
 * Usage
 
-=M-x rexel-attach= lists the server's sessions and opens one ghostel buffer
-per terminal block.  The server socket comes from =rex server status= when
-=rexel-program= is on =exec-path=; set =rexel-server-socket= otherwise.
+=M-x rexel-attach= asks for a server when more than one is known, lists its
+sessions and opens one ghostel buffer per terminal block.  Servers are this
+machine's (from =rex server status=), the hosts known to Rex (=rex hosts=)
+that have a Unix socket endpoint, and =rexel-hosts=.
+
+A remote server is reached through an ssh forward of its socket, which
+Rex and rexel then both use:
+
+#+begin_src sh
+ssh -N -o StreamLocalBindUnlink=yes \
+    -L /tmp/studio.sock:/Users/me/Library/Application\ Support/rex/server.sock studio
+rex hosts add studio unix:///tmp/studio.sock
+#+end_src
+
+Without =rex= on this machine, name the socket in =rexel-hosts= instead:
+=(setq rexel-hosts '(("studio" . "/tmp/studio.sock")))=.  Buffers of a
+host are named =*rex:SESSION@HOST:ID*=.
 
 In a block buffer =C-t= (=rexel-prefix-key=) prefixes:
 
