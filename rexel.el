@@ -120,14 +120,31 @@ handed to websocket.el for the handshake and framing."
               :on-error #'rexel--ws-error
               :accept-string (websocket-calculate-accept key))))
     (process-put conn :websocket ws)
-    (set-process-filter conn (lambda (process output)
-                               (websocket-outer-filter
-                                (process-get process :websocket) output)))
+    (set-process-filter conn #'rexel--ws-filter)
     (set-process-sentinel conn (websocket-sentinel url conn key protocols
                                                    nil nil nil))
     (set-process-query-on-exit-flag conn nil)
     (websocket-ensure-handshake url conn key protocols nil nil nil)
     ws))
+
+(defun rexel--ws-filter (process output)
+  "Pass PROCESS OUTPUT to websocket.el once a whole frame is buffered.
+`websocket-outer-filter' copies all buffered input on every read, so
+a large frame arriving in many reads would cost quadratic time."
+  (let* ((ws (process-get process :websocket))
+         (head (websocket-inflight-input ws))
+         (queued (cons output (process-get process :queued)))
+         (have (+ (length head) (apply #'+ (mapcar #'length queued))))
+         ;; Server frames are unmasked: 1 opcode byte, length, payload.
+         (need (and head (eq (websocket-ready-state ws) 'open)
+                    (catch 'websocket-incomplete-frame
+                      (let ((len (websocket-get-payload-len
+                                  (substring head 1 (min 10 (length head))))))
+                        (+ 1 (cdr len) (car len)))))))
+    (if (and need (< have need))
+        (process-put process :queued queued)
+      (process-put process :queued nil)
+      (websocket-outer-filter ws (apply #'concat (nreverse queued))))))
 
 (defun rexel--ws-error (ws type err)
   "Report ERR signalled while running the TYPE callback of WS."

@@ -134,5 +134,27 @@
     (rexel--pty-out "x")
     (should (equal "x" (rexel-test--sent-data (car sent))))))
 
+(ert-deftest rexel-test-ws-filter-buffers-whole-frames ()
+  (let* ((ws (websocket-inner-create :conn nil :url "u" :ready-state 'open))
+         (proc (make-pipe-process :name "rexel-test" :noquery t))
+         ;; Binary frame with a 16-bit length of 300.
+         (frame (concat (unibyte-string #x82 126 1 44) (make-string 300 ?x)))
+         calls)
+    (unwind-protect
+        (cl-letf (((symbol-function 'websocket-outer-filter)
+                   (lambda (ws out)
+                     (push out calls)
+                     ;; Like websocket.el: keep input until the frame is whole.
+                     (let ((text (concat (websocket-inflight-input ws) out)))
+                       (setf (websocket-inflight-input ws)
+                             (and (< (length text) (length frame)) text))))))
+          (process-put proc :websocket ws)
+          (dolist (range '((0 . 10) (10 . 100) (100 . 303) (303 . nil)))
+            (rexel--ws-filter proc (substring frame (car range) (cdr range))))
+          (should (equal (list (substring frame 10) (substring frame 0 10))
+                         calls))
+          (should-not (websocket-inflight-input ws)))
+      (delete-process proc))))
+
 (provide 'rexel-test)
 ;;; rexel-test.el ends here
