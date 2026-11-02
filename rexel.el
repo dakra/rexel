@@ -74,8 +74,10 @@ replaces a host of the same label known to Rex."
 
 (cl-defstruct (rexel--conn (:constructor rexel--make-conn))
   "One control connection to a Rex server.
-HOST is the server's label, nil for this machine's server."
-  ws socket host client-id
+HOST is the server's label, nil for this machine's server.  TOKEN is the
+reconnect token of the latest welcome.  While the connection is being redialled,
+TIMER is the pending attempt and DELAY the seconds until the one after it."
+  ws socket host client-id token timer delay
   (next-id 0)
   (pending (make-hash-table :test #'equal))
   (sessions nil)
@@ -211,25 +213,67 @@ HOST is a (LABEL . SOCKET) pair as `rexel--hosts' returns them."
       (funcall callback conn))
      ((and conn (websocket-openp (rexel--conn-ws conn)))
       (push callback (rexel--conn-on-ready conn)))
+     (conn
+      (push callback (rexel--conn-on-ready conn))
+      (setf (rexel--conn-delay conn) nil)
+      (rexel--reconnect conn))
      (t
       (unless (file-exists-p path)
         (user-error "Rex server socket %s does not exist" path))
       (setq conn (rexel--make-conn :socket path :host (car host)))
       (push callback (rexel--conn-on-ready conn))
-      (setf (rexel--conn-ws conn)
-            (rexel--ws-open
-             path "ws://rex/api/control" "rex.control.v1"
-             (lambda (_ws)
-               (rexel--send conn `((type . "hello")
-                                   (api_revision . ,rexel--api-revision)
-                                   (client . ((kind . "other")
-                                              (name . "rexel")
-                                              (version . ,(or (package-get-version)
-                                                              "unknown")))))))
-             (lambda (_ws frame)
-               (rexel--on-control-message conn (websocket-frame-text frame)))
-             (lambda (_ws) (rexel--on-control-close conn))))
+      (rexel--dial conn)
       (push conn rexel--conns)))))
+
+(defun rexel--dial (conn)
+  "Open CONN's control connection and send the hello."
+  (setf (rexel--conn-ws conn)
+        (rexel--ws-open
+         (rexel--conn-socket conn) "ws://rex/api/control" "rex.control.v1"
+         (lambda (_ws)
+           (rexel--send conn `((type . "hello")
+                               (api_revision . ,rexel--api-revision)
+                               ,@(when (rexel--conn-token conn)
+                                   `((reconnect_token . ,(rexel--conn-token conn))))
+                               (client . ((kind . "other")
+                                          (name . "rexel")
+                                          (version . ,(or (package-get-version)
+                                                          "unknown")))))))
+         (lambda (_ws frame)
+           (rexel--on-control-message conn (websocket-frame-text frame)))
+         (lambda (ws)
+           (when (eq ws (rexel--conn-ws conn))
+             (rexel--on-control-close conn))))))
+
+(defun rexel--conn-name (conn)
+  "Return CONN's host label or socket path for messages."
+  (or (rexel--conn-host conn) (rexel--conn-socket conn)))
+
+(defun rexel--ready-p (conn)
+  "Return non-nil when CONN is open and has been welcomed."
+  (and conn (rexel--conn-client-id conn)))
+
+(defun rexel--reconnect (conn)
+  "Dial CONN again after its delay, doubling it up to 30 seconds.
+Once no session or callback waits for CONN, it is forgotten instead."
+  (let ((delay (or (rexel--conn-delay conn) 1)))
+    (when (rexel--conn-timer conn)
+      (cancel-timer (rexel--conn-timer conn)))
+    (setf (rexel--conn-delay conn) (min 30 (* 2 delay))
+          (rexel--conn-timer conn)
+          (run-at-time delay nil
+                       (lambda ()
+                         (setf (rexel--conn-timer conn) nil)
+                         (if (or (rexel--conn-sessions conn)
+                                 (rexel--conn-on-ready conn))
+                             (condition-case nil
+                                 (rexel--dial conn)
+                               (error
+                                (when (rexel--conn-on-ready conn)
+                                  (setf (rexel--conn-on-ready conn) nil)
+                                  (message "rexel: cannot reach %s" (rexel--conn-name conn)))
+                                (rexel--reconnect conn)))
+                           (setq rexel--conns (delq conn rexel--conns))))))))
 
 (defun rexel--on-control-message (conn text)
   "Dispatch the control message TEXT received on CONN."
@@ -244,8 +288,17 @@ HOST is a (LABEL . SOCKET) pair as `rexel--hosts' returns them."
                (websocket-close (rexel--conn-ws conn))
                (message "rexel: server speaks %s revision %s, rexel needs %s revision %d; update Rex"
                         protocol revision "rex.control.v1" rexel--api-revision))
-           (setf (rexel--conn-client-id conn)
-                 (or (alist-get 'id (alist-get 'client msg)) t))
+           (let ((client (alist-get 'client msg)))
+             (setf (rexel--conn-client-id conn) (or (alist-get 'id client) t)
+                   (rexel--conn-token conn) (alist-get 'reconnect_token client))
+             (when (rexel--conn-delay conn)
+               (setf (rexel--conn-delay conn) nil)
+               (message "rexel: %s to %s"
+                        (if (alist-get 'resumed client)
+                            "reconnected"
+                          "re-attached as a new client")
+                        (rexel--conn-name conn))
+               (rexel--reattach conn)))
            (let ((callbacks (nreverse (rexel--conn-on-ready conn))))
              (setf (rexel--conn-on-ready conn) nil)
              (dolist (callback callbacks) (funcall callback conn))))))
@@ -258,16 +311,26 @@ HOST is a (LABEL . SOCKET) pair as `rexel--hosts' returns them."
       ("event" (rexel--on-event conn (alist-get 'payload msg))))))
 
 (defun rexel--on-control-close (conn)
-  "Forget CONN after its control connection closed.
-Its block buffers stay for reading; `rexel-attach' reuses them."
-  (setq rexel--conns (delq conn rexel--conns))
+  "Redial CONN if sessions are attached to it, else forget it.
+Block streams run on their own connections and stay up meanwhile.
+Without sessions the block buffers stay for reading and `rexel-attach'
+reuses them."
   (pcase-dolist (`(,_sid . ,timer) (rexel--conn-refresh-timers conn))
     (cancel-timer timer))
-  (dolist (buf (buffer-list))
-    (when (eq (buffer-local-value 'rexel--conn buf) conn)
-      (rexel--end-stream buf "control connection closed")
-      (with-current-buffer buf (setq rexel--conn nil))))
-  (message "rexel: control connection to %s closed" (rexel--conn-socket conn)))
+  (setf (rexel--conn-refresh-timers conn) nil
+        (rexel--conn-client-id conn) nil)
+  (clrhash (rexel--conn-pending conn))
+  (if (rexel--conn-sessions conn)
+      (progn
+        (setf (rexel--conn-revisions conn) nil)
+        (message "rexel: connection to %s lost, reconnecting" (rexel--conn-name conn))
+        (rexel--reconnect conn))
+    (setq rexel--conns (delq conn rexel--conns))
+    (dolist (buf (buffer-list))
+      (when (eq (buffer-local-value 'rexel--conn buf) conn)
+        (rexel--end-stream buf "control connection closed")
+        (with-current-buffer buf (setq rexel--conn nil))))
+    (message "rexel: control connection to %s closed" (rexel--conn-name conn))))
 
 (defun rexel--on-event (conn event)
   "Handle EVENT received on CONN.
@@ -284,7 +347,9 @@ response or repeat a change the view already has."
             (when-let* ((buf (gethash (alist-get 'block_id inner-payload)
                                       (rexel--conn-blocks conn))))
               (when (buffer-live-p buf) (kill-buffer buf))))
-           ("session_view_changed" (rexel--schedule-view-refresh conn sid))
+           ("session_view_changed"
+            (when (assoc sid (rexel--conn-sessions conn))
+              (rexel--schedule-view-refresh conn sid)))
            ("session_destroyed" (rexel--forget-session conn sid)))))
       ("session_destroyed"
        (rexel--forget-session conn (alist-get 'session_id payload))))))
@@ -299,7 +364,7 @@ response or repeat a change the view already has."
   "Fetch session SID's view on CONN and reconcile block buffers."
   (setf (rexel--conn-refresh-timers conn)
         (assoc-delete-all sid (rexel--conn-refresh-timers conn)))
-  (when (websocket-openp (rexel--conn-ws conn))
+  (when (rexel--ready-p conn)
     (rexel--request conn "session.view" `((session_id . ,sid))
                     (lambda (view err)
                       (cond
@@ -421,14 +486,16 @@ already applied is ignored."
   "Return the buffer for block BID of session SID on CONN, creating it.
 A buffer whose stream ended earlier is reset and streamed again."
   (let ((buf (gethash bid (rexel--conn-blocks conn))))
+    (unless (buffer-live-p buf)
+      (setq buf (rexel--stale-block-buffer bid)))
     (cond
-     ((buffer-live-p buf) buf)
-     ((setq buf (rexel--stale-block-buffer bid))
+     ((null buf)
+      (rexel--attach-block-buffer
+       conn sid bid (ghostel--create (rexel--buffer-name conn sid bid) nil 24 80)))
+     ((eq (buffer-local-value 'rexel--data-state buf) 'closed)
       (ghostel--init-buffer buf 24 80)
       (rexel--attach-block-buffer conn sid bid buf))
-     (t
-      (setq buf (ghostel--create (rexel--buffer-name conn sid bid) nil 24 80))
-      (rexel--attach-block-buffer conn sid bid buf)))))
+     (t buf))))
 
 (defun rexel--attach-block-buffer (conn sid bid buf)
   "Make BUF show block BID of session SID on CONN and return it."
@@ -437,6 +504,7 @@ A buffer whose stream ended earlier is reset and streamed again."
     (setq rexel--conn conn
           rexel--session-id sid
           rexel--block-id bid
+          rexel--data-state nil
           rexel--requested-size nil
           rexel--size-take nil
           rexel--size-inflight nil
@@ -469,7 +537,7 @@ at a time and bytes typed meanwhile are coalesced into the next."
 (defun rexel--flush-out (buf)
   "Send BUF's pending typed bytes unless a write is in flight."
   (with-current-buffer buf
-    (when (and rexel--conn
+    (when (and (rexel--ready-p rexel--conn)
                (not (eq rexel--out-inflight rexel--conn))
                (> (length rexel--out-pending) 0))
       (let ((data rexel--out-pending)
@@ -577,7 +645,7 @@ exists, the next view refresh streams the block into BUF again."
       (if (memq rexel--data-state '(snapshot live))
           (rexel--resume-stream)
         (rexel--end-stream buf "stream closed")
-        (when (and rexel--conn (websocket-openp (rexel--conn-ws rexel--conn))
+        (when (and (rexel--ready-p rexel--conn)
                    (eq (gethash rexel--block-id (rexel--conn-blocks rexel--conn)) buf))
           (remhash rexel--block-id (rexel--conn-blocks rexel--conn))
           (rexel--schedule-view-refresh rexel--conn rexel--session-id))))))
@@ -778,7 +846,7 @@ after `rexel--max-message-bytes' passes through as output."
 With TAKE, also take ownership of the block from other clients.  ghostel
 calls this as `ghostel-resize-function' with the size fitting the windows
 showing the buffer; the terminal itself resizes when the server echoes it."
-  (when (and rexel--conn (eq rexel--data-state 'live))
+  (when (and (rexel--ready-p rexel--conn) (eq rexel--data-state 'live))
     (let ((size (cons cols rows)))
       (when (or take (not (equal size rexel--requested-size)))
         (setq rexel--requested-size size
@@ -868,6 +936,27 @@ once this client owns the block, when the server reports it in the stream."
          (rexel--apply-view conn sid view)
          (rexel--show-focused-block conn view))))))
 
+(defun rexel--reattach (conn)
+  "Attach CONN again to its sessions and resume their typing and sizing."
+  (pcase-dolist (`(,sid . ,_) (rexel--conn-sessions conn))
+    (dolist (buf (rexel--session-buffers conn sid))
+      (with-current-buffer buf
+        (setq rexel--out-inflight nil
+              rexel--size-inflight nil)))
+    (rexel--request
+     conn "session.attach" `((session_id . ,sid))
+     (lambda (result err)
+       (cond
+        ((equal (alist-get 'code err) "session_not_found")
+         (rexel--forget-session conn sid))
+        (err (message "rexel: session.attach: %s" (rexel--error-string err)))
+        (t
+         (dolist (buf (rexel--session-buffers conn sid))
+           (rexel--flush-out buf))
+         (rexel--apply-view conn sid (alist-get 'view result))
+         (dolist (buf (rexel--session-buffers conn sid))
+           (with-current-buffer buf (rexel--sync-size)))))))))
+
 (defun rexel--show-focused-block (conn view)
   "Pop to the buffer of VIEW's focused block on CONN."
   (let* ((active (alist-get 'active_window_id view))
@@ -893,17 +982,18 @@ once this client owns the block, when the server reports it in the stream."
 
 (defun rexel--ensure-block-buffer-context ()
   "Signal an error unless the current buffer shows a live Rex block."
-  (unless (and rexel--conn rexel--block-id)
+  (unless (and (rexel--ready-p rexel--conn) rexel--block-id)
     (user-error "Not in a connected Rex block buffer")))
 
 (defun rexel-detach ()
   "Detach from the current buffer's session and kill its block buffers."
   (interactive)
-  (rexel--ensure-block-buffer-context)
-  (let ((conn rexel--conn)
-        (sid rexel--session-id))
-    (rexel--request conn "session.detach" `((session_id . ,sid)))
-    (rexel--forget-session conn sid)))
+  (unless rexel--conn
+    (user-error "Not in a Rex block buffer"))
+  (when (rexel--ready-p rexel--conn)
+    (rexel--request rexel--conn "session.detach"
+                    `((session_id . ,rexel--session-id))))
+  (rexel--forget-session rexel--conn rexel--session-id))
 
 (defun rexel--new-shell-layout (&optional label)
   "Return a layout object holding one shell block, labelled LABEL."

@@ -262,7 +262,7 @@
 (defmacro rexel-test--with-fake-conn (sent &rest body)
   "Run BODY with a fake connection whose sent objects collect in SENT."
   (declare (indent 1))
-  `(let ((rexel--conn (rexel--make-conn :socket "none"))
+  `(let ((rexel--conn (rexel--make-conn :socket "none" :client-id t))
          (,sent nil))
      (cl-letf (((symbol-function 'rexel--send)
                 (lambda (_conn object) (push object ,sent))))
@@ -273,6 +273,45 @@
 (defun rexel-test--sent-data (object)
   "Return the typed text in the write request OBJECT."
   (alist-get 'data (alist-get 'args (alist-get 'payload object))))
+
+(ert-deftest rexel-test-hello-carries-reconnect-token ()
+  (rexel-test--with-fake-conn sent
+    (setf (rexel--conn-token rexel--conn) "tok")
+    (cl-letf (((symbol-function 'rexel--ws-open)
+               (lambda (_path _url _protocol on-open &rest _)
+                 (funcall on-open 'ws) 'ws)))
+      (rexel--dial rexel--conn))
+    (should (equal "tok" (alist-get 'reconnect_token (car sent))))))
+
+(ert-deftest rexel-test-control-close-redials-while-attached ()
+  (let* ((conn (rexel--make-conn :socket "none"))
+         (rexel--conns (list conn))
+         (dialled nil))
+    (cl-letf (((symbol-function 'rexel--dial) (lambda (c) (push c dialled))))
+      (rexel--on-control-close conn)
+      (should-not rexel--conns)
+      (setq rexel--conns (list conn))
+      (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work")
+      (rexel--on-control-close conn)
+      (should (memq conn rexel--conns))
+      (should (= 2 (rexel--conn-delay conn)))
+      (timer-event-handler (rexel--conn-timer conn))
+      (should (equal (list conn) dialled))
+      (should-not (rexel--conn-timer conn)))))
+
+(ert-deftest rexel-test-welcome-after-drop-reattaches ()
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn))
+      (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work"
+            (rexel--conn-delay conn) 4)
+      (rexel--on-control-message
+       conn (json-serialize
+             '((type . "welcome") (protocol . "rex.control.v1") (api_revision . 8)
+               (client . ((id . "client:1") (reconnect_token . "tok") (resumed . t))))))
+      (should (equal "tok" (rexel--conn-token conn)))
+      (should-not (rexel--conn-delay conn))
+      (should (equal "session.attach" (alist-get 'method (car sent))))
+      (should (equal "s" (alist-get 'session_id (alist-get 'payload (car sent))))))))
 
 (ert-deftest rexel-test-pty-out-serializes-and-coalesces ()
   (rexel-test--with-fake-conn sent
