@@ -211,31 +211,46 @@
 
 (ert-deftest rexel-test-size-requests-serialize-and-take ()
   (rexel-test--with-fake-conn sent
-    (let ((size '(80 . 24)))
-      (setq rexel--data-state 'live)
-      (cl-letf (((symbol-function 'rexel--desired-size) (lambda () size)))
-        (rexel--sync-size t)
-        (should (equal '("session.own_block")
-                       (mapcar (lambda (o) (alist-get 'method o)) sent)))
-        ;; Sizes requested meanwhile wait; the latest one follows the take.
-        (setq size '(100 . 30))
-        (rexel--sync-size)
-        (setq size '(120 . 40))
-        (rexel--sync-size)
-        (should (= 1 (length sent)))
-        (rexel-test--respond rexel--conn (car sent))
-        (should (equal '((columns . 120) (rows . 40))
-                       (alist-get 'args (alist-get 'payload (car sent)))))
-        ;; An unchanged size sends nothing more.
-        (rexel-test--respond rexel--conn (car sent))
-        (rexel--sync-size)
-        (should (= 2 (length sent)))
-        ;; A resize without take sends no own_block.
-        (setq size '(90 . 20))
-        (rexel--sync-size)
-        (should (equal "com.superlogical.terminal.resize"
-                       (alist-get 'method (car sent))))
-        (should (= 3 (length sent)))))))
+    (setq rexel--data-state 'live)
+    (rexel--resize 24 80 t)
+    (should (equal '("session.own_block")
+                   (mapcar (lambda (o) (alist-get 'method o)) sent)))
+    ;; Sizes requested meanwhile wait; the latest one follows the take.
+    (rexel--resize 30 100)
+    (rexel--resize 40 120)
+    (should (= 1 (length sent)))
+    (rexel-test--respond rexel--conn (car sent))
+    (should (equal '((columns . 120) (rows . 40))
+                   (alist-get 'args (alist-get 'payload (car sent)))))
+    ;; An unchanged size sends nothing more.
+    (rexel-test--respond rexel--conn (car sent))
+    (rexel--resize 40 120)
+    (should (= 2 (length sent)))
+    ;; A resize without take sends no own_block.
+    (rexel--resize 20 90)
+    (should (equal "com.superlogical.terminal.resize"
+                   (alist-get 'method (car sent))))
+    (should (= 3 (length sent)))))
+
+(ert-deftest rexel-test-size-requests-wait-for-live ()
+  (rexel-test--with-fake-conn sent
+    (setq rexel--data-state 'snapshot)
+    (rexel--resize 24 80 t)
+    (should-not sent)
+    (should-not rexel--requested-size)))
+
+(ert-deftest rexel-test-sync-size-takes-with-fitted-size ()
+  (rexel-test--with-fake-conn sent
+    (setq rexel--data-state 'live)
+    (cl-letf (((symbol-function 'ghostel--desired-size) (lambda () nil)))
+      (rexel--sync-size))
+    (should-not sent)
+    (cl-letf (((symbol-function 'ghostel--desired-size) (lambda () '(80 . 24))))
+      (rexel--sync-size))
+    (should (equal "session.own_block" (alist-get 'method (car sent))))
+    (rexel-test--respond rexel--conn (car sent))
+    (should (equal '((columns . 80) (rows . 24))
+                   (alist-get 'args (alist-get 'payload (car sent)))))))
 
 (ert-deftest rexel-test-ws-filter-buffers-whole-frames ()
   (let* ((ws (websocket-inner-create :conn nil :url "u" :ready-state 'open))

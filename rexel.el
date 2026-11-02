@@ -395,9 +395,9 @@ A buffer whose stream ended earlier is reset and streamed again."
           rexel--size-inflight nil
           rexel--out-pending nil
           rexel--out-inflight nil
-          ghostel--pty-out-function #'rexel--pty-out)
+          ghostel-pty-out-function #'rexel--pty-out
+          ghostel-resize-function #'rexel--resize)
     (rexel-block-mode 1)
-    (add-hook 'window-size-change-functions #'rexel--window-resized nil t)
     (add-hook 'window-buffer-change-functions #'rexel--window-shown nil t)
     (add-hook 'kill-buffer-hook #'rexel--block-buffer-killed nil t)
     (rexel--open-data-connection conn buf))
@@ -622,7 +622,7 @@ Signal an error on a record longer than `rexel--max-record-bytes'."
       (ghostel--invalidate)
       (when (> (length rest) 0)
         (rexel--on-live-bytes rest))
-      (rexel--sync-size t))))
+      (rexel--sync-size))))
 
 (defconst rexel--max-message-bytes 65536
   "Longest stream control message held back waiting for its end.")
@@ -701,31 +701,27 @@ after `rexel--max-message-bytes' passes through as output."
 
 ;;; Sizing
 
-(defun rexel--desired-size ()
-  "Return (COLS . ROWS) fitting every window showing this buffer, or nil."
-  (when-let* ((windows (ghostel--windows (current-buffer) t))
-              (size (window-adjust-process-window-size-smallest nil windows)))
-    (and (> (car size) 0) (> (cdr size) 0) size)))
-
-(defun rexel--sync-size (&optional take)
-  "Ask the server to size this block to the windows showing it, if needed.
-With TAKE, also take ownership of the block from other clients."
+(defun rexel--resize (rows cols &optional take)
+  "Ask the server to size this block ROWS by COLS, if that changes anything.
+With TAKE, also take ownership of the block from other clients.  ghostel
+calls this as `ghostel-resize-function' with the size fitting the windows
+showing the buffer; the terminal itself resizes when the server echoes it."
   (when (and rexel--conn (eq rexel--data-state 'live))
-    (let ((size (rexel--desired-size)))
-      (when (and size (or take (not (equal size rexel--requested-size))))
+    (let ((size (cons cols rows)))
+      (when (or take (not (equal size rexel--requested-size)))
         (setq rexel--requested-size size
               rexel--size-take (or take rexel--size-take))
         (rexel--send-size (current-buffer))))))
 
-(defun rexel--window-resized (window)
-  "Sync the block size after WINDOW, showing a block buffer, changed size."
-  (with-current-buffer (window-buffer window)
-    (rexel--sync-size)))
+(defun rexel--sync-size ()
+  "Take this block and size it to the windows showing it, if any."
+  (when-let* ((size (ghostel--desired-size)))
+    (rexel--resize (max 1 (cdr size)) (max 1 (car size)) t)))
 
 (defun rexel--window-shown (window)
   "Take the block and sync its size after WINDOW started showing it."
   (with-current-buffer (window-buffer window)
-    (rexel--sync-size t)))
+    (rexel--sync-size)))
 
 (defun rexel--send-size (buf)
   "Send BUF's requested size, taking the block first if asked to.
