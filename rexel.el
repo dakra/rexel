@@ -29,6 +29,7 @@
 
 ;;; Code:
 
+(require 'bindat)
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
@@ -313,8 +314,11 @@ WS is its WebSocket and MARKER the prefix of its control messages,
 including the channel nonce.  SNAPSHOT holds the complete snapshot chunks
 received so far and TAIL the chunks of the incomplete record after them,
 both newest first; TAIL is walked again once it holds NEED bytes.
-PENDING holds live bytes that may begin a control message."
-  ws marker snapshot tail (need 10) (pending ""))
+PENDING holds live bytes that may begin a control message.
+TOKEN is the reconnect token of the latest WELCOME, RECEIVED the number
+of stream bytes received over all connections, and RESUME the state to
+return to when a RESUME is welcomed."
+  ws marker snapshot tail (need 10) (pending "") token (received 0) resume)
 
 (defvar-local rexel--stream nil
   "This block's current `rexel--stream', or nil.")
@@ -474,23 +478,38 @@ at a time and bytes typed meanwhile are coalesced into the next."
         (err (rexel--data-failed buf (format "data.connect: %s"
                                              (rexel--error-string err))))
         ((buffer-live-p buf)
-         (let ((ticket (base64-decode-string (alist-get 'ticket result) t))
-               (stream (rexel--make-stream)))
-           (with-current-buffer buf
-             (setq rexel--data-state 'welcome
-                   rexel--stream stream)
-             (setf (rexel--stream-ws stream)
-                   (rexel--ws-open
-                    (rexel--conn-socket conn) "ws://rex/api/data"
-                    "rex.data.terminal.v1"
-                    (lambda (ws)
-                      (websocket-send ws (make-websocket-frame
-                                          :opcode 'binary
-                                          :payload (concat "\x01" ticket)
-                                          :completep t)))
-                    (lambda (_ws frame)
-                      (rexel--on-data buf stream (websocket-frame-payload frame)))
-                    (lambda (_ws) (rexel--on-data-close buf stream))))))))))))
+         (with-current-buffer buf
+           (setq rexel--data-state 'welcome
+                 rexel--stream (rexel--make-stream))
+           (rexel--open-stream
+            (concat "\x01" (base64-decode-string (alist-get 'ticket result) t))))))))))
+
+(defun rexel--open-stream (hello)
+  "Connect this buffer's stream to the data endpoint and send HELLO."
+  (let ((buf (current-buffer))
+        (stream rexel--stream))
+    (setf (rexel--stream-ws stream)
+          (rexel--ws-open
+           (rexel--conn-socket rexel--conn) "ws://rex/api/data"
+           "rex.data.terminal.v1"
+           (lambda (ws)
+             (websocket-send ws (make-websocket-frame
+                                 :opcode 'binary :payload hello :completep t)))
+           (lambda (_ws frame)
+             (rexel--on-data buf stream (websocket-frame-payload frame)))
+           (lambda (_ws) (rexel--on-data-close buf stream))))))
+
+(defun rexel--resume-stream ()
+  "Reopen this buffer's dropped data connection and continue its stream.
+The server continues from the first byte not yet received."
+  (let ((s rexel--stream))
+    (setf (rexel--stream-resume s) rexel--data-state)
+    (setq rexel--data-state 'welcome)
+    (condition-case nil
+        (rexel--open-stream
+         (concat "\x02" (rexel--stream-token s)
+                 (bindat-pack (bindat-type uint 64 t) (rexel--stream-received s))))
+      (error (rexel--on-data-close (current-buffer) s)))))
 
 (defun rexel--close-stream ()
   "Mark this buffer's stream closed and close its WebSocket."
@@ -518,16 +537,19 @@ at a time and bytes typed meanwhile are coalesced into the next."
 
 (defun rexel--on-data-close (buf stream)
   "Note that BUF's data connection STREAM closed.
-While the control connection is up and the block still exists, the
-next view refresh streams the block into BUF again."
+A connection that drops after its WELCOME is resumed.  Otherwise the
+stream ends, and while the control connection is up and the block still
+exists, the next view refresh streams the block into BUF again."
   (when (and (buffer-live-p buf)
              (eq stream (buffer-local-value 'rexel--stream buf)))
-    (rexel--end-stream buf "stream closed")
     (with-current-buffer buf
-      (when (and rexel--conn (websocket-openp (rexel--conn-ws rexel--conn))
-                 (eq (gethash rexel--block-id (rexel--conn-blocks rexel--conn)) buf))
-        (remhash rexel--block-id (rexel--conn-blocks rexel--conn))
-        (rexel--schedule-view-refresh rexel--conn rexel--session-id)))))
+      (if (memq rexel--data-state '(snapshot live))
+          (rexel--resume-stream)
+        (rexel--end-stream buf "stream closed")
+        (when (and rexel--conn (websocket-openp (rexel--conn-ws rexel--conn))
+                   (eq (gethash rexel--block-id (rexel--conn-blocks rexel--conn)) buf))
+          (remhash rexel--block-id (rexel--conn-blocks rexel--conn))
+          (rexel--schedule-view-refresh rexel--conn rexel--session-id))))))
 
 (defun rexel--on-data (buf stream bytes)
   "Handle BYTES, one binary message of BUF's data connection STREAM."
@@ -535,8 +557,11 @@ next view refresh streams the block into BUF again."
     (with-current-buffer buf
       (pcase (and (eq stream rexel--stream) rexel--data-state)
         ('welcome (rexel--on-welcome bytes))
-        ('snapshot (rexel--on-snapshot-bytes bytes))
-        ('live (rexel--on-live-bytes bytes))))))
+        ((and (or 'snapshot 'live) state)
+         (cl-incf (rexel--stream-received stream) (length bytes))
+         (if (eq state 'snapshot)
+             (rexel--on-snapshot-bytes bytes)
+           (rexel--on-live-bytes bytes)))))))
 
 (defun rexel--u64le (bytes offset)
   "Return the little-endian 64-bit integer at OFFSET in BYTES."
@@ -549,11 +574,15 @@ next view refresh streams the block into BUF again."
   "Read the data handshake answer BYTES."
   (cond
    ((and (>= (length bytes) 32) (= (aref bytes 0) #x81))
-    (setf (rexel--stream-marker rexel--stream)
-          (format "\e_rex1;%d;" (rexel--u64le bytes 24)))
-    (setq rexel--data-state 'snapshot)
-    (when (> (length bytes) 32)
-      (rexel--on-snapshot-bytes (substring bytes 32))))
+    (let ((s rexel--stream))
+      (setf (rexel--stream-token s) (substring bytes 1 17))
+      (if (rexel--stream-resume s)
+          (setq rexel--data-state (rexel--stream-resume s))
+        (setf (rexel--stream-marker s)
+              (format "\e_rex1;%d;" (rexel--u64le bytes 24)))
+        (setq rexel--data-state 'snapshot))
+      (when (> (length bytes) 32)
+        (rexel--on-data (current-buffer) s (substring bytes 32)))))
    ((and (>= (length bytes) 2) (= (aref bytes 0) #x82))
     (rexel--data-failed (current-buffer)
                         (format "data connection rejected, reason %d"

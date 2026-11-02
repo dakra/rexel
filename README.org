@@ -9,8 +9,9 @@ and key encoding work as in a local terminal, and the session keeps
 running on the Rex server when Emacs goes away.
 
 Prototype status: attaching, typing, resizing and the basic layout
-commands work against a local Rex server.  Reconnecting after a dropped
-connection and remote servers are not implemented.  Colors follow the
+commands work against a local Rex server.  A dropped data connection
+resumes its stream; after a lost control connection, run =rexel-attach=
+again.  Remote servers are not implemented.  Colors follow the
 Emacs theme as in any ghostel buffer; the theme set in Rex is not applied.
 
 * Requirements

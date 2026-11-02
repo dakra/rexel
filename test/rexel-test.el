@@ -160,6 +160,38 @@
     (should (eq rexel--data-state 'snapshot))
     (should (equal "\e_rex1;258;" (rexel--stream-marker rexel--stream)))))
 
+(defun rexel-test--welcome (token)
+  "Return a WELCOME carrying TOKEN and channel nonce 258."
+  (concat (unibyte-string #x81) token (unibyte-string 0 0 0 1 0 0 0)
+          (unibyte-string 2 1 0 0 0 0 0 0)))
+
+(ert-deftest rexel-test-dropped-stream-resumes ()
+  (rexel-test--with-fake-conn _sent
+    (let ((ws (list 'fake)) hello)
+      (cl-letf (((symbol-function 'rexel--ws-open)
+                 (lambda (_path _url _protocol on-open &rest _)
+                   (funcall on-open ws) ws))
+                ((symbol-function 'websocket-send)
+                 (lambda (_ws frame) (setq hello (websocket-frame-payload frame))))
+                ((symbol-function 'rexel--on-live-bytes) #'ignore))
+        (setq rexel--data-state 'welcome rexel--stream (rexel--make-stream))
+        (let ((s rexel--stream))
+          (rexel--on-welcome (rexel-test--welcome (make-string 16 ?t)))
+          (setq rexel--data-state 'live)
+          (rexel--on-data (current-buffer) s (make-string 300 ?x))
+          (rexel--on-data-close (current-buffer) s)
+          (should (eq rexel--data-state 'welcome))
+          (should (equal hello (concat (unibyte-string 2) (make-string 16 ?t)
+                                       (unibyte-string 44 1 0 0 0 0 0 0))))
+          (rexel--on-data (current-buffer) s (rexel-test--welcome (make-string 16 ?u)))
+          (should (eq rexel--data-state 'live))
+          (should (equal (make-string 16 ?u) (rexel--stream-token s)))
+          (should (= 300 (rexel--stream-received s)))
+          ;; A connection that drops before its WELCOME ends the stream.
+          (rexel--on-data-close (current-buffer) s)
+          (rexel--on-data-close (current-buffer) s)
+          (should (eq rexel--data-state 'closed)))))))
+
 (ert-deftest rexel-test-welcome-reject ()
   (with-temp-buffer
     (setq rexel--data-state 'welcome rexel--stream (rexel--make-stream))
