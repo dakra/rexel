@@ -356,9 +356,60 @@ response or repeat a change the view already has."
            ("session_view_changed"
             (when (assoc sid (rexel--conn-sessions conn))
               (rexel--schedule-view-refresh conn sid)))
+           ("block_event"
+            (rexel--on-block-event conn inner-payload))
            ("session_destroyed" (rexel--forget-session conn sid)))))
       ("session_destroyed"
        (rexel--forget-session conn (alist-get 'session_id payload))))))
+
+(defvar-local rexel--shell-pid nil
+  "Pid of the block's shell, from the processes Rex reports.")
+
+(defun rexel--on-block-event (conn payload)
+  "Handle the block event PAYLOAD of a session on CONN.
+A terminal's `process_changed' event names the foreground process, the PTY
+probe ghostel cannot run here: the shell's cwd becomes `default-directory'
+and a foreground other than the shell means a command is running."
+  (when-let* ((buf (gethash (alist-get 'block_id payload)
+                            (rexel--conn-blocks conn)))
+              ((buffer-live-p buf))
+              ((equal (alist-get 'creator_name payload) rexel--terminal-creator))
+              ((equal (alist-get 'name payload) "process_changed")))
+    (let* ((event (alist-get 'payload payload))
+           (fg (alist-get 'foreground event))
+           (shell (rexel--shell-process fg (alist-get 'ancestors event))))
+      (with-current-buffer buf
+        ;; Ancestors are left out when too many or one exited; a shell known
+        ;; from them outlives such an event.
+        (when (or (not (eq shell fg)) (null rexel--shell-pid))
+          (setq rexel--shell-pid (alist-get 'pid shell)))
+        ;; The path is the server's.
+        (unless (rexel--conn-host conn)
+          (ghostel--update-directory (alist-get 'cwd shell)))
+        ;; OSC 133 markers from the shell are exact and take over once seen.
+        (unless ghostel--prompt-positions
+          (rexel--set-command-running
+           (and fg rexel--shell-pid
+                (not (eql (alist-get 'pid fg) rexel--shell-pid)))))))))
+
+(defun rexel--shell-process (fg ancestors)
+  "Return the shell among the foreground process FG and its ANCESTORS.
+ANCESTORS run from FG's parent to the terminal's program.  The shell is the
+process below the `login' wrapper, or FG when only the wrapper is above it."
+  (let ((chain (append ancestors nil)))
+    (when (equal (alist-get 'name (car (last chain))) "login")
+      (setq chain (butlast chain)))
+    (if chain (car (last chain)) fg)))
+
+(defun rexel--set-command-running (running)
+  "Set `ghostel--command-running' to RUNNING, running ghostel's hooks on a change."
+  (unless (eq running ghostel--command-running)
+    (setq ghostel--command-running running)
+    (if running
+        (ghostel--run-hook-safely 'ghostel-command-start-functions
+                                  (current-buffer))
+      (ghostel--run-hook-safely 'ghostel-command-finish-functions
+                                (current-buffer) nil))))
 
 (defun rexel--schedule-view-refresh (conn sid)
   "Refresh session SID's view on CONN shortly, coalescing bursts of events."
@@ -510,6 +561,7 @@ A buffer whose stream ended earlier is reset and streamed again."
     (setq rexel--conn conn
           rexel--session-id sid
           rexel--block-id bid
+          rexel--shell-pid nil
           rexel--data-state nil
           rexel--requested-size nil
           rexel--size-take nil

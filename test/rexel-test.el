@@ -405,5 +405,18 @@
           (should-not (websocket-inflight-input ws)))
       (delete-process proc))))
 
+(ert-deftest rexel-test-shell-process ()
+  "The shell is the process under the login wrapper, else the foreground."
+  (let ((fg '((name . "sleep") (pid . 3)))
+        (bash '((name . "bash") (pid . 2)))
+        (login '((name . "login") (pid . 1))))
+    (should-not (rexel--shell-process nil nil))
+    (should (eq (rexel--shell-process fg nil) fg))
+    (should (eq (rexel--shell-process fg (vector login)) fg))
+    (should (eq (rexel--shell-process fg (vector bash login)) bash))
+    (should (eq (rexel--shell-process fg (vector bash)) bash))
+    (should (eq (rexel--shell-process fg (vector '((name . "sudo")) bash login))
+                bash))))
+
 (provide 'rexel-test)
 ;;; rexel-test.el ends here

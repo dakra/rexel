@@ -84,6 +84,40 @@ showing it, as a tmux client would.  Another client such as Rex.app can
 take the block back; the terminal then follows that client's size until
 Emacs takes it again.
 
+** Shell integration
+
+The Rex server starts the shell of a block, so ghostel cannot inject its
+shell integration.  Rexel reads the processes Rex reports instead:
+=default-directory= follows the shell's working directory on this machine's
+server, and =ghostel-command-running-p= knows when a command runs.  Rex
+reports process changes with some delay, so a command that finishes within
+a moment can go unseen.
+
+Prompt navigation (=C-c M-n= / =C-c M-p=), exact command boundaries and
+=ghostel cmd= need the shell to emit ghostel's escape sequences.  Rex sets
+=TERM_PROGRAM=rex=, so source the integration on that too:
+
+#+begin_src sh
+# ~/.bashrc
+if [[ "${INSIDE_EMACS%%,*}" = ghostel || "$TERM_PROGRAM" = rex ]]; then
+    source /path/to/ghostel/etc/shell/ghostel.bash
+fi
+
+# ~/.zshrc
+if [[ "${${INSIDE_EMACS-}%%,*}" = ghostel || "$TERM_PROGRAM" = rex ]]; then
+    source /path/to/ghostel/etc/shell/ghostel.zsh
+fi
+
+# ~/.config/fish/config.fish
+if string match -qr '^ghostel(,|$)' -- "$INSIDE_EMACS"; or test "$TERM_PROGRAM" = rex
+    source /path/to/ghostel/etc/shell/ghostel.fish
+end
+#+end_src
+
+Nushell emits OSC 7 and 133 itself; see ghostel's README for its
+=ghostel.nu=.  Sourcing the scripts is harmless when the block is shown in
+Rex.app, which uses the directory report and ignores the rest.
+
 * Development
 
 =make= byte-compiles, runs the tests and lints.  The tests cover the stream
