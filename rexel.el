@@ -20,10 +20,9 @@
 ;; scrollback, search, copy mode and key encoding behave as in a local
 ;; terminal.  Keystrokes travel back over Rex's control connection.
 ;;
-;; `rexel-attach' picks a session.  In a block buffer `rexel-prefix-key'
-;; (C-c C-r) prefixes the layout commands: `%' or `3' and `"' or `2'
-;; split right and below, `c' opens a window, `x' closes the block, `d'
-;; detaches.
+;; `rexel-attach' picks a session and `rexel-new-session' creates one.
+;; In a block buffer `rexel-prefix-key' (C-c C-r) prefixes the layout
+;; commands in `rexel-prefix-map'.
 ;;
 ;; Both connections are WebSockets on a server's Unix socket.  Servers
 ;; come from `rexel-program' and `rexel-hosts'; a remote server is
@@ -56,6 +55,12 @@ Each entry is (LABEL . SOCKET), the Unix socket path of the server, for
 a remote server the local end of an ssh forward of its socket.  An entry
 replaces a host of the same label known to Rex."
   :type '(alist :key-type string :value-type file))
+
+(defcustom rexel-session-label-function nil
+  "Function turning a label given to `rexel-new-session' into the one used.
+It receives the label, \"\" when none was given, in the buffer the
+command runs from.  An empty or nil result lets the server choose one."
+  :type '(choice (const :tag "None" nil) function))
 
 (defcustom rexel-prefix-key "C-c C-r"
   "Prefix key for `rexel-prefix-map' in block buffers."
@@ -515,6 +520,7 @@ A buffer whose stream ended earlier is reset and streamed again."
           ghostel-resize-function #'rexel--resize)
     (rexel-block-mode 1)
     (add-hook 'window-buffer-change-functions #'rexel--window-shown nil t)
+    (add-hook 'window-selection-change-functions #'rexel--window-selected nil t)
     (add-hook 'kill-buffer-hook #'rexel--block-buffer-killed nil t)
     (rexel--open-data-connection conn buf))
   buf)
@@ -864,6 +870,15 @@ showing the buffer; the terminal itself resizes when the server echoes it."
   (with-current-buffer (window-buffer window)
     (rexel--sync-size)))
 
+(defun rexel--window-selected (window)
+  "Focus the block on the server when WINDOW showing it is selected.
+This also makes the block's tab the active one in other Rex clients."
+  (when (and (eq window (selected-window)) (rexel--ready-p rexel--conn))
+    (rexel--request rexel--conn "session.focus_block"
+                    `((session_id . ,rexel--session-id)
+                      (block_id . ,rexel--block-id))
+                    #'ignore)))
+
 (defun rexel--send-size (buf)
   "Send BUF's requested size, taking the block first if asked to.
 Resizes run concurrently on the server, so one is sent at a time and
@@ -968,18 +983,57 @@ once this client owns the block, when the server reports it in the stream."
     (when (buffer-live-p buf)
       (pop-to-buffer buf))))
 
+(defun rexel--read-host ()
+  "Return the Rex host to use, asking when more than one is known."
+  (let* ((hosts (rexel--hosts))
+         (names (mapcar (lambda (h) (cons (or (car h) "this machine") h)) hosts)))
+    (cond ((null hosts) (user-error "No Rex server found; see `rexel-hosts'"))
+          ((null (cdr hosts)) (car hosts))
+          (t (cdr (assoc (completing-read "Rex host: " names nil t) names))))))
+
 ;;;###autoload
 (defun rexel-attach ()
   "Attach to a Rex session and show its terminals as ghostel buffers."
   (interactive)
-  (let* ((hosts (rexel--hosts))
-         (names (mapcar (lambda (h) (cons (or (car h) "this machine") h)) hosts)))
-    (rexel--connect
-     (cond ((null hosts) (user-error "No Rex server found; see `rexel-hosts'"))
-           ((null (cdr hosts)) (car hosts))
-           (t (cdr (assoc (completing-read "Rex host: " names nil t) names))))
-     (lambda (conn)
-       (rexel--pick-session conn (lambda (sid) (rexel--attach-session conn sid)))))))
+  (rexel--connect
+   (rexel--read-host)
+   (lambda (conn)
+     (rexel--pick-session conn (lambda (sid) (rexel--attach-session conn sid))))))
+
+;;;###autoload
+(defun rexel-new-session (&optional label)
+  "Create a Rex session with one shell, labelled LABEL, and attach to it.
+`rexel-session-label-function' may change LABEL; a nil or empty label lets the
+server choose one.  Interactively, ask for LABEL only with a prefix argument."
+  (interactive
+   (list (and current-prefix-arg (read-string "Session label: "))))
+  (when rexel-session-label-function
+    (setq label (funcall rexel-session-label-function (or label ""))))
+  (rexel--connect
+   (rexel--read-host)
+   (lambda (conn)
+     (rexel--request
+      conn "session.create"
+      `(,@(unless (member label '(nil "")) `((label . ,label)))
+        (initial_windows . ,(vector `((layout . ,(rexel--new-shell-layout))))))
+      (lambda (result err)
+        (if err
+            (message "rexel: session.create: %s" (rexel--error-string err))
+          (rexel--attach-session conn (alist-get 'session_id result))))))))
+
+(defun rexel-rename-session (label)
+  "Label the current block's session LABEL.
+A nil or empty LABEL restores the label the server chose."
+  (interactive
+   (progn
+     (rexel--ensure-block-buffer-context)
+     (list (read-string "Session label: "
+                        (alist-get rexel--session-id
+                                   (rexel--conn-sessions rexel--conn)
+                                   nil nil #'equal)))))
+  (rexel--ensure-block-buffer-context)
+  (rexel--request rexel--conn "session.set_label"
+                  `((session_id . ,rexel--session-id) (label . ,(or label "")))))
 
 (defun rexel--ensure-block-buffer-context ()
   "Signal an error unless the current buffer shows a live Rex block."
@@ -1004,8 +1058,8 @@ once this client owns the block, when the server reports it in the stream."
 (defun rexel--show-new-blocks (conn sid result err method
                                      &optional direction window)
   "Show the first block METHOD created on CONN in session SID.
-RESULT and ERR are the response.  DIRECTION, `below' or `right', shows
-it on that side of WINDOW, the window the split started from."
+RESULT and ERR are the response.  With DIRECTION, a side such as
+`below', show it on that side of WINDOW."
   (if err
       (message "rexel: %s: %s" method (rexel--error-string err))
     (let ((bid (seq-first (alist-get 'block_ids result))))
@@ -1019,30 +1073,52 @@ it on that side of WINDOW, the window the split started from."
                            (direction . ,direction)
                            (window . ,window))))))))
 
-(defun rexel-split (&optional below)
-  "Split the current block with a new shell to the right, or BELOW with prefix."
-  (interactive "P")
+(defun rexel-split (&optional direction)
+  "Split the current block with a new shell on side DIRECTION.
+DIRECTION is `right', `below', `left' or `above'.  Without it, split
+below if `window-splittable-p' allows, else right, and let
+`pop-to-buffer' place the new block."
+  (interactive)
   (rexel--ensure-block-buffer-context)
-  (let ((conn rexel--conn)
-        (sid rexel--session-id)
-        (window (selected-window)))
+  (let* ((conn rexel--conn)
+         (sid rexel--session-id)
+         (window (selected-window))
+         (side (or direction
+                   (if (window-splittable-p window) 'below 'right))))
     (rexel--request
      conn "session.new_split"
      `((session_id . ,sid) (anchor_id . ,rexel--block-id)
-       (direction . ,(if below "vertical" "horizontal")) (side . "after")
+       (direction . ,(if (memq side '(right left)) "horizontal" "vertical"))
+       (side . ,(if (memq side '(right below)) "after" "before"))
        (layout . ,(rexel--new-shell-layout)) (focus . t))
      (lambda (result err)
        (rexel--show-new-blocks conn sid result err "session.new_split"
-                               (if below 'below 'right) window)))))
+                               direction window)))))
+
+(defun rexel-split-right ()
+  "Split the current block with a new shell to its right."
+  (interactive)
+  (rexel-split 'right))
 
 (defun rexel-split-below ()
   "Split the current block with a new shell below it."
   (interactive)
-  (rexel-split t))
+  (rexel-split 'below))
 
-(defun rexel-new-window (label)
-  "Open a new window holding one shell in the current session, labelled LABEL."
-  (interactive "sWindow label: ")
+(defun rexel-split-left ()
+  "Split the current block with a new shell to its left."
+  (interactive)
+  (rexel-split 'left))
+
+(defun rexel-split-above ()
+  "Split the current block with a new shell above it."
+  (interactive)
+  (rexel-split 'above))
+
+(defun rexel-new-tab (label)
+  "Open a new tab holding one shell in the current session, labelled LABEL.
+A tab is what the Rex API calls a window."
+  (interactive "sTab label: ")
   (rexel--ensure-block-buffer-context)
   (let ((conn rexel--conn)
         (sid rexel--session-id))
@@ -1064,11 +1140,17 @@ it on that side of WINDOW, the window the split started from."
 
 (defvar rexel-prefix-map
   (let ((map (make-sparse-keymap)))
-    (define-key map "%" #'rexel-split)
-    (define-key map "3" #'rexel-split)
+    (define-key map "%" #'rexel-split-right)
+    (define-key map "3" #'rexel-split-right)
     (define-key map "\"" #'rexel-split-below)
     (define-key map "2" #'rexel-split-below)
-    (define-key map "c" #'rexel-new-window)
+    (define-key map [right] #'rexel-split-right)
+    (define-key map [down] #'rexel-split-below)
+    (define-key map [left] #'rexel-split-left)
+    (define-key map [up] #'rexel-split-above)
+    (define-key map (kbd "RET") #'rexel-split)
+    (define-key map "c" #'rexel-new-tab)
+    (define-key map "$" #'rexel-rename-session)
     (define-key map "x" #'rexel-close-block)
     (define-key map "d" #'rexel-detach)
     map)

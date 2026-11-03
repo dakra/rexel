@@ -30,6 +30,19 @@ sessions and opens one ghostel buffer per terminal block.  Servers are this
 machine's (from =rex server status=), the hosts known to Rex (=rex hosts=)
 that have a Unix socket endpoint, and =rexel-hosts=.
 
+=M-x rexel-new-session= creates a session with one shell and attaches to it,
+asking for its label with a prefix argument.  =rexel-session-label-function=
+can rewrite the label; this one names a session after the current project
+unless another label was given:
+
+#+begin_src emacs-lisp
+(setq rexel-session-label-function
+      (lambda (label)
+        (if-let* ((p (and (string-empty-p label) (project-current))))
+            (project-name p)
+          label)))
+#+end_src
+
 A remote server is reached through an ssh forward of its socket, which
 Rex and rexel then both use:
 
@@ -45,13 +58,16 @@ host are named =*rex:SESSION@HOST:ID*=.
 
 In a block buffer =C-c C-r= (=rexel-prefix-key=) prefixes:
 
-| Key          | Command                                   |
-|--------------+-------------------------------------------|
-| ~%~ or ~3~   | ~rexel-split~, new shell to the right     |
-| ~"~ or ~2~   | ~rexel-split-below~                       |
-| ~c~          | ~rexel-new-window~                        |
-| ~x~          | ~rexel-close-block~, ends the program     |
-| ~d~          | ~rexel-detach~, keeps the session running |
+| Key        | Command                                      |
+|------------+----------------------------------------------|
+| ~%~ or ~3~ | ~rexel-split-right~                          |
+| ~"~ or ~2~ | ~rexel-split-below~                          |
+| arrow keys | split to that side, e.g. ~rexel-split-left~  |
+| ~RET~      | ~rexel-split~, below or right, where it fits |
+| ~c~        | ~rexel-new-tab~                              |
+| ~$~        | ~rexel-rename-session~                       |
+| ~x~        | ~rexel-close-block~, ends the program        |
+| ~d~        | ~rexel-detach~, keeps the session running    |
 
 Killing a block buffer only closes the stream; the block keeps running.
 
