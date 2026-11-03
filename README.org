@@ -43,16 +43,15 @@ Without =rex= on this machine, name the socket in =rexel-hosts= instead:
 =(setq rexel-hosts '(("studio" . "/tmp/studio.sock")))=.  Buffers of a
 host are named =*rex:SESSION@HOST:ID*=.
 
-In a block buffer =C-t= (=rexel-prefix-key=) prefixes:
+In a block buffer =C-c C-r= (=rexel-prefix-key=) prefixes:
 
-| Key   | Command                                  |
-|-------+------------------------------------------|
-| =%=   | =rexel-split=, new shell to the right    |
-| ="=   | =rexel-split-below=                      |
-| =c=   | =rexel-new-window=                       |
-| =x=   | =rexel-close-block=, ends the program    |
-| =d=   | =rexel-detach=, keeps the session running|
-| =C-t= | send =C-t= to the terminal               |
+| Key          | Command                                   |
+|--------------+-------------------------------------------|
+| ~%~ or ~3~   | ~rexel-split~, new shell to the right     |
+| ~"~ or ~2~   | ~rexel-split-below~                       |
+| ~c~          | ~rexel-new-window~                        |
+| ~x~          | ~rexel-close-block~, ends the program     |
+| ~d~          | ~rexel-detach~, keeps the session running |
 
 Killing a block buffer only closes the stream; the block keeps running.
 

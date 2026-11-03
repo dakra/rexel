@@ -21,8 +21,9 @@
 ;; terminal.  Keystrokes travel back over Rex's control connection.
 ;;
 ;; `rexel-attach' picks a session.  In a block buffer `rexel-prefix-key'
-;; (C-t) prefixes the layout commands: `%' and `"' split, `c' opens a
-;; window, `x' closes the block, `d' detaches.
+;; (C-c C-r) prefixes the layout commands: `%' or `3' and `"' or `2'
+;; split right and below, `c' opens a window, `x' closes the block, `d'
+;; detaches.
 ;;
 ;; Both connections are WebSockets on a server's Unix socket.  Servers
 ;; come from `rexel-program' and `rexel-hosts'; a remote server is
@@ -56,7 +57,7 @@ a remote server the local end of an ssh forward of its socket.  An entry
 replaces a host of the same label known to Rex."
   :type '(alist :key-type string :value-type file))
 
-(defcustom rexel-prefix-key "C-t"
+(defcustom rexel-prefix-key "C-c C-r"
   "Prefix key for `rexel-prefix-map' in block buffers."
   :type 'key-sequence)
 
@@ -1000,28 +1001,39 @@ once this client owns the block, when the server reports it in the stream."
   `((block . ((flavor . ,rexel--shell-flavor)
               ,@(when label `((label . ,label)))))))
 
-(defun rexel--show-new-blocks (conn sid result err method)
+(defun rexel--show-new-blocks (conn sid result err method
+                                     &optional direction window)
   "Show the first block METHOD created on CONN in session SID.
-RESULT and ERR are the response."
+RESULT and ERR are the response.  DIRECTION, `below' or `right', shows
+it on that side of WINDOW, the window the split started from."
   (if err
       (message "rexel: %s: %s" method (rexel--error-string err))
     (let ((bid (seq-first (alist-get 'block_ids result))))
       (when bid
-        (pop-to-buffer (rexel--ensure-block-buffer conn sid bid))))))
+        (pop-to-buffer (rexel--ensure-block-buffer conn sid bid)
+                       (when direction
+                         ;; A nil `window-height' keeps the half split
+                         ;; instead of fitting the still empty buffer.
+                         `(display-buffer-in-direction
+                           (window-height . nil)
+                           (direction . ,direction)
+                           (window . ,window))))))))
 
 (defun rexel-split (&optional below)
   "Split the current block with a new shell to the right, or BELOW with prefix."
   (interactive "P")
   (rexel--ensure-block-buffer-context)
   (let ((conn rexel--conn)
-        (sid rexel--session-id))
+        (sid rexel--session-id)
+        (window (selected-window)))
     (rexel--request
      conn "session.new_split"
      `((session_id . ,sid) (anchor_id . ,rexel--block-id)
        (direction . ,(if below "vertical" "horizontal")) (side . "after")
        (layout . ,(rexel--new-shell-layout)) (focus . t))
      (lambda (result err)
-       (rexel--show-new-blocks conn sid result err "session.new_split")))))
+       (rexel--show-new-blocks conn sid result err "session.new_split"
+                               (if below 'below 'right) window)))))
 
 (defun rexel-split-below ()
   "Split the current block with a new shell below it."
@@ -1050,22 +1062,15 @@ RESULT and ERR are the response."
                     `((session_id . ,rexel--session-id)
                       (block_id . ,rexel--block-id)))))
 
-(defun rexel-send-prefix ()
-  "Send `rexel-prefix-key' itself to the terminal."
-  (interactive)
-  (let ((spec (ghostel--event-key-spec (aref (kbd rexel-prefix-key) 0))))
-    (when spec
-      (ghostel--on-user-input)
-      (ghostel--send-encoded (car spec) (cdr spec)))))
-
 (defvar rexel-prefix-map
   (let ((map (make-sparse-keymap)))
     (define-key map "%" #'rexel-split)
+    (define-key map "3" #'rexel-split)
     (define-key map "\"" #'rexel-split-below)
+    (define-key map "2" #'rexel-split-below)
     (define-key map "c" #'rexel-new-window)
     (define-key map "x" #'rexel-close-block)
     (define-key map "d" #'rexel-detach)
-    (define-key map (kbd rexel-prefix-key) #'rexel-send-prefix)
     map)
   "Commands available behind `rexel-prefix-key' in block buffers.")
 
