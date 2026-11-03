@@ -65,11 +65,18 @@ In a block buffer =C-c C-r= (=rexel-prefix-key=) prefixes:
 | arrow keys | split to that side, e.g. ~rexel-split-left~  |
 | ~RET~      | ~rexel-split~, below or right, where it fits |
 | ~c~        | ~rexel-new-tab~                              |
+| ~=~        | ~rexel-sync-layout~, see below               |
 | ~$~        | ~rexel-rename-session~                       |
 | ~x~        | ~rexel-close-block~, ends the program        |
 | ~d~        | ~rexel-detach~, keeps the session running    |
 
 Killing a block buffer only closes the stream; the block keeps running.
+
+Emacs windows are not kept in step with the Rex layout.  ~rexel-sync-layout~
+rebuilds the selected frame's windows from the current block's Rex tab,
+with ~C-u~ from a tab picked by label; outside a block buffer it asks for an
+attached session and uses its active tab.
+Floating blocks and zoom are ignored.
 
 Emacs takes ownership of a block when a window starts showing it or its
 stream reconnects, so the terminal is sized to the smallest Emacs window

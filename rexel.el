@@ -1129,6 +1129,99 @@ A tab is what the Rex API calls a window."
      (lambda (result err)
        (rexel--show-new-blocks conn sid result err "session.new_window")))))
 
+(defun rexel--read-session ()
+  "Return (CONN . SID) of the current block, else of a chosen attached session."
+  (if (and (rexel--ready-p rexel--conn) rexel--session-id)
+      (cons rexel--conn rexel--session-id)
+    (let (sessions)
+      (dolist (conn rexel--conns)
+        (when (rexel--ready-p conn)
+          (pcase-dolist (`(,sid . ,label) (rexel--conn-sessions conn))
+            (push (cons (if (rexel--conn-host conn)
+                            (format "%s@%s" label (rexel--conn-host conn))
+                          label)
+                        (cons conn sid))
+                  sessions))))
+      (cond ((null sessions) (user-error "No attached Rex session"))
+            ((null (cdr sessions)) (cdar sessions))
+            (t (cdr (assoc (completing-read "Rex session: " sessions nil t)
+                           sessions)))))))
+
+(defun rexel--read-tab (view)
+  "Let the user pick one of VIEW's tabs by label and return it."
+  (let* ((tabs (alist-get 'windows view))
+         (names (seq-map-indexed
+                 (lambda (tab i) (format "%d: %s" (1+ i) (alist-get 'label tab)))
+                 tabs))
+         (name (completing-read "Rex tab: " names nil t nil nil (car names))))
+    (seq-elt tabs (seq-position names name))))
+
+(defun rexel--show-layout (conn sid layout blocks window)
+  "Show LAYOUT's blocks of session SID on CONN in WINDOW, splitting it.
+BLOCKS are the terminal blocks of the view; a block not among them leaves
+its window as it is.  A split that does not fit shows its before side."
+  (let ((split (alist-get 'split layout)))
+    (if (null split)
+        (when-let* ((bid (alist-get 'block_id layout))
+                    ((assoc bid blocks)))
+          (set-window-buffer window (rexel--ensure-block-buffer conn sid bid)))
+      (let* ((horizontal (equal (alist-get 'direction split) "horizontal"))
+             (total (if horizontal
+                        (window-total-width window)
+                      (window-total-height window)))
+             (new (condition-case nil
+                      (split-window window
+                                    (round (* (alist-get 'ratio split) total))
+                                    (if horizontal 'right 'below))
+                    (error nil))))
+        (rexel--show-layout conn sid (alist-get 'before split) blocks window)
+        (when new
+          (rexel--show-layout conn sid (alist-get 'after split) blocks new))))))
+
+;;;###autoload
+(defun rexel-sync-layout (&optional choose)
+  "Rebuild the selected frame's windows from a Rex tab's layout.
+The tab is the current block's, with prefix argument CHOOSE one picked by label,
+and outside a block buffer the active tab of a chosen attached session.
+Every block shown becomes Emacs-owned and sized to its window.
+Floating blocks and zoom are ignored."
+  (interactive "P")
+  (pcase-let ((`(,conn . ,sid) (rexel--read-session))
+              (bid rexel--block-id))
+    (rexel--request
+     conn "session.view" `((session_id . ,sid))
+     (lambda (view err)
+       (if err
+           (message "rexel: session.view: %s" (rexel--error-string err))
+         (rexel--apply-view conn sid view)
+         (let* ((tabs (alist-get 'windows view))
+                (tab (if choose
+                         (rexel--read-tab view)
+                       (or (seq-find
+                            (lambda (w)
+                              (seq-find (lambda (b) (equal (alist-get 'block_id b) bid))
+                                        (alist-get 'blocks
+                                                   (seq-first (alist-get 'layers w)))))
+                            tabs)
+                           (seq-find (lambda (w)
+                                       (equal (alist-get 'window_id w)
+                                              (alist-get 'active_window_id view)))
+                                     tabs))))
+                (layout (alist-get 'layout (seq-first (alist-get 'layers tab))))
+                (window (seq-find (lambda (w) (not (window-parameter w 'window-side)))
+                                  (window-list nil 'no-mini))))
+           (if (null layout)
+               (message "rexel: Rex tab %s has no tiled blocks"
+                        (alist-get 'label tab))
+             (delete-other-windows window)
+             (set-window-dedicated-p window nil)
+             (rexel--show-layout conn sid layout
+                                 (rexel--view-terminal-blocks view) window)
+             (when-let* ((buf (gethash (alist-get 'focused_block_id tab)
+                                       (rexel--conn-blocks conn)))
+                         (w (get-buffer-window buf)))
+               (select-window w)))))))))
+
 (defun rexel-close-block ()
   "Close the current block on the server, ending its program."
   (interactive)
@@ -1150,6 +1243,7 @@ A tab is what the Rex API calls a window."
     (define-key map [up] #'rexel-split-above)
     (define-key map (kbd "RET") #'rexel-split)
     (define-key map "c" #'rexel-new-tab)
+    (define-key map "=" #'rexel-sync-layout)
     (define-key map "$" #'rexel-rename-session)
     (define-key map "x" #'rexel-close-block)
     (define-key map "d" #'rexel-detach)
