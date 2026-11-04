@@ -17,8 +17,7 @@ as in any ghostel buffer; the theme set in Rex is not applied.
 * Requirements
 
 - A running Rex server (the Rex app on macOS, or =rex server= on Linux).
-- ghostel 0.60.0 or later with a native module built from a source that
-  has =ghostel--restore-snapshot=.
+- A ghostel that has =ghostel-snapshot-restore=, with its native module.
 - [[https://github.com/ahyatt/emacs-websocket][websocket]] 1.15 or later.
 - Emacs with native JSON support (=json-serialize=): built in since Emacs 30,
   libjansson on 28 and 29.

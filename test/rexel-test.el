@@ -418,5 +418,29 @@
     (should (eq (rexel--shell-process fg (vector '((name . "sudo")) bash login))
                 bash))))
 
+(ert-deftest rexel-test-replies-dropped ()
+  "Replies made while parsing the stream are dropped, typed bytes are sent."
+  (with-temp-buffer
+    (let ((reply (lambda (&rest _) (ghostel--pty-out "\e[?62;22c") 0)))
+      (setq rexel--conn 'fake
+            rexel--stream (rexel--make-stream :marker "\e_rex1;1;")
+            ghostel--term 'fake
+            ghostel-pty-out-function #'rexel--pty-out)
+      (cl-letf (((symbol-function 'ghostel--write-vt) reply)
+                ((symbol-function 'ghostel--restore-snapshot) reply)
+                ((symbol-function 'ghostel--apply-palette) reply)
+                ((symbol-function 'ghostel--apply-bold-config) #'ignore)
+                ((symbol-function 'ghostel--invalidate) #'ignore)
+                ((symbol-function 'rexel--sync-size) #'ignore)
+                ((symbol-function 'rexel--flush-out) #'ignore))
+        (rexel--on-live-bytes "\e[c")
+        (should-not rexel--out-pending)
+        (setf (rexel--stream-snapshot rexel--stream) (list "snapshot"))
+        (rexel--restore-snapshot)
+        (should (eq 'live rexel--data-state))
+        (should-not rexel--out-pending)
+        (ghostel--pty-out "typed")
+        (should (equal "typed" rexel--out-pending))))))
+
 (provide 'rexel-test)
 ;;; rexel-test.el ends here

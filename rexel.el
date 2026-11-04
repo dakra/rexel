@@ -38,7 +38,8 @@
 (require 'ghostel)
 (require 'websocket)
 
-(declare-function ghostel--restore-snapshot "ghostel-module" (term data))
+
+;;; Customization
 
 (defgroup rexel nil
   "Rex multiplexer client for ghostel."
@@ -803,22 +804,19 @@ Signal an error on a record longer than `rexel--max-record-bytes'."
   "Restore the collected snapshot and go live with the bytes after it."
   (let* ((s rexel--stream)
          (snapshot (apply #'concat (nreverse (rexel--stream-snapshot s))))
-         (rest (car (rexel--stream-tail s)))
-         (term ghostel--term))
+         (rest (car (rexel--stream-tail s))))
     (setf (rexel--stream-snapshot s) nil
           (rexel--stream-tail s) nil)
     (condition-case err
         (progn
-          (ghostel--restore-snapshot term snapshot)
+          ;; The server answers the program's terminal queries.
+          (let ((ghostel-pty-out-function #'ignore))
+            (ghostel-snapshot-restore snapshot))
           (setq rexel--data-state 'live))
       (error (rexel--end-stream (current-buffer)
                                 (format "bad snapshot: %s"
                                         (error-message-string err)))))
     (when (eq rexel--data-state 'live)
-      (ghostel--apply-palette term)
-      (ghostel--apply-bold-config term)
-      (setq ghostel--force-next-redraw t)
-      (ghostel--invalidate)
       (when (> (length rest) 0)
         (rexel--on-live-bytes rest))
       (rexel--sync-size))))
@@ -876,9 +874,11 @@ after `rexel--max-message-bytes' passes through as output."
     (dolist (item items)
       (if (consp item)
           (rexel--handle-message (cdr item))
-        ;; Callbacks run while parsing may select another buffer.
+        ;; Callbacks run while parsing may select another buffer.  The
+        ;; server answers the program's terminal queries.
         (save-current-buffer
-          (ghostel--write-vt ghostel--term item))))
+          (let ((ghostel-pty-out-function #'ignore))
+            (ghostel--write-vt ghostel--term item)))))
     (ghostel--invalidate)))
 
 (defun rexel--handle-message (json)
