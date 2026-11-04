@@ -889,10 +889,9 @@ after `rexel--max-message-bytes' passes through as output."
        (let ((cols (alist-get 'cols msg))
              (rows (alist-get 'rows msg)))
          (when (and (natnump cols) (natnump rows) (> cols 0) (> rows 0))
-           (setq ghostel--term-rows rows
-                 ghostel--term-cols cols
-                 ghostel--force-next-redraw t)
-           (ghostel--set-size-with-cell-dims ghostel--term rows cols))))
+           (ghostel--set-size-with-cell-dims ghostel--term rows cols)
+           ;; Output after this message assumes the new size is in effect.
+           (ghostel--commit-frame (current-buffer)))))
       ("child_exited"
        (message "rexel: %s: program exited with status %s"
                 (buffer-name) (alist-get 'exit_code msg))))))
