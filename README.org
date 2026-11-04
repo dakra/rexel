@@ -1,9 +1,9 @@
-#+TITLE: rexel
+#+TITLE: Rexel
 
-Rex multiplexer client for Emacs, built on [[https://github.com/dakra/ghostel][ghostel]].
+Rex multiplexer client for Emacs, built on [[https://github.com/dakra/ghostel][Ghostel]].
 
 [[https://www.superlogical.com/rex][Rex]] streams each terminal to its clients as a libghostty snapshot
-followed by the raw PTY bytes.  ghostel runs libghostty, so rexel feeds
+followed by the raw PTY bytes.  Ghostel runs libghostty, so Rexel feeds
 that stream straight into a ghostel buffer: scrollback, search, copy mode
 and key encoding work as in a local terminal, and the session keeps
 running on the Rex server when Emacs goes away.

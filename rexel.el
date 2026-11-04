@@ -5,7 +5,7 @@
 ;; Author: Daniel Kraus <daniel@kraus.my>
 ;; URL: https://github.com/dakra/rexel
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (ghostel "0.60.0") (websocket "1.15"))
+;; Package-Requires: ((emacs "28.1") (ghostel "0.61.0") (websocket "1.15"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
@@ -37,6 +37,8 @@
 (require 'url-util)
 (require 'ghostel)
 (require 'websocket)
+
+(declare-function ghostel--write-vt "ghostel-module")
 
 
 ;;; Customization
@@ -667,7 +669,7 @@ The server continues from the first byte not yet received."
     (condition-case nil
         (rexel--open-stream
          (concat "\x02" (rexel--stream-token s)
-                 (bindat-pack (bindat-type uint 64 t) (rexel--stream-received s))))
+                 (bindat-pack (bindat-type uintr 64) (rexel--stream-received s))))
       (error (rexel--on-data-close (current-buffer) s)))))
 
 (defun rexel--close-stream ()
