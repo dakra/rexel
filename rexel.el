@@ -608,7 +608,7 @@ at a time and bytes typed meanwhile are coalesced into the next."
                conn "com.superlogical.terminal.write"
                `((session_id . ,rexel--session-id)
                  (block_id . ,rexel--block-id)
-                 (args . ((data . ,(decode-coding-string data 'utf-8)))))
+                 (args . ((data . ,(decode-coding-string data 'utf-8-unix)))))
                (lambda (_result err)
                  (when err
                    (message "rexel: terminal.write: %s" (rexel--error-string err)))
