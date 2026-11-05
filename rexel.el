@@ -49,7 +49,7 @@
   :prefix "rexel-")
 
 (defcustom rexel-program "rex"
-  "The rex command-line program, used to find servers."
+  "The rex command-line program, used to find and start servers."
   :type 'string)
 
 (defcustom rexel-hosts nil
@@ -58,6 +58,12 @@ Each entry is (LABEL . SOCKET), the Unix socket path of the server, for
 a remote server the local end of an ssh forward of its socket.  An entry
 replaces a host of the same label known to Rex."
   :type '(alist :key-type string :value-type file))
+
+(defcustom rexel-autostart-server 'ask
+  "Whether to run `rexel-start-server' when no server is found."
+  :type '(choice (const :tag "Ask first" ask)
+                 (const :tag "Always" t)
+                 (const :tag "Never" nil)))
 
 (defcustom rexel-session-label-function nil
   "Function turning a label given to `rexel-new-session' into the one used.
@@ -101,9 +107,15 @@ TIMER is the pending attempt and DELAY the seconds until the one after it."
 (defvar-local rexel--conn nil
   "The server connection of this block buffer.")
 
+(defun rexel--program ()
+  "Return the path of `rexel-program' or of the macOS app's copy, or nil."
+  (or (executable-find rexel-program)
+      (executable-find
+       "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex")))
+
 (defun rexel--rex-json (&rest args)
   "Return the parsed JSON output of `rexel-program' run with ARGS, or nil."
-  (when-let* ((rex (executable-find rexel-program)))
+  (when-let* ((rex (rexel--program)))
     (with-temp-buffer
       (when (zerop (apply #'call-process rex nil t nil
                           "--autostart=false" "--timeout" "2s" args))
@@ -116,10 +128,17 @@ TIMER is the pending attempt and DELAY the seconds until the one after it."
                    (url-unhex-string (substring e (length "unix://")))))
             endpoints))
 
+(defun rexel--socket-live-p (path)
+  "Return non-nil if something accepts connections on the Unix socket PATH."
+  (ignore-errors
+    (delete-process (make-network-process :name "rexel-probe" :family 'local
+                                          :service path :noquery t))
+    t))
+
 (defun rexel--hosts ()
   "Return the servers to attach to as (LABEL . SOCKET) pairs.
-This machine's server has label nil and is listed when its socket exists.
-Hosts without a Unix socket endpoint are left out."
+This machine's server has label nil and is listed when its socket accepts
+connections.  Hosts without a Unix socket endpoint are left out."
   (let ((local (or (rexel--unix-endpoint
                     (list (alist-get 'endpoint
                                      (rexel--rex-json "server" "status" "--json"))))
@@ -130,7 +149,7 @@ Hosts without a Unix socket endpoint are left out."
                          (cons (alist-get 'label h)
                                (rexel--unix-endpoint (alist-get 'endpoints h))))
                        (alist-get 'hosts (rexel--rex-json "hosts" "list" "--json")))))
-    (append (and (file-exists-p local) (list (cons nil local)))
+    (append (and (rexel--socket-live-p local) (list (cons nil local)))
             rexel-hosts
             (seq-remove (lambda (h) (or (null (cdr h))
                                         (assoc-string (car h) rexel-hosts t)))
@@ -1036,9 +1055,29 @@ once this client owns the block, when the server reports it in the stream."
     (when (buffer-live-p buf)
       (pop-to-buffer buf))))
 
+;;;###autoload
+(defun rexel-start-server ()
+  "Start this machine's Rex server, which keeps running after Emacs exits."
+  (interactive)
+  (let ((rex (or (rexel--program)
+                 (user-error "Cannot find %s; see `rexel-program'" rexel-program))))
+    (unless (zerop (call-process rex nil nil nil "server" "start"))
+      (user-error "Could not start the Rex server"))
+    (message "Rex server running")))
+
+(defun rexel--autostart-server ()
+  "Start this machine's Rex server, as `rexel-autostart-server' allows."
+  (when (and rexel-autostart-server
+             (rexel--program)
+             (or (eq rexel-autostart-server t)
+                 (y-or-n-p "No Rex server is running.  Start one? ")))
+    (rexel-start-server)))
+
 (defun rexel--read-host ()
-  "Return the Rex host to use, asking when more than one is known."
-  (let* ((hosts (rexel--hosts))
+  "Return the Rex host to use, asking when more than one is known.
+With no host known, offer to start this machine's server."
+  (let* ((hosts (or (rexel--hosts)
+                    (progn (rexel--autostart-server) (rexel--hosts))))
          (names (mapcar (lambda (h) (cons (or (car h) "this machine") h)) hosts)))
     (cond ((null hosts) (user-error "No Rex server found; see `rexel-hosts'"))
           ((null (cdr hosts)) (car hosts))

@@ -223,7 +223,8 @@
          (local (make-temp-file "rexel"))
          (endpoint (concat "unix://" (url-hexify-string local))))
     (unwind-protect
-        (cl-letf (((symbol-function 'rexel--rex-json)
+        (cl-letf (((symbol-function 'rexel--socket-live-p) #'file-exists-p)
+                  ((symbol-function 'rexel--rex-json)
                    (lambda (&rest args)
                      (if (equal (car args) "server")
                          `((endpoint . ,endpoint))
@@ -443,6 +444,60 @@
         (should-not rexel--out-pending)
         (ghostel--pty-out "typed")
         (should (equal "typed" rexel--out-pending))))))
+
+(ert-deftest rexel-test-read-host-starts-server ()
+  "The server starts only with no host known and as the option allows."
+  (let* ((local '(nil . "/tmp/rex.sock"))
+         (rexel-program "rex")
+         hosts started asked answer
+         (read-host
+          (lambda (option known)
+            (setq hosts known started nil asked nil)
+            (let ((rexel-autostart-server option))
+              (ignore-errors (rexel--read-host))))))
+    (cl-letf (((symbol-function 'rexel--hosts) (lambda () hosts))
+              ((symbol-function 'executable-find) (lambda (_) "/bin/rex"))
+              ((symbol-function 'y-or-n-p) (lambda (_) (setq asked t) answer))
+              ((symbol-function 'call-process)
+               (lambda (_ _ _ _ &rest args)
+                 (setq started args hosts (list local))
+                 0)))
+      (should (equal local (funcall read-host t nil)))
+      (should (equal '("server" "start") started))
+      (should-not asked)
+      (setq answer t)
+      (should (equal local (funcall read-host 'ask nil)))
+      (should asked)
+      (setq answer nil)
+      (should-not (funcall read-host 'ask nil))
+      (should-not started)
+      (should-not (funcall read-host nil nil))
+      (should-not (or started asked))
+      (should (equal local (funcall read-host t (list local))))
+      (should-not (or started asked)))))
+
+(ert-deftest rexel-test-socket-live-p ()
+  "Only a socket with a listener counts; a leftover file does not."
+  (let* ((dir (make-temp-file "rexel" t))
+         (path (expand-file-name "s" dir))
+         (leftover (expand-file-name "leftover" dir)))
+    (unwind-protect
+        (let ((server (make-network-process :name "rexel-test" :family 'local
+                                            :service path :server t :noquery t)))
+          (should (rexel--socket-live-p path))
+          (delete-process server)
+          (should-not (rexel--socket-live-p (expand-file-name "missing" dir)))
+          (write-region "" nil leftover)
+          (should-not (rexel--socket-live-p leftover)))
+      (delete-directory dir t))))
+
+(ert-deftest rexel-test-start-server-needs-program ()
+  "The command reports a missing program or a failed start."
+  (cl-letf (((symbol-function 'executable-find) #'ignore))
+    (should-error (rexel-start-server) :type 'user-error))
+  (cl-letf (((symbol-function 'executable-find) (lambda (_) "/bin/rex"))
+            ((symbol-function 'call-process) (lambda (&rest _) 1)))
+    (should-error (rexel-start-server) :type 'user-error)))
 
 (provide 'rexel-test)
 ;;; rexel-test.el ends here

@@ -8,6 +8,9 @@ that stream straight into a ghostel buffer: scrollback, search, copy mode
 and key encoding work as in a local terminal, and the session keeps
 running on the Rex server when Emacs goes away.
 
+Rex has no Linux client of its own yet; Rexel brings its sessions to Emacs
+there.
+
 Prototype status: attaching, typing, resizing and the basic layout
 commands work.  A dropped data connection resumes its stream, and a lost
 control connection is redialled with backoff while sessions are attached;
@@ -16,7 +19,18 @@ as in any ghostel buffer; the theme set in Rex is not applied.
 
 * Requirements
 
-- A running Rex server (the Rex app on macOS, or =rex server= on Linux).
+- Rex, for macOS, Linux or FreeBSD.  On macOS it comes with the Rex Beta app,
+  which need not run; rexel looks for =rexel-program= on =exec-path=, then for
+  the copy inside the app.  The app does not put =rex= on =PATH=; for use in a
+  shell, symlink it:
+  #+begin_src sh
+  ln -s "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex" /usr/local/bin/rex
+  #+end_src
+- A Rex server.  =M-x rexel-start-server= runs =rex server start= on this
+  machine.  With no server known, rexel offers to do that; set
+  =rexel-autostart-server= to =t= to skip the question or =nil= to never start
+  one.  With systemd, =systemctl --user enable --now rex.socket= starts your
+  own server on demand instead.
 - A ghostel that has =ghostel-snapshot-restore=, with its native module.
 - [[https://github.com/ahyatt/emacs-websocket][websocket]] 1.15 or later.
 - Emacs with native JSON support (=json-serialize=): built in since Emacs 30,
@@ -43,16 +57,21 @@ unless another label was given:
 #+end_src
 
 A remote server is reached through an ssh forward of its socket, which
-Rex and rexel then both use:
+Rex and rexel then both use.  For a Linux server, with your user id on it
+in the path:
 
 #+begin_src sh
 ssh -N -o StreamLocalBindUnlink=yes \
-    -L /tmp/studio.sock:/Users/me/Library/Application\ Support/rex/server.sock studio
-rex hosts add studio unix:///tmp/studio.sock
+    -L /tmp/devbox.sock:/run/user/1000/rex/server.sock devbox
+rex hosts add devbox unix:///tmp/devbox.sock
 #+end_src
 
+=ssh devbox rex server status= prints the socket of a running server.  A
+shared Linux server is at =/run/rex/server.sock= and a macOS one at
+=~/Library/Application Support/rex/server.sock=.
+
 Without =rex= on this machine, name the socket in =rexel-hosts= instead:
-=(setq rexel-hosts '(("studio" . "/tmp/studio.sock")))=.  Buffers of a
+=(setq rexel-hosts '(("devbox" . "/tmp/devbox.sock")))=.  Buffers of a
 host are named =*rex:SESSION@HOST:ID*=.
 
 In a block buffer =C-c C-r= (=rexel-prefix-key=) prefixes:
