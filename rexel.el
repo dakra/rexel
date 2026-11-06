@@ -58,8 +58,9 @@ Each entry is (LABEL . ENDPOINT) or (LABEL ENDPOINT...), the endpoints
 being tried in order.  ENDPOINT is a network address such as
 \"studio.tail1234.ts.net\", \"https://HOST:PORT\" or \"http://HOST:PORT\",
 or the absolute path of a Unix socket.  An address without a scheme is
-reached over https only, on port 443 unless it names one.  An entry
-replaces a host of the same label known to Rex."
+reached over https only.  A host alone, without port or path, is tried
+on its scheme's port, then on Rex's port 7297.  An entry replaces a
+host of the same label known to Rex."
   :type '(alist :key-type string
                 :value-type (choice string (repeat string))))
 
@@ -87,6 +88,9 @@ command runs from.  An empty or nil result lets the server choose one."
 
 (defvar rexel--keepalive-timer nil
   "Timer of the next `rexel--keepalive' run, or nil.")
+
+(defvar rexel--default-port 7297
+  "Port a Rex server listens on unless told another.")
 
 (defconst rexel--api-revision 8
   "Control API revision this client speaks.")
@@ -162,9 +166,21 @@ such as another scheme or a URL with user information or a query."
              (concat (if (string-empty-p scheme) "https" (downcase scheme)) "://"
                      (replace-regexp-in-string "/+\\'" "" rest)))))))
 
+(defun rexel--with-default-port (endpoint)
+  "Return the endpoints to try for ENDPOINT, itself first.
+A URL without port and path is tried on `rexel--default-port' too."
+  (let ((url (and (rexel--network-endpoint-p endpoint)
+                  (url-generic-parse-url endpoint))))
+    (if (and url (not (url-portspec url)) (string-empty-p (url-filename url)))
+        (list endpoint (format "%s:%d" endpoint rexel--default-port))
+      (list endpoint))))
+
 (defun rexel--endpoints (addresses)
-  "Return the usable server ADDRESSES in order, each normalized."
-  (delq nil (mapcar #'rexel--normalize-endpoint addresses)))
+  "Return the endpoints to try for the server ADDRESSES, in order.
+Unusable addresses and repeated endpoints are left out."
+  (delete-dups
+   (mapcan #'rexel--with-default-port
+           (delq nil (mapcar #'rexel--normalize-endpoint addresses)))))
 
 (defun rexel--socket-live-p (path)
   "Return non-nil if something accepts connections on the Unix socket PATH."
@@ -401,11 +417,14 @@ HOST is a (LABEL . ENDPOINTS) pair as `rexel--hosts' returns them."
 
 (defun rexel--dial (conn &optional endpoints)
   "Open CONN's control connection and send the hello.
-Try ENDPOINTS, by default all of CONN's, in order until a server
-answers one with a welcome.  Signal the last error if none can be
-dialled."
-  (let ((endpoints (or endpoints (rexel--conn-endpoints conn)))
-        ws err)
+Try ENDPOINTS in order until a server answers one with a welcome.
+By default these are all of CONN's, the one that last answered first.
+Signal the last error if none can be dialled."
+  (let* ((last (rexel--conn-endpoint conn))
+         (endpoints (or endpoints
+                        (append (and last (list last))
+                                (remove last (rexel--conn-endpoints conn)))))
+         ws err)
     (while (and endpoints (not ws))
       (let ((endpoint (pop endpoints)))
         (condition-case e

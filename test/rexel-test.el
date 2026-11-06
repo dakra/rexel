@@ -256,9 +256,11 @@
                                     (endpoints . ["unix:///tmp/near.sock" "near.ts.net"]))]))))))
           (should (equal `((nil ,local)
                            ("studio" "/tmp/studio.sock")
-                           ("attic" "https://attic.ts.net" "http://10.0.0.2:7297")
-                           ("far" "https://far.ts.net")
-                           ("near" "/tmp/near.sock" "https://near.ts.net"))
+                           ("attic" "https://attic.ts.net" "https://attic.ts.net:7297"
+                            "http://10.0.0.2:7297")
+                           ("far" "https://far.ts.net" "https://far.ts.net:7297")
+                           ("near" "/tmp/near.sock"
+                            "https://near.ts.net" "https://near.ts.net:7297"))
                          (rexel--hosts))))
       (delete-file local))))
 
@@ -293,6 +295,26 @@
     (should (rexel--network-endpoint-p "https://h")))
   (let ((case-fold-search t))
     (should-not (rexel--network-endpoint-p "HTTPS://h"))))
+
+(ert-deftest rexel-test-endpoints-add-default-port ()
+  (pcase-dolist (`(,addresses . ,endpoints)
+                 '((("studio.ts.net")
+                    "https://studio.ts.net" "https://studio.ts.net:7297")
+                   (("studio.ts.net:8443") "https://studio.ts.net:8443")
+                   (("https://studio.ts.net")
+                    "https://studio.ts.net" "https://studio.ts.net:7297")
+                   (("http://10.0.0.2") "http://10.0.0.2" "http://10.0.0.2:7297")
+                   (("https://studio.ts.net:443") "https://studio.ts.net:443")
+                   (("http://10.0.0.2:7297") "http://10.0.0.2:7297")
+                   (("https://studio.ts.net/rex") "https://studio.ts.net/rex")
+                   (("[fd7a::1]") "https://[fd7a::1]" "https://[fd7a::1]:7297")
+                   (("[fd7a::1]:8443") "https://[fd7a::1]:8443")
+                   (("/tmp/rex.sock") "/tmp/rex.sock")
+                   (("ws://studio.ts.net"))
+                   ;; An endpoint named twice is dialled once.
+                   (("studio.ts.net" "https://studio.ts.net:7297" "studio.ts.net/")
+                    "https://studio.ts.net" "https://studio.ts.net:7297")))
+    (should (equal endpoints (rexel--endpoints addresses)))))
 
 (defmacro rexel-test--with-dials (dialled &rest body)
   "Run BODY with `rexel--ws-open' stubbed to collect in DIALLED.
@@ -340,6 +362,16 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
       (rexel-test--dial-event (car dialled) 'close)
       (should closed)
       (should (= 2 (length dialled))))))
+
+(ert-deftest rexel-test-dial-starts-at-last-answering-endpoint ()
+  (let ((conn (rexel--make-conn :endpoints (list "a" "b" "c") :endpoint "b"))
+        dialled closed)
+    (rexel-test--with-dials dialled
+      (rexel--dial conn)
+      (should (equal '("b") (mapcar #'car dialled)))
+      (should (equal '("a" "c") (rexel--conn-untried conn)))
+      (should (equal '("a" "b" "c") (rexel--conn-endpoints conn)))
+      (should-not closed))))
 
 (ert-deftest rexel-test-dial-out-of-endpoints ()
   (let ((conn (rexel--make-conn :endpoints (list "a" "dead")))

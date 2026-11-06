@@ -71,10 +71,11 @@ rex hosts add studio rex.tail1234.ts.net
 
 Without =rex= on this machine, name the address in =rexel-hosts= instead:
 =(setq rexel-hosts '(("studio" . "rex.tail1234.ts.net")))=.  An address
-without a scheme is reached over https only, on port 443 unless it names
-one; =http://HOST:PORT= names a plain listener.  A host with several
-endpoints is tried at each in order.  Buffers of a host are named
-=*rex:SESSION@HOST:ID*=.
+without a scheme is reached over https only; =http://HOST:PORT= names a
+plain listener.  A host alone, without port or path, is tried on its
+scheme's port, then on Rex's port 7297.  A host with several endpoints is
+tried at each in order; a redial starts with the one that last answered.
+Buffers of a host are named =*rex:SESSION@HOST:ID*=.
 
 Without Tailscale, forward the server's socket over ssh.  For a Linux
 server, with your user id on it in the path:
