@@ -170,7 +170,7 @@
   (rexel-test--with-fake-conn _sent
     (let ((ws (list 'fake)) hello)
       (cl-letf (((symbol-function 'rexel--ws-open)
-                 (lambda (_path _url _protocol on-open &rest _)
+                 (lambda (_endpoint _path _protocol on-open &rest _)
                    (funcall on-open ws) ws))
                 ((symbol-function 'websocket-send)
                  (lambda (_ws frame) (setq hello (websocket-frame-payload frame))))
@@ -204,7 +204,7 @@
   (pcase-dolist (`(,protocol ,revision ,ok)
                  '(("rex.control.v1" 8 t) ("rex.control.v1" 7 nil)
                    ("rex.control.v1" nil nil) ("other" 8 nil)))
-    (let ((conn (rexel--make-conn :socket "none"))
+    (let ((conn (rexel--make-conn :endpoints (list "none")))
           (ready nil)
           (closed nil))
       (push (lambda (_conn) (setq ready t)) (rexel--conn-on-ready conn))
@@ -219,7 +219,11 @@
       (should (eq (and (rexel--conn-client-id conn) t) ok)))))
 
 (ert-deftest rexel-test-hosts-merge ()
-  (let* ((rexel-hosts '(("studio" . "/tmp/studio.sock")))
+  (let* ((rexel-hosts '(("studio" . "/tmp/studio.sock")
+                        ("attic" "attic.ts.net" "http://10.0.0.2:7297")
+                        ("bad" . "ws://bad.ts.net")
+                        (nil . "/tmp/unlabelled.sock")
+                        ("broken")))
          (local (make-temp-file "rexel"))
          (endpoint (concat "unix://" (url-hexify-string local))))
     (unwind-protect
@@ -228,24 +232,147 @@
                    (lambda (&rest args)
                      (if (equal (car args) "server")
                          `((endpoint . ,endpoint))
-                       '((hosts . [((label . "studio") (endpoints . ["unix:///x.sock"]))
+                       '((hosts . [((label . "Studio") (endpoints . ["studio.ts.net"]))
                                    ((label . "far") (endpoints . ["far.ts.net"]))
+                                   ((label . "none") (endpoints . ["ws://none.ts.net"]))
                                    ((label . "near")
-                                    (endpoints . ["near.ts.net" "unix:///tmp/near.sock"]))]))))))
-          (should (equal `((nil . ,local)
-                           ("studio" . "/tmp/studio.sock")
-                           ("near" . "/tmp/near.sock"))
+                                    (endpoints . ["unix:///tmp/near.sock" "near.ts.net"]))]))))))
+          (should (equal `((nil ,local)
+                           ("studio" "/tmp/studio.sock")
+                           ("attic" "https://attic.ts.net" "http://10.0.0.2:7297")
+                           ("far" "https://far.ts.net")
+                           ("near" "/tmp/near.sock" "https://near.ts.net"))
                          (rexel--hosts))))
       (delete-file local))))
 
+(ert-deftest rexel-test-normalize-endpoint ()
+  (pcase-dolist (`(,address ,endpoint)
+                 '(("unix:///tmp/a%20b.sock" "/tmp/a b.sock")
+                   ("UNIX:///tmp/rex.sock" "/tmp/rex.sock")
+                   ("/tmp/rex.sock" "/tmp/rex.sock")
+                   ("studio.ts.net" "https://studio.ts.net")
+                   ("studio.ts.net/" "https://studio.ts.net")
+                   ("10.0.0.2:7297" "https://10.0.0.2:7297")
+                   ("[fd7a::1]:7297" "https://[fd7a::1]:7297")
+                   ("http://10.0.0.2:7297//" "http://10.0.0.2:7297")
+                   ("HTTPS://Studio.ts.net" "https://Studio.ts.net")
+                   ("https://studio.ts.net/rex/" "https://studio.ts.net/rex")
+                   ("ws://studio.ts.net" nil)
+                   ("https://" nil)
+                   ("unix://" nil)
+                   ("unix://rel.sock" nil)
+                   ("rel.sock/" "https://rel.sock")
+                   ("https://studio.ts.net?x=1" nil)
+                   (" studio.ts.net" nil)
+                   ("https://me@studio.ts.net" nil)
+                   ("https://me:secret@studio.ts.net" nil)
+                   ("me:secret@studio.ts.net" nil)
+                   ("" nil)
+                   (nil nil)))
+    (should (equal endpoint (rexel--normalize-endpoint address))))
+  (should (equal (expand-file-name "~/rex.sock") (rexel--normalize-endpoint "~/rex.sock")))
+  (let ((case-fold-search nil))
+    (should (equal "https://h" (rexel--normalize-endpoint "HTTPS://h")))
+    (should (rexel--network-endpoint-p "https://h")))
+  (let ((case-fold-search t))
+    (should-not (rexel--network-endpoint-p "HTTPS://h"))))
+
+(defmacro rexel-test--with-dials (dialled &rest body)
+  "Run BODY with `rexel--ws-open' stubbed to collect in DIALLED.
+Each dial pushes (ENDPOINT WS ON-OPEN ON-CLOSE); the endpoint \"dead\"
+signals.  `rexel--on-control-close' sets the variable `closed'."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'rexel--ws-open)
+              (lambda (endpoint _path _protocol on-open _on-message on-close)
+                (when (equal endpoint "dead") (error "Refused"))
+                (let ((ws (list endpoint)))
+                  (push (list endpoint ws on-open on-close) ,dialled)
+                  ws)))
+             ((symbol-function 'rexel--send-hello) #'ignore)
+             ((symbol-function 'rexel--on-control-close)
+              (lambda (_conn) (setq closed t))))
+     ,@body))
+
+(defun rexel-test--dial-event (dial event)
+  "Run the on-open or on-close callback of DIAL, as EVENT says."
+  (pcase-let ((`(,_ ,ws ,on-open ,on-close) dial))
+    (funcall (if (eq event 'open) on-open on-close) ws)))
+
+(ert-deftest rexel-test-dial-tries-endpoints-in-order ()
+  (let ((conn (rexel--make-conn :endpoints (list "dead" "a" "b" "c")))
+        dialled closed)
+    (rexel-test--with-dials dialled
+      (rexel--dial conn)
+      (should (equal '("a") (mapcar #'car dialled)))
+      ;; The endpoint in use is the one that answered last.
+      (should-not (rexel--conn-endpoint conn))
+      ;; Closing without a welcome moves on to the next endpoint.
+      (rexel-test--dial-event (car dialled) 'close)
+      (should (equal '("b" "a") (mapcar #'car dialled)))
+      (rexel-test--dial-event (car dialled) 'open)
+      (should (equal "b" (rexel--conn-endpoint conn)))
+      (should-not closed)
+      ;; A close of the replaced connection is ignored.
+      (rexel-test--dial-event (cadr dialled) 'close)
+      (should (= 2 (length dialled)))
+      (should-not closed)
+      ;; After a welcome a close ends the round, with \"c\" left untried.
+      (cl-letf (((symbol-function 'rexel--reattach) #'ignore))
+        (rexel--on-control-message
+         conn "{\"type\":\"welcome\",\"protocol\":\"rex.control.v1\",\"api_revision\":8}"))
+      (rexel-test--dial-event (car dialled) 'close)
+      (should closed)
+      (should (= 2 (length dialled))))))
+
+(ert-deftest rexel-test-dial-out-of-endpoints ()
+  (let ((conn (rexel--make-conn :endpoints (list "a" "dead")))
+        dialled closed)
+    (rexel-test--with-dials dialled
+      (should-error (rexel--dial (rexel--make-conn :endpoints (list "dead"))))
+      (rexel--dial conn)
+      (rexel-test--dial-event (car dialled) 'close)
+      (should closed))))
+
+(ert-deftest rexel-test-refused-welcome-ends-the-round ()
+  "A server of another API revision is not tried at its other endpoints."
+  (let ((conn (rexel--make-conn :endpoints (list "a" "b")))
+        dialled closed)
+    (rexel-test--with-dials dialled
+      (cl-letf (((symbol-function 'websocket-close)
+                 (lambda (_ws) (rexel-test--dial-event (car dialled) 'close))))
+        (rexel--dial conn)
+        (rexel--on-control-message
+         conn "{\"type\":\"welcome\",\"protocol\":\"rex.control.v1\",\"api_revision\":7}")
+        (should closed)
+        (should (= 1 (length dialled)))))))
+
+(ert-deftest rexel-test-control-close-drops-waiting-callbacks ()
+  "A connection that closes unwelcomed reports to those waiting for it."
+  (let* ((conn (rexel--make-conn :endpoints (list "none")))
+         (rexel--conns (list conn)))
+    (cl-letf (((symbol-function 'rexel--dial) #'ignore))
+      (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work")
+      (push #'ignore (rexel--conn-on-ready conn))
+      (rexel--on-control-close conn)
+      (should-not (rexel--conn-on-ready conn))
+      (should (rexel--conn-timer conn))
+      (cancel-timer (rexel--conn-timer conn)))))
+
+(ert-deftest rexel-test-ws-url ()
+  (should (equal "ws://rex/api/control" (rexel--ws-url "/tmp/rex.sock" "/api/control")))
+  (should (equal "wss://studio.ts.net/api/data"
+                 (rexel--ws-url "https://studio.ts.net" "/api/data")))
+  (should (equal "ws://10.0.0.2:7297/api/data"
+                 (rexel--ws-url "http://10.0.0.2:7297" "/api/data"))))
+
 (ert-deftest rexel-test-buffer-name-carries-host ()
-  (let ((conn (rexel--make-conn :socket "none" :host "studio")))
+  (let ((conn (rexel--make-conn :endpoints (list "none") :host "studio")))
     (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work")
     (should (equal "*rex:work@studio:123456*"
                    (rexel--buffer-name conn "s" "block:123456")))))
 
 (ert-deftest rexel-test-apply-view-renames-on-label-change ()
-  (let* ((conn (rexel--make-conn :socket "none"))
+  (let* ((conn (rexel--make-conn :endpoints (list "none")))
          (buf (generate-new-buffer "rexel-test"))
          (view '((label . "work")
                  (windows . [((layers . [((blocks . [((block_id . "block:123456")
@@ -264,7 +391,7 @@
 (defmacro rexel-test--with-fake-conn (sent &rest body)
   "Run BODY with a fake connection whose sent objects collect in SENT."
   (declare (indent 1))
-  `(let ((rexel--conn (rexel--make-conn :socket "none" :client-id t))
+  `(let ((rexel--conn (rexel--make-conn :endpoints (list "none") :client-id t))
          (,sent nil))
      (cl-letf (((symbol-function 'rexel--send)
                 (lambda (_conn object) (push object ,sent))))
@@ -280,13 +407,13 @@
   (rexel-test--with-fake-conn sent
     (setf (rexel--conn-token rexel--conn) "tok")
     (cl-letf (((symbol-function 'rexel--ws-open)
-               (lambda (_path _url _protocol on-open &rest _)
+               (lambda (_endpoint _path _protocol on-open &rest _)
                  (funcall on-open 'ws) 'ws)))
       (rexel--dial rexel--conn))
     (should (equal "tok" (alist-get 'reconnect_token (car sent))))))
 
 (ert-deftest rexel-test-control-close-redials-while-attached ()
-  (let* ((conn (rexel--make-conn :socket "none"))
+  (let* ((conn (rexel--make-conn :endpoints (list "none")))
          (rexel--conns (list conn))
          (dialled nil))
     (cl-letf (((symbol-function 'rexel--dial) (lambda (c) (push c dialled))))
@@ -447,7 +574,7 @@
 
 (ert-deftest rexel-test-read-host-starts-server ()
   "The server starts only with no host known and as the option allows."
-  (let* ((local '(nil . "/tmp/rex.sock"))
+  (let* ((local '(nil "/tmp/rex.sock"))
          (rexel-program "rex")
          hosts started asked answer
          (read-host

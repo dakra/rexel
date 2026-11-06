@@ -41,7 +41,7 @@ as in any ghostel buffer; the theme set in Rex is not applied.
 =M-x rexel-attach= asks for a server when more than one is known, lists its
 sessions and opens one ghostel buffer per terminal block.  Servers are this
 machine's (from =rex server status=), the hosts known to Rex (=rex hosts=)
-that have a Unix socket endpoint, and =rexel-hosts=.
+and =rexel-hosts=.
 
 =M-x rexel-new-session= creates a session with one shell and attaches to it,
 asking for its label with a prefix argument.  =rexel-session-label-function=
@@ -56,9 +56,26 @@ unless another label was given:
           label)))
 #+end_src
 
-A remote server is reached through an ssh forward of its socket, which
-Rex and rexel then both use.  For a Linux server, with your user id on it
-in the path:
+A remote server is reached over Tailscale, which is built into Rex.  On
+the server, =rex server tailscale on= joins it to your tailnet as a device
+of its own; =rex server status= shows the sign-in link and then the
+server's address.  =rex server start --tailscale= keeps it on across
+restarts.  This machine needs Tailscale running under the same account.
+Then add the host, which Rex and rexel both use:
+
+#+begin_src sh
+rex hosts add studio rex.tail1234.ts.net
+#+end_src
+
+Without =rex= on this machine, name the address in =rexel-hosts= instead:
+=(setq rexel-hosts '(("studio" . "rex.tail1234.ts.net")))=.  An address
+without a scheme is reached over https only, on port 443 unless it names
+one; =http://HOST:PORT= names a plain listener.  A host with several
+endpoints is tried at each in order.  Buffers of a host are named
+=*rex:SESSION@HOST:ID*=.
+
+Without Tailscale, forward the server's socket over ssh.  For a Linux
+server, with your user id on it in the path:
 
 #+begin_src sh
 ssh -N -o StreamLocalBindUnlink=yes \
@@ -69,10 +86,6 @@ rex hosts add devbox unix:///tmp/devbox.sock
 =ssh devbox rex server status= prints the socket of a running server.  A
 shared Linux server is at =/run/rex/server.sock= and a macOS one at
 =~/Library/Application Support/rex/server.sock=.
-
-Without =rex= on this machine, name the socket in =rexel-hosts= instead:
-=(setq rexel-hosts '(("devbox" . "/tmp/devbox.sock")))=.  Buffers of a
-host are named =*rex:SESSION@HOST:ID*=.
 
 In a block buffer =C-c C-r= (=rexel-prefix-key=) prefixes:
 

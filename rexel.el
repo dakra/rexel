@@ -24,9 +24,9 @@
 ;; In a block buffer `rexel-prefix-key' (C-c C-r) prefixes the layout
 ;; commands in `rexel-prefix-map'.
 ;;
-;; Both connections are WebSockets on a server's Unix socket.  Servers
-;; come from `rexel-program' and `rexel-hosts'; a remote server is
-;; reached through an ssh forward of its socket.
+;; Both connections are WebSockets, on a server's Unix socket or on its
+;; network address, such as the one Rex's built-in Tailscale gives it.
+;; Servers come from `rexel-program' and `rexel-hosts'.
 
 ;;; Code:
 
@@ -54,10 +54,14 @@
 
 (defcustom rexel-hosts nil
   "Rex servers to offer besides those `rexel-program' knows.
-Each entry is (LABEL . SOCKET), the Unix socket path of the server, for
-a remote server the local end of an ssh forward of its socket.  An entry
+Each entry is (LABEL . ENDPOINT) or (LABEL ENDPOINT...), the endpoints
+being tried in order.  ENDPOINT is a network address such as
+\"studio.tail1234.ts.net\", \"https://HOST:PORT\" or \"http://HOST:PORT\",
+or the absolute path of a Unix socket.  An address without a scheme is
+reached over https only, on port 443 unless it names one.  An entry
 replaces a host of the same label known to Rex."
-  :type '(alist :key-type string :value-type file))
+  :type '(alist :key-type string
+                :value-type (choice string (repeat string))))
 
 (defcustom rexel-autostart-server 'ask
   "Whether to run `rexel-start-server' when no server is found."
@@ -75,6 +79,9 @@ command runs from.  An empty or nil result lets the server choose one."
   "Prefix key for `rexel-prefix-map' in block buffers."
   :type 'key-sequence)
 
+(defvar rexel--connect-timeout 10
+  "Seconds a network connection may take to open its WebSocket.")
+
 (defconst rexel--api-revision 8
   "Control API revision this client speaks.")
 
@@ -89,10 +96,13 @@ command runs from.  An empty or nil result lets the server choose one."
 
 (cl-defstruct (rexel--conn (:constructor rexel--make-conn))
   "One control connection to a Rex server.
-HOST is the server's label, nil for this machine's server.  TOKEN is the
+ENDPOINTS are the server's addresses, each a Unix socket path or an http
+or https URL.  ENDPOINT is the one that last answered, and UNTRIED are
+those left to try while a connection is being opened.  HOST is the
+server's label, nil for this machine's server.  TOKEN is the
 reconnect token of the latest welcome.  While the connection is being redialled,
 TIMER is the pending attempt and DELAY the seconds until the one after it."
-  ws socket host client-id token timer delay
+  ws endpoints endpoint untried host client-id token timer delay
   (next-id 0)
   (pending (make-hash-table :test #'equal))
   (sessions nil)
@@ -121,12 +131,34 @@ TIMER is the pending attempt and DELAY the seconds until the one after it."
                           "--autostart=false" "--timeout" "2s" args))
         (ignore-errors (rexel--parse-json (buffer-string)))))))
 
-(defun rexel--unix-endpoint (endpoints)
-  "Return the socket path of the first unix:// endpoint in ENDPOINTS, or nil."
-  (seq-some (lambda (e)
-              (and (stringp e) (string-prefix-p "unix://" e)
-                   (url-unhex-string (substring e (length "unix://")))))
-            endpoints))
+(defun rexel--network-endpoint-p (endpoint)
+  "Return non-nil if ENDPOINT is an http or https URL, not a socket path."
+  (let ((case-fold-search nil))
+    (string-match-p "\\`https?://" endpoint)))
+
+(defun rexel--normalize-endpoint (address)
+  "Return the server ADDRESS as a socket path or an http or https URL.
+A unix:// URL or an absolute file name gives the socket path, and an
+address without a scheme an https URL.  Return nil for anything else,
+such as another scheme or a URL with user information or a query."
+  (let ((case-fold-search t)
+        (host-and-path "\\([^/@?#[:space:]]+\\(?:/[^?#[:space:]]*\\)?\\)\\'"))
+    (cond ((not (stringp address)) nil)
+          ((string-match "\\`unix://\\(.*\\)\\'" address)
+           (let ((path (url-unhex-string (match-string 1 address))))
+             (and (file-name-absolute-p path) path)))
+          ((file-name-absolute-p address) (expand-file-name address))
+          ((or (string-match (concat "\\`\\(https?\\)://" host-and-path) address)
+               (and (not (string-search "://" address))
+                    (string-match (concat "\\`\\(\\)" host-and-path) address)))
+           (let ((scheme (match-string 1 address))
+                 (rest (match-string 2 address)))
+             (concat (if (string-empty-p scheme) "https" (downcase scheme)) "://"
+                     (replace-regexp-in-string "/+\\'" "" rest)))))))
+
+(defun rexel--endpoints (addresses)
+  "Return the usable server ADDRESSES in order, each normalized."
+  (delq nil (mapcar #'rexel--normalize-endpoint addresses)))
 
 (defun rexel--socket-live-p (path)
   "Return non-nil if something accepts connections on the Unix socket PATH."
@@ -136,53 +168,102 @@ TIMER is the pending attempt and DELAY the seconds until the one after it."
     t))
 
 (defun rexel--hosts ()
-  "Return the servers to attach to as (LABEL . SOCKET) pairs.
-This machine's server has label nil and is listed when its socket accepts
-connections.  Hosts without a Unix socket endpoint are left out."
-  (let ((local (or (rexel--unix-endpoint
-                    (list (alist-get 'endpoint
-                                     (rexel--rex-json "server" "status" "--json"))))
-                   (if (eq system-type 'darwin)
-                       (expand-file-name "~/Library/Application Support/rex/server.sock")
-                     "/run/rex/server.sock")))
-        (hosts (mapcar (lambda (h)
-                         (cons (alist-get 'label h)
-                               (rexel--unix-endpoint (alist-get 'endpoints h))))
-                       (alist-get 'hosts (rexel--rex-json "hosts" "list" "--json")))))
-    (append (and (rexel--socket-live-p local) (list (cons nil local)))
-            rexel-hosts
-            (seq-remove (lambda (h) (or (null (cdr h))
-                                        (assoc-string (car h) rexel-hosts t)))
-                        hosts))))
+  "Return the servers to attach to as (LABEL . ENDPOINTS) pairs.
+ENDPOINTS are Unix socket paths or http or https URLs, in the order to
+try them.  This machine's server has label nil and is listed when its
+socket accepts connections.  Hosts without a usable address are left out."
+  (let* ((status (alist-get 'endpoint (rexel--rex-json "server" "status" "--json")))
+         (local (cond ((and status (string-prefix-p "unix://" status))
+                       (rexel--normalize-endpoint status))
+                      ((eq system-type 'darwin)
+                       (expand-file-name "~/Library/Application Support/rex/server.sock"))
+                      (t "/run/rex/server.sock")))
+         (mine (mapcar (lambda (h)
+                         (cons (car h) (rexel--endpoints (ensure-list (cdr h)))))
+                       rexel-hosts))
+         (hosts (mapcar (lambda (h)
+                          (cons (alist-get 'label h)
+                                (rexel--endpoints (alist-get 'endpoints h))))
+                        (alist-get 'hosts (rexel--rex-json "hosts" "list" "--json")))))
+    (append (and (rexel--socket-live-p local) (list (list nil local)))
+            (seq-filter (lambda (h) (and (stringp (car h)) (cdr h)))
+                        (append mine
+                                (seq-remove (lambda (h) (assoc-string (car h) mine t))
+                                            hosts))))))
 
 (defun rexel--parse-json (string)
   "Parse JSON STRING into alists with symbol keys; null and false are nil."
   (json-parse-string string :object-type 'alist
                      :null-object nil :false-object nil))
 
-(defun rexel--ws-open (path url protocol on-open on-message on-close)
-  "Open a WebSocket to URL over the Unix socket PATH asking for PROTOCOL.
-ON-OPEN, ON-MESSAGE and ON-CLOSE are `websocket-open' callbacks.
-`websocket-open' only dials TCP, so the connection is made here and
-handed to websocket.el for the handshake and framing."
-  (let* ((key (websocket-genkey))
+(defun rexel--ws-url (endpoint path)
+  "Return the WebSocket URL of PATH on the server at ENDPOINT."
+  (concat (if (rexel--network-endpoint-p endpoint)
+              (concat "ws" (substring endpoint (length "http")))
+            "ws://rex")
+          path))
+
+(defun rexel--open-network (endpoint)
+  "Return a process connecting to the URL ENDPOINT, without waiting for it.
+The name lookup can block.  Signal an error if the connection fails at
+once."
+  (let* ((url (url-generic-parse-url endpoint))
+         (proc (open-network-stream
+                (format "rexel %s" endpoint) nil
+                (string-trim (url-host url) "\\[" "\\]") (url-port url)
+                :type (if (equal (url-type url) "https") 'tls 'plain)
+                :nowait t :coding 'binary)))
+    (when (eq (process-status proc) 'failed)
+      (delete-process proc)
+      (error "Cannot connect to %s" endpoint))
+    proc))
+
+(defun rexel--ws-open (endpoint path protocol on-open on-message on-close)
+  "Open a WebSocket to PATH on the server at ENDPOINT asking for PROTOCOL.
+ENDPOINT is a Unix socket path or an http or https URL.  ON-OPEN,
+ON-MESSAGE and ON-CLOSE are `websocket-open' callbacks.
+`websocket-open' cannot dial a Unix socket and blocks until a network
+connection is open, so the connection is made here and handed to
+websocket.el for the handshake and framing."
+  (let* ((url (rexel--ws-url endpoint path))
+         (key (websocket-genkey))
          (protocols (list protocol))
          (coding-system-for-read 'binary)
          (coding-system-for-write 'binary)
-         (conn (make-network-process :name (format "rexel %s" url) :buffer nil
-                                     :family 'local :service path
-                                     :coding 'binary))
+         (network (rexel--network-endpoint-p endpoint))
+         (conn (if network
+                   (rexel--open-network endpoint)
+                 (make-network-process :name (format "rexel %s" url) :buffer nil
+                                       :family 'local :service endpoint
+                                       :coding 'binary)))
          (ws (websocket-inner-create
               :conn conn :url url :protocols protocols
-              :on-open on-open :on-message on-message :on-close on-close
+              ;; websocket.el also calls this after a refused handshake.
+              :on-open (lambda (ws) (when (websocket-openp ws) (funcall on-open ws)))
+              :on-message on-message :on-close on-close
               :on-error #'rexel--ws-error
-              :accept-string (websocket-calculate-accept key))))
+              :accept-string (websocket-calculate-accept key)))
+         (sentinel (websocket-sentinel url conn key protocols nil nil nil)))
     (process-put conn :websocket ws)
     (set-process-filter conn #'rexel--ws-filter)
-    (set-process-sentinel conn (websocket-sentinel url conn key protocols
-                                                   nil nil nil))
+    ;; A network connection is still opening here; its handshake is sent
+    ;; once the sentinel reports it open.  A peer that is gone by then
+    ;; fails the send and closes the process.
+    (set-process-sentinel
+     conn (lambda (process change)
+            (when (eq (process-status process) 'open)
+              (ignore-errors
+                (websocket-ensure-handshake url conn key protocols nil nil nil)))
+            (funcall sentinel process change)))
     (set-process-query-on-exit-flag conn nil)
     (websocket-ensure-handshake url conn key protocols nil nil nil)
+    (when network
+      ;; Emacs runs no sentinel for some failed connections, and a server
+      ;; may accept one and never answer.
+      (run-at-time rexel--connect-timeout nil
+                   (lambda ()
+                     (when (eq (websocket-ready-state ws) 'connecting)
+                       (delete-process conn)))))
     ws))
 
 (defun rexel--ws-filter (process output)
@@ -206,7 +287,10 @@ a large frame arriving in many reads would cost quadratic time."
 
 (defun rexel--ws-error (ws type err)
   "Report ERR signalled while running the TYPE callback of WS."
-  (message "rexel: %s callback on %s: %S" type (websocket-url ws) err))
+  (if (equal err '(websocket-received-error-http-response 403))
+      (message "rexel: %s: the server does not admit this user or device"
+               (websocket-url ws))
+    (message "rexel: %s callback on %s: %S" type (websocket-url ws) err)))
 
 (defun rexel--send (conn object)
   "Send OBJECT as one JSON text message on CONN."
@@ -231,51 +315,78 @@ Without CALLBACK an error is shown as a message."
 
 (defun rexel--connect (host callback)
   "Call CALLBACK with a ready connection to HOST, opening one if needed.
-HOST is a (LABEL . SOCKET) pair as `rexel--hosts' returns them."
-  (let* ((path (cdr host))
-         (conn (seq-find (lambda (c) (equal (rexel--conn-socket c) path))
+HOST is a (LABEL . ENDPOINTS) pair as `rexel--hosts' returns them."
+  (let* ((endpoints (cdr host))
+         (conn (seq-find (lambda (c) (equal (rexel--conn-endpoints c) endpoints))
                          rexel--conns)))
     (cond
      ((and conn (websocket-openp (rexel--conn-ws conn))
            (rexel--conn-client-id conn))
       (funcall callback conn))
-     ((and conn (websocket-openp (rexel--conn-ws conn)))
+     ;; Opening, or open and not yet welcomed.
+     ((and conn (process-live-p (websocket-conn (rexel--conn-ws conn))))
       (push callback (rexel--conn-on-ready conn)))
      (conn
       (push callback (rexel--conn-on-ready conn))
       (setf (rexel--conn-delay conn) nil)
       (rexel--reconnect conn))
      (t
-      (unless (file-exists-p path)
-        (user-error "Rex server socket %s does not exist" path))
-      (setq conn (rexel--make-conn :socket path :host (car host)))
+      (unless (seq-some (lambda (e) (or (rexel--network-endpoint-p e) (file-exists-p e)))
+                        endpoints)
+        (user-error "Rex server socket %s does not exist" (car endpoints)))
+      (setq conn (rexel--make-conn :endpoints endpoints :host (car host)))
       (push callback (rexel--conn-on-ready conn))
       (rexel--dial conn)
       (push conn rexel--conns)))))
 
-(defun rexel--dial (conn)
-  "Open CONN's control connection and send the hello."
-  (setf (rexel--conn-ws conn)
-        (rexel--ws-open
-         (rexel--conn-socket conn) "ws://rex/api/control" "rex.control.v1"
-         (lambda (_ws)
-           (rexel--send conn `((type . "hello")
-                               (api_revision . ,rexel--api-revision)
-                               ,@(when (rexel--conn-token conn)
-                                   `((reconnect_token . ,(rexel--conn-token conn))))
-                               (client . ((kind . "other")
-                                          (name . "rexel")
-                                          (version . ,(or (package-get-version)
-                                                          "unknown")))))))
-         (lambda (_ws frame)
-           (rexel--on-control-message conn (websocket-frame-text frame)))
-         (lambda (ws)
-           (when (eq ws (rexel--conn-ws conn))
-             (rexel--on-control-close conn))))))
+(defun rexel--dial (conn &optional endpoints)
+  "Open CONN's control connection and send the hello.
+Try ENDPOINTS, by default all of CONN's, in order until a server
+answers one with a welcome.  Signal the last error if none can be
+dialled."
+  (let ((endpoints (or endpoints (rexel--conn-endpoints conn)))
+        ws err)
+    (while (and endpoints (not ws))
+      (let ((endpoint (pop endpoints)))
+        (condition-case e
+            (setq ws (rexel--ws-open
+                      endpoint "/api/control" "rex.control.v1"
+                      (lambda (_ws)
+                        (setf (rexel--conn-endpoint conn) endpoint)
+                        (rexel--send-hello conn))
+                      (lambda (_ws frame)
+                        (rexel--on-control-message conn (websocket-frame-text frame)))
+                      (lambda (ws)
+                        (when (eq ws (rexel--conn-ws conn))
+                          (rexel--on-dial-close conn)))))
+          (error (setq err e)))))
+    (setf (rexel--conn-untried conn) endpoints)
+    (unless ws
+      (signal (car err) (cdr err)))
+    (setf (rexel--conn-ws conn) ws)))
+
+(defun rexel--send-hello (conn)
+  "Send the hello that opens CONN's control connection."
+  (rexel--send conn `((type . "hello")
+                      (api_revision . ,rexel--api-revision)
+                      ,@(when (rexel--conn-token conn)
+                          `((reconnect_token . ,(rexel--conn-token conn))))
+                      (client . ((kind . "other")
+                                 (name . "rexel")
+                                 (version . ,(or (package-get-version)
+                                                 "unknown")))))))
+
+(defun rexel--on-dial-close (conn)
+  "Handle the close of CONN's control connection.
+One that closed without a welcome moves on to the endpoints not yet tried."
+  (let ((untried (rexel--conn-untried conn)))
+    (unless (and untried (ignore-errors (rexel--dial conn untried)))
+      (rexel--on-control-close conn))))
 
 (defun rexel--conn-name (conn)
-  "Return CONN's host label or socket path for messages."
-  (or (rexel--conn-host conn) (rexel--conn-socket conn)))
+  "Return CONN's host label or endpoint for messages."
+  (or (rexel--conn-host conn) (rexel--conn-endpoint conn)
+      (car (rexel--conn-endpoints conn))))
 
 (defun rexel--ready-p (conn)
   "Return non-nil when CONN is open and has been welcomed."
@@ -308,6 +419,7 @@ Once no session or callback waits for CONN, it is forgotten instead."
   (let ((msg (rexel--parse-json text)))
     (pcase (alist-get 'type msg)
       ("welcome"
+       (setf (rexel--conn-untried conn) nil)
        (let ((protocol (alist-get 'protocol msg))
              (revision (or (alist-get 'api_revision msg) 0)))
          (if (not (and (equal protocol "rex.control.v1")
@@ -351,14 +463,22 @@ reuses them."
   (if (rexel--conn-sessions conn)
       (progn
         (setf (rexel--conn-revisions conn) nil)
-        (message "rexel: connection to %s lost, reconnecting" (rexel--conn-name conn))
+        (cond ((rexel--conn-on-ready conn)
+               (setf (rexel--conn-on-ready conn) nil)
+               (message "rexel: cannot reach %s" (rexel--conn-name conn)))
+              ((not (rexel--conn-delay conn))
+               (message "rexel: connection to %s lost, reconnecting"
+                        (rexel--conn-name conn))))
         (rexel--reconnect conn))
     (setq rexel--conns (delq conn rexel--conns))
     (dolist (buf (buffer-list))
       (when (eq (buffer-local-value 'rexel--conn buf) conn)
         (rexel--end-stream buf "control connection closed")
         (with-current-buffer buf (setq rexel--conn nil))))
-    (message "rexel: control connection to %s closed" (rexel--conn-name conn))))
+    (message (if (rexel--conn-on-ready conn)
+                 "rexel: cannot reach %s"
+               "rexel: control connection to %s closed")
+             (rexel--conn-name conn))))
 
 (defun rexel--on-event (conn event)
   "Handle EVENT received on CONN.
@@ -661,8 +781,10 @@ at a time and bytes typed meanwhile are coalesced into the next."
          (with-current-buffer buf
            (setq rexel--data-state 'welcome
                  rexel--stream (rexel--make-stream))
-           (rexel--open-stream
-            (concat "\x01" (base64-decode-string (alist-get 'ticket result) t))))))))))
+           (condition-case err
+               (rexel--open-stream
+                (concat "\x01" (base64-decode-string (alist-get 'ticket result) t)))
+             (error (rexel--data-failed buf (error-message-string err)))))))))))
 
 (defun rexel--open-stream (hello)
   "Connect this buffer's stream to the data endpoint and send HELLO."
@@ -670,7 +792,7 @@ at a time and bytes typed meanwhile are coalesced into the next."
         (stream rexel--stream))
     (setf (rexel--stream-ws stream)
           (rexel--ws-open
-           (rexel--conn-socket rexel--conn) "ws://rex/api/data"
+           (rexel--conn-endpoint rexel--conn) "/api/data"
            "rex.data.terminal.v1"
            (lambda (ws)
              (websocket-send ws (make-websocket-frame
