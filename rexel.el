@@ -80,7 +80,13 @@ command runs from.  An empty or nil result lets the server choose one."
   :type 'key-sequence)
 
 (defvar rexel--connect-timeout 10
-  "Seconds a network connection may take to open its WebSocket.")
+  "Seconds a connection may take to open its WebSocket or answer a ping.")
+
+(defvar rexel--keepalive-interval 30
+  "Seconds a connection may stay silent before it is pinged.")
+
+(defvar rexel--keepalive-timer nil
+  "Timer of the next `rexel--keepalive' run, or nil.")
 
 (defconst rexel--api-revision 8
   "Control API revision this client speaks.")
@@ -245,6 +251,10 @@ websocket.el for the handshake and framing."
               :accept-string (websocket-calculate-accept key)))
          (sentinel (websocket-sentinel url conn key protocols nil nil nil)))
     (process-put conn :websocket ws)
+    (process-put conn :last-read (float-time))
+    (unless (memq rexel--keepalive-timer timer-list)
+      (setq rexel--keepalive-timer
+            (run-at-time rexel--keepalive-interval nil #'rexel--keepalive)))
     (set-process-filter conn #'rexel--ws-filter)
     ;; A network connection is still opening here; its handshake is sent
     ;; once the sentinel reports it open.  A peer that is gone by then
@@ -270,6 +280,7 @@ websocket.el for the handshake and framing."
   "Pass PROCESS OUTPUT to websocket.el once a whole frame is buffered.
 `websocket-outer-filter' copies all buffered input on every read, so
 a large frame arriving in many reads would cost quadratic time."
+  (process-put process :last-read (float-time))
   (let* ((ws (process-get process :websocket))
          (head (websocket-inflight-input ws))
          (queued (cons output (process-get process :queued)))
@@ -283,7 +294,56 @@ a large frame arriving in many reads would cost quadratic time."
     (if (and need (< have need))
         (process-put process :queued queued)
       (process-put process :queued nil)
-      (websocket-outer-filter ws (apply #'concat (nreverse queued))))))
+      ;; A message handler can close WS while a ping is queued behind the
+      ;; message; websocket.el then signals when it tries to answer the ping.
+      (condition-case nil
+          (websocket-outer-filter ws (apply #'concat (nreverse queued)))
+        (websocket-closed nil)))))
+
+(defun rexel--keepalive ()
+  "Probe every connection silent for `rexel--keepalive-interval'.
+Run again when the next connection falls due, until none is left."
+  (let ((now (float-time))
+        next)
+    (dolist (process (process-list))
+      (when-let* ((read (process-get process :last-read))
+                  ((process-live-p process)))
+        (let ((due (+ read rexel--keepalive-interval)))
+          (when (<= due now)
+            (rexel--probe (process-get process :websocket))
+            (setq due (+ now rexel--keepalive-interval)))
+          (setq next (min due (or next due))))))
+    (when rexel--keepalive-timer
+      (cancel-timer rexel--keepalive-timer))
+    (setq rexel--keepalive-timer
+          (and next (run-at-time (max 1 (- next now)) nil #'rexel--keepalive)))))
+
+(defun rexel--probe (ws)
+  "Ping the open WS and close its connection if the server stays silent.
+A connection has one probe at a time.  Closing it runs the on-close
+callback of WS, which redials or resumes."
+  (let ((process (websocket-conn ws))
+        (sent (float-time)))
+    (when (and (eq (websocket-ready-state ws) 'open)
+               (not (process-get process :probe)))
+      (condition-case nil
+          (progn
+            ;; The server closes a connection on a ping without payload.
+            (websocket-send ws (make-websocket-frame
+                                :opcode 'ping :payload "rexel" :completep t))
+            (process-put
+             process :probe
+             (run-at-time rexel--connect-timeout nil
+                          (lambda ()
+                            (process-put process :probe nil)
+                            (when (process-live-p process)
+                              ;; Emacs waiting on another process leaves
+                              ;; the answer unread.
+                              (when (< (process-get process :last-read) sent)
+                                (accept-process-output process 0 nil 1))
+                              (when (< (process-get process :last-read) sent)
+                                (delete-process process)))))))
+        (error (delete-process process))))))
 
 (defun rexel--ws-error (ws type err)
   "Report ERR signalled while running the TYPE callback of WS."
@@ -729,10 +789,15 @@ The block itself keeps running on the server."
 (defun rexel--pty-out (data)
   "Type DATA, bytes from ghostel's key encoder, into this block.
 The server runs block methods concurrently, so writes are sent one
-at a time and bytes typed meanwhile are coalesced into the next."
+at a time and bytes typed meanwhile are coalesced into the next.
+Typing while a write is unanswered probes the block's connections."
   (if (null rexel--conn)
       (message "rexel: not connected; use M-x rexel-attach")
     (setq rexel--out-pending (concat rexel--out-pending data))
+    (when (eq rexel--out-inflight rexel--conn)
+      (rexel--probe (rexel--conn-ws rexel--conn))
+      (when-let* ((ws (and rexel--stream (rexel--stream-ws rexel--stream))))
+        (rexel--probe ws)))
     (rexel--flush-out (current-buffer))))
 
 (defun rexel--flush-out (buf)
@@ -814,11 +879,13 @@ The server continues from the first byte not yet received."
       (error (rexel--on-data-close (current-buffer) s)))))
 
 (defun rexel--close-stream ()
-  "Mark this buffer's stream closed and close its WebSocket."
+  "Mark this buffer's stream closed and close its WebSocket.
+The stream is forgotten before the close, so that
+`rexel--on-data-close' ignores it."
   (setq rexel--data-state 'closed)
-  (when rexel--stream
-    (ignore-errors (websocket-close (rexel--stream-ws rexel--stream)))
-    (setq rexel--stream nil)))
+  (when-let* ((stream rexel--stream))
+    (setq rexel--stream nil)
+    (ignore-errors (websocket-close (rexel--stream-ws stream)))))
 
 (defun rexel--data-failed (buf reason)
   "Mark BUF's stream as failed for REASON."
@@ -837,21 +904,27 @@ The server continues from the first byte not yet received."
         (ghostel--write-vt ghostel--term (format "\r\n[rexel: %s]\r\n" reason))
         (ghostel--invalidate)))))
 
+(defun rexel--restart-stream (buf reason)
+  "End BUF's stream for REASON and have its block streamed afresh.
+While the control connection is up and the block still exists, the next
+view refresh streams the block into BUF again."
+  (with-current-buffer buf
+    (rexel--end-stream buf reason)
+    (when (and (rexel--ready-p rexel--conn)
+               (eq (gethash rexel--block-id (rexel--conn-blocks rexel--conn)) buf))
+      (remhash rexel--block-id (rexel--conn-blocks rexel--conn))
+      (rexel--schedule-view-refresh rexel--conn rexel--session-id))))
+
 (defun rexel--on-data-close (buf stream)
   "Note that BUF's data connection STREAM closed.
-A connection that drops after its WELCOME is resumed.  Otherwise the
-stream ends, and while the control connection is up and the block still
-exists, the next view refresh streams the block into BUF again."
+The stream is resumed if the connection dropped after its WELCOME,
+and restarted if it dropped before."
   (when (and (buffer-live-p buf)
              (eq stream (buffer-local-value 'rexel--stream buf)))
     (with-current-buffer buf
       (if (memq rexel--data-state '(snapshot live))
           (rexel--resume-stream)
-        (rexel--end-stream buf "stream closed")
-        (when (and (rexel--ready-p rexel--conn)
-                   (eq (gethash rexel--block-id (rexel--conn-blocks rexel--conn)) buf))
-          (remhash rexel--block-id (rexel--conn-blocks rexel--conn))
-          (rexel--schedule-view-refresh rexel--conn rexel--session-id))))))
+        (rexel--restart-stream buf "stream closed")))))
 
 (defun rexel--on-data (buf stream bytes)
   "Handle BYTES, one binary message of BUF's data connection STREAM."
@@ -873,7 +946,9 @@ exists, the next view refresh streams the block into BUF again."
     n))
 
 (defun rexel--on-welcome (bytes)
-  "Read the data handshake answer BYTES."
+  "Read the data handshake answer BYTES.
+A refused RESUME restarts the stream: the server no longer has the
+output this client missed."
   (cond
    ((and (>= (length bytes) 32) (= (aref bytes 0) #x81))
     (let ((s rexel--stream))
@@ -886,9 +961,12 @@ exists, the next view refresh streams the block into BUF again."
       (when (> (length bytes) 32)
         (rexel--on-data (current-buffer) s (substring bytes 32)))))
    ((and (>= (length bytes) 2) (= (aref bytes 0) #x82))
-    (rexel--data-failed (current-buffer)
-                        (format "data connection rejected, reason %d"
-                                (aref bytes 1))))
+    (if (rexel--stream-resume rexel--stream)
+        (rexel--restart-stream (current-buffer)
+                               (format "resume refused, reason %d" (aref bytes 1)))
+      (rexel--data-failed (current-buffer)
+                          (format "data connection rejected, reason %d"
+                                  (aref bytes 1)))))
    (t (rexel--data-failed (current-buffer) "malformed data handshake"))))
 
 (defconst rexel--max-record-bytes (ash 1 28)

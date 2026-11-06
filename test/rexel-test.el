@@ -2,9 +2,9 @@
 
 ;;; Commentary:
 
-;; Tests of the stream parsing that needs no server: the snapshot
-;; boundary walk and the splitting of terminal output from Rex's
-;; nonce-tagged control messages.
+;; Tests of what needs no server: the stream parsing, the handling of
+;; server addresses, and the connection logic with WebSockets stubbed
+;; and timers run by hand.
 
 ;;; Code:
 
@@ -194,11 +194,28 @@
           (should (eq rexel--data-state 'closed)))))))
 
 (ert-deftest rexel-test-welcome-reject ()
-  (with-temp-buffer
-    (setq rexel--data-state 'welcome rexel--stream (rexel--make-stream))
-    (rexel--on-welcome (unibyte-string #x82 3))
-    (should (eq rexel--data-state 'closed))
-    (should-not rexel--stream)))
+  "Only a refused RESUME has the block streamed afresh."
+  (rexel-test--with-fake-conn _sent
+    (let ((conn rexel--conn)
+          (buf (current-buffer))
+          refreshed)
+      (cl-letf (((symbol-function 'rexel--schedule-view-refresh)
+                 (lambda (_conn sid) (push sid refreshed)))
+                ((symbol-function 'websocket-send) #'ignore))
+        (dolist (resume '(nil live))
+          (let* ((ws (rexel-test--ws))
+                 (stream (rexel--make-stream :ws ws :resume resume)))
+            (setf (websocket-on-close ws)
+                  (lambda (_ws) (rexel--on-data-close buf stream)))
+            (puthash "b" buf (rexel--conn-blocks conn))
+            (setq rexel--data-state 'welcome rexel--stream stream)
+            (rexel--on-welcome (unibyte-string #x82 3))
+            (should (eq rexel--data-state 'closed))
+            (should-not rexel--stream)
+            (should-not (process-live-p (websocket-conn ws)))
+            (should (equal (and resume '("s")) refreshed))
+            (should (eq (null resume)
+                        (eq buf (gethash "b" (rexel--conn-blocks conn)))))))))))
 
 (ert-deftest rexel-test-control-welcome-checks-revision ()
   (pcase-dolist (`(,protocol ,revision ,ok)
@@ -391,7 +408,10 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
 (defmacro rexel-test--with-fake-conn (sent &rest body)
   "Run BODY with a fake connection whose sent objects collect in SENT."
   (declare (indent 1))
-  `(let ((rexel--conn (rexel--make-conn :endpoints (list "none") :client-id t))
+  `(let ((rexel--conn (rexel--make-conn
+                       :endpoints (list "none") :client-id t
+                       :ws (websocket-inner-create :conn nil :url "u"
+                                                   :ready-state 'closed)))
          (,sent nil))
      (cl-letf (((symbol-function 'rexel--send)
                 (lambda (_conn object) (push object ,sent))))
@@ -531,8 +551,132 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
             (rexel--ws-filter proc (substring frame (car range) (cdr range))))
           (should (equal (list (substring frame 10) (substring frame 0 10))
                          calls))
-          (should-not (websocket-inflight-input ws)))
+          (should-not (websocket-inflight-input ws))
+          (should (<= (- (float-time) 5) (process-get proc :last-read))))
       (delete-process proc))))
+
+(ert-deftest rexel-test-ws-filter-drops-ping-behind-closing-message ()
+  (let ((ws (rexel-test--ws))
+        (messages 0))
+    (setf (websocket-on-message ws)
+          (lambda (ws _frame)
+            (cl-incf messages)
+            (delete-process (websocket-conn ws))))
+    (unwind-protect
+        (progn
+          ;; A binary frame, then a ping.
+          (rexel--ws-filter (websocket-conn ws)
+                            (unibyte-string #x82 1 ?m #x89 1 ?p))
+          (should (= 1 messages)))
+      (rexel-test--ws-delete ws))))
+
+(defun rexel-test--ws (&optional state silence)
+  "Return a WebSocket in STATE, by default `open', on a pipe process.
+The process was last read from SILENCE seconds ago, by default now."
+  (let* ((process (make-pipe-process :name "rexel-test" :noquery t))
+         (ws (websocket-inner-create :conn process :url "u"
+                                     :ready-state (or state 'open))))
+    (process-put process :websocket ws)
+    (process-put process :last-read (- (float-time) (or silence 0)))
+    ws))
+
+(defun rexel-test--ws-delete (ws)
+  "Delete the process of WS and its pending probe."
+  (let ((process (websocket-conn ws)))
+    (when (process-get process :probe)
+      (cancel-timer (process-get process :probe)))
+    (delete-process process)))
+
+(ert-deftest rexel-test-keepalive-probes-silent-connections ()
+  (let* ((silent (rexel-test--ws 'open 100))
+         (recent (rexel-test--ws 'open))
+         (opening (rexel-test--ws 'connecting 100))
+         (all (list silent recent opening))
+         (rexel--keepalive-timer nil)
+         pinged)
+    (unwind-protect
+        (cl-letf (((symbol-function 'websocket-send)
+                   (lambda (ws frame)
+                     (push (list ws (websocket-frame-opcode frame)
+                                 (websocket-frame-payload frame))
+                           pinged))))
+          (rexel--keepalive)
+          (should (= 1 (length pinged)))
+          (should (eq silent (caar pinged)))
+          ;; The server closes on a ping without payload.
+          (should (equal '(ping "rexel") (cdar pinged)))
+          (should (process-get (websocket-conn silent) :probe))
+          (should-not (process-get (websocket-conn opening) :probe))
+          (should (memq rexel--keepalive-timer timer-list))
+          ;; With no connection left the timer stops.
+          (mapc #'rexel-test--ws-delete all)
+          (rexel--keepalive)
+          (should-not rexel--keepalive-timer))
+      (mapc #'rexel-test--ws-delete all)
+      (when rexel--keepalive-timer
+        (cancel-timer rexel--keepalive-timer)))))
+
+(ert-deftest rexel-test-probe-closes-unanswered-connection ()
+  (let* ((ws (rexel-test--ws 'open 1))
+         (process (websocket-conn ws))
+         (pings 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'websocket-send)
+                   (lambda (&rest _) (cl-incf pings))))
+          (rexel--probe ws)
+          ;; One probe at a time.
+          (rexel--probe ws)
+          (should (= 1 pings))
+          ;; Something arrived meanwhile.
+          (process-put process :last-read (+ (float-time) 1))
+          (timer-event-handler (process-get process :probe))
+          (should (process-live-p process))
+          (should-not (process-get process :probe))
+          (process-put process :last-read (- (float-time) 1))
+          (rexel--probe ws)
+          (should (= 2 pings))
+          ;; An answer Emacs has not read yet counts.
+          (cl-letf (((symbol-function 'accept-process-output)
+                     (lambda (process &rest _)
+                       (process-put process :last-read (+ (float-time) 1)))))
+            (timer-event-handler (process-get process :probe)))
+          (should (process-live-p process))
+          (process-put process :last-read (- (float-time) 1))
+          (rexel--probe ws)
+          (should (= 3 pings))
+          (timer-event-handler (process-get process :probe))
+          (should-not (process-live-p process)))
+      (rexel-test--ws-delete ws))))
+
+(ert-deftest rexel-test-probe-send-error-closes-connection ()
+  (let ((ws (rexel-test--ws)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'websocket-send)
+                   (lambda (&rest _) (error "Gone"))))
+          (rexel--probe ws)
+          (should-not (process-live-p (websocket-conn ws))))
+      (rexel-test--ws-delete ws))))
+
+(ert-deftest rexel-test-pty-out-probes-unanswered-write ()
+  (rexel-test--with-fake-conn _sent
+    (let ((control (rexel-test--ws))
+          (data (rexel-test--ws))
+          pinged)
+      (setf (rexel--conn-ws rexel--conn) control)
+      (setq rexel--stream (rexel--make-stream :ws data))
+      (unwind-protect
+          (cl-letf (((symbol-function 'websocket-send)
+                     (lambda (ws _frame) (push ws pinged))))
+            (rexel--pty-out "a")
+            (should-not pinged)
+            (rexel--pty-out "b")
+            (rexel--pty-out "c")
+            ;; The control and the data connection, once each.
+            (should (= 2 (length pinged)))
+            (should (memq control pinged))
+            (should (memq data pinged)))
+        (rexel-test--ws-delete control)
+        (rexel-test--ws-delete data)))))
 
 (ert-deftest rexel-test-shell-process ()
   "The shell is the process under the login wrapper, else the foreground."
