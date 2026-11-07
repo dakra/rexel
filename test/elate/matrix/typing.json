@@ -1,6 +1,6 @@
 {
   "name": "typing",
-  "comment": "Keys typed into a block reach its program in order, over every kind of server address, and the program's output comes back: line editing, paste (large and bracketed), interrupt, function and cursor keys, a full-screen program, scrollback, copy mode and a large burst of output.",
+  "comment": "Keys typed into a block reach its program in order, over every kind of server address, and the program's output comes back: line editing, paste (large, bracketed and over a slow link), interrupt, function and cursor keys, a full-screen program, scrollback, copy mode and a large burst of output.",
   "params": {"host": "local"},
   "variants": {
     "local": {"host": "local"},
@@ -144,6 +144,21 @@
     {"assert": {"eval": "(not (rexel-elate-has \"^b1-2$\"))"}, "comment": "nothing ran before RET"},
     {"keys": "RET"},
     {"wait": "until", "pred": "(rexel-elate-in-order-p \"^b1-2$\" \"^b2-4$\")"},
+
+    {"group": "zsh-paste", "comment": "over a slow link zsh gets a multi-line paste as one edit and runs it on RET; zsh ends a paste whose text comes more than KEYTIMEOUT after the start bracket, and each newline after that runs a line"},
+    {"eval": "(when-let* ((zsh (executable-find \"zsh\"))) (rexel-elate-send (format \"exec %s -f\\n\" zsh)))", "comment": "without zsh the bash of the last group takes the paste, which checks only that it arrives whole: bash does not time out"},
+    {"eval": "(rexel-elate-send \"PS1='$ '; echo zp-$((6*6))\\n\")"},
+    {"wait": "until", "pred": "(rexel-elate-has \"^zp-36$\")", "comment": "the new shell runs"},
+    {"wait": "until", "pred": "(rexel-elate-prompt-p)"},
+    {"eval": "(rexel-elate-delay-request \"com.superlogical.terminal.write\" 0.6)"},
+    {"eval": "(kill-new \"echo z1-$((1+1))\\necho z2-$((2+2))\\necho z3-$((3+3))\")"},
+    {"keys": "C-y"},
+    {"wait": "until", "pred": "(rexel-elate-has \"^echo z3-\\\\$((3\\\\+3))$\")", "comment": "the last line is part of the edit"},
+    {"wait": "idle", "min_idle": 1},
+    {"assert": {"eval": "(not (rexel-elate-has \"^z1-2$\"))"}, "comment": "nothing ran before RET"},
+    {"eval": "(rexel-elate-undelay-requests)"},
+    {"keys": "RET"},
+    {"wait": "until", "pred": "(rexel-elate-in-order-p \"^z1-2$\" \"^z2-4$\" \"^z3-6$\")"},
 
     {"group": "cleanup"},
     {"eval": "(rexel-elate-cleanup)"}

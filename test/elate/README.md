@@ -74,7 +74,7 @@ it again.
 | Scenario | Variants | Groups |
 |---|---|---|
 | `session.json` | local, unix, tcp | `new-session`, `type`, `directory`, `rename`, `label-function`, `server-label`, `detach`, `attach`, `kill-buffer`, `host-prompt`, `attach-tabs`, `attach-again`, `detach-refresh`, `destroyed-elsewhere`, `no-server` |
-| `typing.json` | local, unix, tcp, fallback, tls | `echo`, `burst`, `edit`, `paste`, `unicode`, `interrupt`, `full-screen`, `keys`, `scrollback`, `copy-mode`, `flood`, `large-paste`, `bracketed-paste` |
+| `typing.json` | local, unix, tcp, fallback, tls | `echo`, `burst`, `edit`, `paste`, `unicode`, `interrupt`, `full-screen`, `keys`, `scrollback`, `copy-mode`, `flood`, `large-paste`, `bracketed-paste`, `zsh-paste` |
 | `layout.json` | local, unix | `size`, `resize`, `resize-full-screen`, `taken-back`, `smallest-window`, `split-right`, `split-below`, `split-left`, `split-above`, `split`, `sync-layout`, `new-tab`, `sync-tab`, `close-block`, `exit` |
 | `reconnect.json` | unix, tcp | `stream-drop`, `control-drop`, `write-in-flight`, `upload-redial`, `relay-restart`, `half-open`, `upload-stall`, `upload-cut`, `lost-connect`, `refused-hello` |
 | `upload.json` | unix, tcp, tls | `upload-file`, `several`, `empty`, `boundaries`, `symlink`, `names`, `compressed`, `dnd`, `drop`, `yank-media`, `dired`, `seventeen`, `remote-file`, `not-a-file`, `too-large`, `stays-usable`, `slow`, `file-changes`, `cancel`, `after-cancel`, `cancel-idle`, `two-blocks`, `kill-buffer` |
@@ -102,6 +102,8 @@ Each scenario's `comment` and its groups' comments say what is checked.
   user's shell startup files where they check `default-directory` or a running command,
   so the block's shell counts as one without integration.
 - `bracketed-paste` needs a bash of 5.1 or later and takes the first it finds.
+- `zsh-paste` stays in the bash of `bracketed-paste` where no zsh is installed.  It
+  then shows only that the paste arrives whole, as bash does not time out.
 - Uploads are checked with `cksum`: it is typed first, Rex types the stored paths after
   it, and the output is compared with the checksum of the local file.
   `rexel-elate-hold-upload` stops an upload after a number of bytes, for a step that
