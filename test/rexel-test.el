@@ -494,6 +494,35 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
       (should (equal "session.attach" (alist-get 'method (car sent))))
       (should (equal "s" (alist-get 'session_id (alist-get 'payload (car sent))))))))
 
+(ert-deftest rexel-test-view-of-detached-session-is-dropped ()
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn)
+          (applied 0))
+      (setf (alist-get "t" (rexel--conn-sessions conn) nil nil #'equal) "work")
+      (cl-letf (((symbol-function 'rexel--apply-view)
+                 (lambda (&rest _) (cl-incf applied))))
+        (rexel--refresh-view conn "t")
+        (rexel-test--respond conn (car sent) '((revision . 1)))
+        (should (= 1 applied))
+        (rexel--refresh-view conn "t")
+        (rexel--forget-session conn "t")
+        (rexel-test--respond conn (car sent) '((revision . 2)))
+        (should (= 1 applied))))))
+
+(ert-deftest rexel-test-sync-layout-view-of-detached-session-is-dropped ()
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn)
+          (applied 0))
+      (setf (alist-get "t" (rexel--conn-sessions conn) nil nil #'equal) "work")
+      (cl-letf (((symbol-function 'rexel--read-session)
+                 (lambda () (cons conn "t")))
+                ((symbol-function 'rexel--apply-view)
+                 (lambda (&rest _) (cl-incf applied))))
+        (rexel-sync-layout)
+        (rexel--forget-session conn "t")
+        (rexel-test--respond conn (car sent) '((revision . 1)))
+        (should (= 0 applied))))))
+
 (ert-deftest rexel-test-pty-out-serializes-and-coalesces ()
   (rexel-test--with-fake-conn sent
     (rexel--pty-out "a")
@@ -517,9 +546,9 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
     (rexel--pty-out "x")
     (should (equal "x" (rexel-test--sent-data (car sent))))))
 
-(defun rexel-test--respond (conn object)
-  "Answer the request OBJECT on CONN with an empty result."
-  (funcall (gethash (alist-get 'id object) (rexel--conn-pending conn)) nil nil))
+(defun rexel-test--respond (conn object &optional result err)
+  "Answer the request OBJECT on CONN with RESULT or the error ERR."
+  (funcall (gethash (alist-get 'id object) (rexel--conn-pending conn)) result err))
 
 (ert-deftest rexel-test-size-requests-serialize-and-take ()
   (rexel-test--with-fake-conn sent

@@ -676,7 +676,9 @@ Return nil while the wrapper itself is in the foreground; before it execs
                        ((equal (alist-get 'code err) "session_not_found"))
                        (err (message "rexel: session.view: %s"
                                      (rexel--error-string err)))
-                       (t (rexel--apply-view conn sid view)))))))
+                       ;; Detached while the request was in flight.
+                       ((assoc sid (rexel--conn-sessions conn))
+                        (rexel--apply-view conn sid view)))))))
 
 (defun rexel--forget-session (conn sid)
   "Drop session SID from CONN and kill its block buffers."
@@ -1528,8 +1530,10 @@ Floating blocks and zoom are ignored."
     (rexel--request
      conn "session.view" `((session_id . ,sid))
      (lambda (view err)
-       (if err
-           (message "rexel: session.view: %s" (rexel--error-string err))
+       (cond
+        (err (message "rexel: session.view: %s" (rexel--error-string err)))
+        ;; Detached while the request was in flight.
+        ((assoc sid (rexel--conn-sessions conn))
          (rexel--apply-view conn sid view)
          (let* ((tabs (alist-get 'windows view))
                 (tab (if choose
@@ -1557,7 +1561,7 @@ Floating blocks and zoom are ignored."
              (when-let* ((buf (gethash (alist-get 'focused_block_id tab)
                                        (rexel--conn-blocks conn)))
                          (w (get-buffer-window buf)))
-               (select-window w)))))))))
+               (select-window w))))))))))
 
 (defun rexel-close-block ()
   "Close the current block on the server, ending its program."
