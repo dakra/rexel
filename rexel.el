@@ -5,7 +5,7 @@
 ;; Author: Daniel Kraus <daniel@kraus.my>
 ;; URL: https://github.com/dakra/rexel
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (ghostel "0.61.0") (websocket "1.15"))
+;; Package-Requires: ((emacs "28.1") (ghostel "0.62.0") (websocket "1.15"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
@@ -24,6 +24,11 @@
 ;; In a block buffer `rexel-prefix-key' (C-c C-r) prefixes the layout
 ;; commands in `rexel-prefix-map'.
 ;;
+;; A file dropped on a block buffer, pasted with `yank-media' or given to
+;; `rexel-upload-file' is sent to the server's machine, and its path
+;; there is typed into the terminal.  On this machine's server a local
+;; file's own path is typed.
+;;
 ;; Both connections are WebSockets, on a server's Unix socket or on its
 ;; network address, such as the one Rex's built-in Tailscale gives it.
 ;; Servers come from `rexel-program' and `rexel-hosts'.
@@ -39,6 +44,7 @@
 (require 'websocket)
 
 (declare-function ghostel--write-vt "ghostel-module")
+(declare-function dired-get-marked-files "dired")
 
 
 ;;; Customization
@@ -94,7 +100,7 @@ A write has as long, plus the time its size takes, see
 (defvar rexel--default-port 7297
   "Port a Rex server listens on unless told another.")
 
-(defconst rexel--api-revision 8
+(defconst rexel--api-revision 11
   "Control API revision this client speaks.")
 
 (defconst rexel--terminal-creator "com.superlogical.terminal"
@@ -391,13 +397,16 @@ websocket.el for the handshake and framing."
             (funcall sentinel process change)))
     (set-process-query-on-exit-flag conn nil)
     (websocket-ensure-handshake url conn key protocols nil nil nil)
-    (when network
-      ;; Emacs runs no sentinel for some failed connections, and a server
-      ;; may accept one and never answer.
-      (run-at-time rexel--connect-timeout nil
-                   (lambda ()
-                     (when (eq (websocket-ready-state ws) 'connecting)
-                       (delete-process conn)))))
+    ;; Emacs runs no sentinel for some failed connections, and a server
+    ;; may accept one and never answer.
+    (run-at-time rexel--connect-timeout nil
+                 (lambda ()
+                   ;; Emacs waiting on something else leaves the answer unread.
+                   (when (and (eq (websocket-ready-state ws) 'connecting)
+                              (process-live-p conn))
+                     (accept-process-output conn 0 nil 1))
+                   (when (eq (websocket-ready-state ws) 'connecting)
+                     (delete-process conn))))
     ws))
 
 (defun rexel--ws-filter (process output)
@@ -662,6 +671,10 @@ reuses them."
   (setf (rexel--conn-refresh-timers conn) nil
         (rexel--conn-client-id conn) nil)
   (clrhash (rexel--conn-pending conn))
+  (dolist (buf (buffer-list))
+    (when (and (eq (buffer-local-value 'rexel--conn buf) conn)
+               (buffer-local-value 'rexel--uploads buf))
+      (rexel--upload-fail buf "control connection lost")))
   (if (rexel--conn-sessions conn)
       (progn
         (setf (rexel--conn-revisions conn) nil)
@@ -863,6 +876,15 @@ return to when a RESUME is welcomed."
 (defvar-local rexel--out-inflight nil
   "The connection a `terminal.write' is in flight on, or nil.")
 
+(defvar-local rexel--upload-queue nil
+  "Local files waiting to be uploaded to this block, in order.")
+
+(defvar-local rexel--uploads nil
+  "The `rexel--upload's of the batch in progress, in the order of its paths.")
+
+(defvar-local rexel--upload-reporter nil
+  "Progress reporter of the batch in progress.")
+
 (defun rexel--view-terminal-blocks (view)
   "Return the (BLOCK-ID . LABEL) of every terminal block in VIEW."
   (let (blocks)
@@ -941,7 +963,8 @@ A buffer whose stream ended earlier is reset and streamed again."
           rexel--out-pending nil
           rexel--out-inflight nil
           ghostel-pty-out-function #'rexel--pty-out
-          ghostel-resize-function #'rexel--resize)
+          ghostel-resize-function #'rexel--resize
+          ghostel-send-files-function #'rexel--send-files)
     (rexel-block-mode 1)
     (add-hook 'window-buffer-change-functions #'rexel--window-shown nil t)
     (add-hook 'window-selection-change-functions #'rexel--window-selected nil t)
@@ -950,10 +973,12 @@ A buffer whose stream ended earlier is reset and streamed again."
   buf)
 
 (defun rexel--block-buffer-killed ()
-  "Close the data connection of the block buffer being killed.
+  "Close the connections of the block buffer being killed.
 The block itself keeps running on the server."
   (when rexel--conn
     (remhash rexel--block-id (rexel--conn-blocks rexel--conn)))
+  (when (or rexel--uploads rexel--upload-queue)
+    (rexel--upload-fail (current-buffer) "buffer killed"))
   (rexel--close-stream))
 
 (defun rexel--pty-out (data)
@@ -1017,9 +1042,12 @@ Typing while a write is unanswered probes the block's connections."
            (setq rexel--data-state 'welcome
                  rexel--stream (rexel--make-stream))
            (condition-case err
-               (rexel--open-stream
-                (concat "\x01" (base64-decode-string (alist-get 'ticket result) t)))
+               (rexel--open-stream (rexel--hello (alist-get 'ticket result)))
              (error (rexel--data-failed buf (error-message-string err)))))))))))
+
+(defun rexel--hello (ticket)
+  "Return the HELLO message opening a data connection with TICKET."
+  (concat "\x01" (base64-decode-string ticket t)))
 
 (defun rexel--open-stream (hello)
   "Connect this buffer's stream to the data endpoint and send HELLO."
@@ -1288,6 +1316,367 @@ after `rexel--max-message-bytes' passes through as output."
                 (buffer-name) (alist-get 'exit_code msg))))))
 
 
+;;; Uploads
+
+(defconst rexel--upload-chunk-bytes 4096
+  "Bytes of a file sent in one message of an upload.
+The server takes up to 65536.  A message that fits the send buffer of a
+Unix socket, 8192 bytes on macOS, is written at once; for the rest of a
+larger one Emacs looks for room only every 20 ms.")
+
+(defconst rexel--upload-batch-max 16
+  "Most uploads a terminal takes at a time.")
+
+(cl-defstruct (rexel--upload (:constructor rexel--make-upload) (:copier nil))
+  "One file on its way to the machine a block runs on.
+FILE is the local file, NAME the name it gets, SIZE its bytes and SENT
+those sent so far.  REF names its data stream and WS is that stream's
+WebSocket.  STATE is `begin' while the ticket is requested, `welcome'
+until the server answers the HELLO, then `ready', `sending', `ending'
+once the end marker is sent, and `done'.  TEMP is non-nil when FILE is a
+copy to delete afterwards.  SIZE is nil until `rexel--upload-fetch'."
+  file name size ref ws state (sent 0) temp)
+
+(defun rexel--uuid ()
+  "Return a random version 4 UUID in lower case."
+  (format "%08x-%04x-4%03x-%04x-%012x"
+          (random (ash 1 32)) (random (ash 1 16)) (random (ash 1 12))
+          (logior #x8000 (random (ash 1 14))) (random (ash 1 48))))
+
+(defun rexel--send-files (files)
+  "Hand the local FILES to the program in this block.
+Their paths are typed into the terminal.  Unless they are all on the same
+machine as the server, it gets the files themselves, in batches of
+`rexel--upload-batch-max', and types the paths they are stored under;
+calls made in one command share a batch.  ghostel calls this as
+`ghostel-send-files-function'."
+  (cond
+   ((null rexel--conn)
+    (user-error "Not connected; use M-x rexel-attach"))
+   ((and (null (rexel--conn-host rexel--conn))
+         (not (seq-some #'file-remote-p files)))
+    (ghostel-paste-string
+     (concat (mapconcat #'shell-quote-argument files " ") " ")))
+   (t
+    (dolist (file files)
+      (unless (and (file-regular-p file) (file-readable-p file))
+        (user-error "Cannot upload %s: not a readable file" file)))
+    (setq rexel--upload-queue (append rexel--upload-queue files))
+    (run-at-time 0 nil #'rexel--upload-next (current-buffer)))))
+
+(defun rexel--upload-next (buf)
+  "Start the next batch of BUF's queued files unless a write is innermost.
+A fetch of a remote file inside that write's wait would keep it from
+returning, until it counts as stalled."
+  (if (rexel--write-p (car rexel--writes))
+      (run-at-time 0.01 nil #'rexel--upload-next buf)
+    (rexel--upload-start buf)))
+
+(defun rexel--upload-start (buf)
+  "Start the next batch of BUF's queued files unless one is in progress.
+Remote files are fetched, then every file is announced before any is
+sent, so the server refuses a batch over its limits with nothing sent."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (and rexel--upload-queue (null rexel--uploads))
+        (let* ((files (seq-take rexel--upload-queue rexel--upload-batch-max))
+               (count (length files))
+               (batch (and (> count 1) (rexel--uuid)))
+               (uploads (mapcar (lambda (file)
+                                  (rexel--make-upload
+                                   :file file :state 'begin
+                                   :name (file-name-nondirectory file)
+                                   :ref (concat "upload:" (rexel--uuid))))
+                                files))
+               (index 0))
+          (setq rexel--upload-queue (nthcdr count rexel--upload-queue)
+                rexel--uploads uploads)
+          (condition-case err
+              (progn
+                (unless (rexel--ready-p rexel--conn)
+                  (error "Not connected"))
+                (when (seq-every-p (lambda (upload)
+                                     (rexel--upload-fetch buf upload))
+                                   uploads)
+                  (setq rexel--upload-reporter
+                        (make-progress-reporter
+                         (format "Uploading %d file%s to %s..."
+                                 count (if (= count 1) "" "s")
+                                 (rexel--conn-name rexel--conn))
+                         0 (max 1 (apply #'+ (mapcar #'rexel--upload-size
+                                                     uploads)))))
+                  (dolist (upload uploads)
+                    (rexel--upload-begin buf upload batch index count)
+                    (setq index (1+ index)))))
+            (error (when (rexel--upload-current-p buf (car uploads))
+                     (rexel--upload-fail buf (error-message-string err))))))))))
+
+(defun rexel--upload-fetch (buf upload)
+  "Make the file of UPLOAD local and note its size.
+Return nil if the batch in BUF ended during the fetch, which can block
+while timers and filters run."
+  (let* ((file (rexel--upload-file upload))
+         (copy (rexel--local-copy file)))
+    (if (not (rexel--upload-current-p buf upload))
+        (when copy
+          (ignore-errors (delete-file copy)))
+      (when copy
+        (setf (rexel--upload-file upload) copy
+              (rexel--upload-temp upload) t))
+      (or (setf (rexel--upload-size upload)
+                (file-attribute-size
+                 (file-attributes
+                  (file-truename (rexel--upload-file upload)))))
+          (error "Cannot read %s" file)))))
+
+(defun rexel--local-copy (file)
+  "Return a temporary copy of the remote FILE, or nil if FILE is on this machine.
+A compressed file is copied as it is."
+  (let ((inhibit-file-name-handlers
+         (cons 'jka-compr-handler inhibit-file-name-handlers))
+        (inhibit-file-name-operation 'file-local-copy))
+    (file-local-copy file)))
+
+(defun rexel--upload-begin (buf upload batch index count)
+  "Request the ticket for UPLOAD in BUF and connect its stream with it.
+With BATCH, UPLOAD is file INDEX of COUNT in the batch of that ID."
+  (rexel--request
+   rexel--conn "com.superlogical.terminal.upload_begin"
+   `((session_id . ,rexel--session-id)
+     (block_id . ,rexel--block-id)
+     (args . ((ref . ,(rexel--upload-ref upload))
+              (name . ,(rexel--upload-name upload))
+              (size . ,(rexel--upload-size upload))
+              ,@(when batch
+                  `((batch . ,batch) (index . ,index) (count . ,count))))))
+   (lambda (result err)
+     (when (rexel--upload-current-p buf upload)
+       (if err
+           (rexel--upload-fail buf (format "%s: %s" (rexel--upload-name upload)
+                                           (rexel--error-string err)))
+         (with-current-buffer buf
+           (condition-case err
+               (rexel--upload-open buf upload
+                                   (rexel--hello (alist-get 'ticket result)))
+             (error (rexel--upload-fail buf (error-message-string err))))))))))
+
+(defun rexel--upload-open (buf upload hello)
+  "Connect the stream of UPLOAD in BUF to the data endpoint and send HELLO."
+  (let ((ws (rexel--ws-open
+             (rexel--conn-endpoint rexel--conn) "/api/data" "rex.data.bytes.v1"
+             (lambda (ws)
+               (websocket-send ws (make-websocket-frame
+                                   :opcode 'binary :payload hello :completep t)))
+             (lambda (_ws frame)
+               (rexel--on-upload-message buf upload
+                                         (websocket-frame-payload frame)))
+             (lambda (ws) (rexel--on-upload-close buf upload ws)))))
+    (set-process-filter (websocket-conn ws) #'rexel--upload-filter)
+    (setf (rexel--upload-ws upload) ws
+          (rexel--upload-state upload) 'welcome)))
+
+(defun rexel--upload-current-p (buf upload)
+  "Return non-nil if UPLOAD is part of the batch in progress in BUF."
+  (and (buffer-live-p buf)
+       (memq upload (buffer-local-value 'rexel--uploads buf))))
+
+(defun rexel--upload-filter (process output)
+  "Keep the OUTPUT of an upload connection's PROCESS and pass it on.
+websocket.el drops the status of a close frame; `rexel--close-status'
+reads it from the kept bytes, which are few: a handshake and pings."
+  (process-put process :upload-in
+               (concat (process-get process :upload-in) output))
+  (rexel--ws-filter process output))
+
+(defun rexel--close-status (bytes)
+  "Return the status of the close frame in BYTES, or nil if they have none.
+BYTES are all a server sent on a WebSocket, with or without its
+handshake response.  A close frame without a status gives 1005.
+Frames websocket.el cannot read end the search."
+  (let ((pos (if (string-prefix-p "HTTP/" bytes)
+                 (+ 4 (or (string-search "\r\n\r\n" bytes) (length bytes)))
+               0))
+        (total (length bytes))
+        status)
+    (ignore-error websocket-unparseable-frame
+      (catch 'websocket-incomplete-frame
+        (while (and (not status) (< pos total))
+          (let* ((len (websocket-get-payload-len
+                       (substring bytes (1+ pos) (min total (+ pos 10)))))
+                 (start (+ pos 1 (cdr len)))
+                 (end (+ start (car len))))
+            (when (> end total)
+              (throw 'websocket-incomplete-frame nil))
+            (when (= 8 (logand 15 (aref bytes pos)))
+              (setq status (if (< (car len) 2)
+                               1005
+                             (logior (ash (aref bytes start) 8)
+                                     (aref bytes (1+ start))))))
+            (setq pos end)))))
+    status))
+
+(defun rexel--on-upload-message (buf upload bytes)
+  "Handle BYTES, the server's answer to the HELLO of UPLOAD in BUF."
+  (when (rexel--upload-current-p buf upload)
+    (cond
+     ((and (eq (rexel--upload-state upload) 'welcome)
+           (>= (length bytes) 32) (= (aref bytes 0) #x81))
+      (setf (rexel--upload-state upload) 'ready)
+      (rexel--upload-pump buf))
+     ((and (>= (length bytes) 2) (= (aref bytes 0) #x82))
+      (rexel--upload-fail buf (format "%s: data connection rejected, reason %d"
+                                      (rexel--upload-name upload)
+                                      (aref bytes 1))))
+     (t (rexel--upload-fail buf "malformed data handshake")))))
+
+(defun rexel--upload-pump (buf)
+  "Send the first unfinished file of BUF's batch once its stream is ready.
+Files go one at a time, in the order their paths are typed.  With all of
+them done, report it and start the next batch."
+  (with-current-buffer buf
+    (let ((upload (seq-find (lambda (u) (not (eq (rexel--upload-state u) 'done)))
+                            rexel--uploads))
+          (count (length rexel--uploads)))
+      (cond
+       ((null upload)
+        (rexel--upload-cleanup rexel--uploads)
+        (setq rexel--uploads nil)
+        (message "rexel: uploaded %d file%s to %s"
+                 count (if (= count 1) "" "s") (rexel--conn-name rexel--conn))
+        ;; This runs in a sentinel, and fetching a remote file can block.
+        (run-at-time 0 nil #'rexel--upload-next buf))
+       ((eq (rexel--upload-state upload) 'ready)
+        (setf (rexel--upload-state upload) 'sending)
+        (rexel--upload-send-chunk buf upload))))))
+
+(defvar rexel--upload-slice 0.05
+  "Seconds an upload sends for before Emacs reads what other processes sent.")
+
+(defun rexel--upload-pause (process)
+  "Return the seconds to wait before the next chunk goes to PROCESS.
+Timers due at once run in a row and Emacs reads no process output between
+them, so once per `rexel--upload-slice' the next chunk is not due at once."
+  (let ((now (float-time)))
+    (if (< (- now (or (process-get process :upload-paused) 0)) rexel--upload-slice)
+        0
+      (process-put process :upload-paused now)
+      0.001)))
+
+(defun rexel--upload-send-chunk (buf upload)
+  "Send the next chunk of UPLOAD in BUF, and the rest from a timer."
+  (when (rexel--upload-current-p buf upload)
+    (if rexel--writes-overdue
+        (run-at-time 0.01 nil #'rexel--upload-send-chunk buf upload)
+      (let (returned)
+        (unwind-protect
+            (progn
+              (condition-case err
+                  (rexel--upload-write buf upload)
+                ;; A batch that failed meanwhile closed the connection.
+                (error (when (rexel--upload-current-p buf upload)
+                         (rexel--upload-fail
+                          buf (format "%s: %s" (rexel--upload-name upload)
+                                      (error-message-string err))))))
+              (setq returned t))
+          ;; A `throw' through the write would end the chain of chunks.
+          (when (and (not returned) (rexel--upload-current-p buf upload))
+            (rexel--upload-fail
+             buf (format "%s: the write was interrupted"
+                         (rexel--upload-name upload)))))))))
+
+(defun rexel--upload-write (buf upload)
+  "Write the next chunk of UPLOAD in BUF and schedule the one after it.
+An empty message after the last chunk ends the file.  Emacs reads no keys
+while a chunk waits for room in the socket, so a chunk not taken within
+`rexel--connect-timeout' fails the batch."
+  (let* ((process (websocket-conn (rexel--upload-ws upload)))
+         (sent (rexel--upload-sent upload))
+         (end (min (rexel--upload-size upload)
+                   (+ sent rexel--upload-chunk-bytes)))
+         (chunk (with-temp-buffer
+                  (set-buffer-multibyte nil)
+                  (when (< sent end)
+                    (insert-file-contents-literally
+                     (rexel--upload-file upload) nil sent end))
+                  (buffer-string))))
+    (unless (= (length chunk) (- end sent))
+      (error "File changed during the upload"))
+    (rexel--watched-write
+     process
+     (lambda ()
+       (when (rexel--upload-current-p buf upload)
+         (rexel--upload-fail buf (format "%s: the connection stalled"
+                                         (rexel--upload-name upload)))))
+     (lambda ()
+       (process-send-string process (rexel--binary-frame chunk)))
+     (length chunk))
+    ;; A ping would wait behind the file's data; a chunk the socket
+    ;; took shows the connection alive.
+    (process-put process :last-read (float-time))
+    (if (= sent end)
+        (setf (rexel--upload-state upload) 'ending)
+      (setf (rexel--upload-sent upload) end)
+      (with-current-buffer buf
+        (when rexel--upload-reporter
+          (progress-reporter-update
+           rexel--upload-reporter
+           (apply #'+ (mapcar #'rexel--upload-sent rexel--uploads)))))
+      (run-at-time (rexel--upload-pause process) nil
+                   #'rexel--upload-send-chunk buf upload))))
+
+(defun rexel--binary-frame (payload)
+  "Return a client's binary WebSocket frame holding the unibyte PAYLOAD.
+PAYLOAD is shorter than 65536 bytes.  The mask key is zero, which leaves
+the payload as it is; masking it in `websocket-encode-frame' would take
+most of an upload's time."
+  (let ((len (length payload)))
+    (concat (if (< len 126)
+                (unibyte-string #x82 (logior #x80 len))
+              (unibyte-string #x82 #xfe (ash len -8) (logand len #xff)))
+            "\0\0\0\0" payload)))
+
+(defun rexel--on-upload-close (buf upload ws)
+  "Handle the close of WS, the connection of UPLOAD in BUF.
+The server closes with status 1000 once it has the file, and the last of
+a batch after typing the paths.  Any other close fails the batch."
+  (when (rexel--upload-current-p buf upload)
+    (let ((status (rexel--close-status
+                   (or (process-get (websocket-conn ws) :upload-in) ""))))
+      (if (and (eql status 1000) (eq (rexel--upload-state upload) 'ending))
+          (progn
+            (setf (rexel--upload-state upload) 'done)
+            (rexel--upload-pump buf))
+        (rexel--upload-fail
+         buf (format "%s: %s" (rexel--upload-name upload)
+                     (if status
+                         (format "server closed the upload with status %d" status)
+                       "connection lost")))))))
+
+(defun rexel--upload-cleanup (uploads)
+  "Delete the temporary copies of UPLOADS and forget the progress reporter."
+  (setq rexel--upload-reporter nil)
+  (dolist (upload uploads)
+    (when (rexel--upload-temp upload)
+      (ignore-errors (delete-file (rexel--upload-file upload))))))
+
+(defun rexel--upload-fail (buf reason)
+  "Give up BUF's batch and its queued files, reporting REASON.
+A connection closed before the end of its file makes the server discard
+the batch, so no path is typed."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (let ((uploads rexel--uploads))
+        ;; Forgotten first, so that the closes below are ignored.
+        (setq rexel--uploads nil
+              rexel--upload-queue nil)
+        (rexel--upload-cleanup uploads)
+        ;; A close frame would wait for room in a stalled connection.
+        (dolist (upload uploads)
+          (when-let* ((ws (rexel--upload-ws upload)))
+            (ignore-errors (delete-process (websocket-conn ws)))))
+        (message "rexel: %s: upload failed: %s" (buffer-name) reason)))))
+
+
 ;;; Sizing
 
 (defun rexel--resize (rows cols &optional take)
@@ -1700,6 +2089,33 @@ Floating blocks and zoom are ignored."
                     `((session_id . ,rexel--session-id)
                       (block_id . ,rexel--block-id)))))
 
+(defun rexel-upload-file (files &optional buffer)
+  "Send FILES to the program in the Rex block of BUFFER, by default this one.
+The files are uploaded to the block's machine and their paths typed into
+the terminal.  On this machine's server, local files are not uploaded.
+Interactively, read a file in a block buffer; in a Dired buffer, send the
+marked files to a block buffer read from the minibuffer."
+  (interactive
+   (if (derived-mode-p 'dired-mode)
+       (list (dired-get-marked-files)
+             (read-buffer "Upload to Rex block: " nil t
+                          (lambda (b)
+                            (buffer-local-value
+                             'rexel--block-id
+                             (if (consp b) (cdr b) (get-buffer b))))))
+     (rexel--ensure-block-buffer-context)
+     (list (list (read-file-name "Upload file: " nil nil t)))))
+  (with-current-buffer (or buffer (current-buffer))
+    (rexel--ensure-block-buffer-context)
+    (rexel--send-files (mapcar #'expand-file-name files))))
+
+(defun rexel-cancel-upload ()
+  "Cancel the files being uploaded to the current block."
+  (interactive)
+  (unless (or rexel--uploads rexel--upload-queue)
+    (user-error "No upload in progress"))
+  (rexel--upload-fail (current-buffer) "cancelled"))
+
 (defvar rexel-prefix-map
   (let ((map (make-sparse-keymap)))
     (define-key map "%" #'rexel-split-right)
@@ -1714,6 +2130,7 @@ Floating blocks and zoom are ignored."
     (define-key map "c" #'rexel-new-tab)
     (define-key map "=" #'rexel-sync-layout)
     (define-key map "$" #'rexel-rename-session)
+    (define-key map "u" #'rexel-upload-file)
     (define-key map "x" #'rexel-close-block)
     (define-key map "d" #'rexel-detach)
     map)

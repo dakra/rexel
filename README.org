@@ -102,6 +102,7 @@ In a block buffer =C-c C-r= (=rexel-prefix-key=) prefixes:
 | ~c~        | ~rexel-new-tab~                              |
 | ~=~        | ~rexel-sync-layout~, see below               |
 | ~$~        | ~rexel-rename-session~                       |
+| ~u~        | ~rexel-upload-file~, see below               |
 | ~x~        | ~rexel-close-block~, ends the program        |
 | ~d~        | ~rexel-detach~, keeps the session running    |
 
@@ -118,6 +119,28 @@ stream reconnects, so the terminal is sized to the smallest Emacs window
 showing it, as a tmux client would.  Another client such as Rex.app can
 take the block back; the terminal then follows that client's size until
 Emacs takes it again.
+
+** Uploading files
+
+A file dropped on a block buffer, or an image pasted with =M-x yank-media=,
+goes to the program in the block: Rexel sends the file to the server's
+machine and Rex types its path into the terminal, as a paste.
+~rexel-upload-file~ does the same for a file read from the minibuffer.  In
+a Dired buffer it sends the marked files to a block buffer you pick.  Files
+on a TRAMP host are fetched first, which Emacs waits for and which cannot be
+cancelled.
+
+Files sent together have their paths typed together, in order, once all
+have arrived.  The server keeps them until the block closes.  It takes
+files of up to 100 MiB, 16 at a time; more than 16 go in rounds.  Emacs
+stays usable while a file is sent and ~rexel-cancel-upload~ stops it.  While a
+connection stalls Emacs waits, and gives the upload up after ten seconds; each
+stalled connection can take that long in turn, one carrying a large paste
+longer.  A cancelled upload, or one whose connection drops or stalls, types
+nothing and is not resumed.
+
+The exception is this machine's server: a local file is not copied, and
+Rexel types its own path.
 
 ** Shell integration
 
