@@ -1276,6 +1276,11 @@ once this client owns the block, when the server reports it in the stream."
   (pcase-dolist (`(,sid . ,_) (rexel--conn-sessions conn))
     (dolist (buf (rexel--session-buffers conn sid))
       (with-current-buffer buf
+        ;; The server may have run the write whose answer was lost, so it
+        ;; is not sent again.
+        (when rexel--out-inflight
+          (message "rexel: %s: keys typed as the connection dropped may be lost"
+                   (buffer-name)))
         (setq rexel--out-inflight nil
               rexel--size-inflight nil)))
     (rexel--request

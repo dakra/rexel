@@ -494,6 +494,29 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
       (should (equal "session.attach" (alist-get 'method (car sent))))
       (should (equal "s" (alist-get 'session_id (alist-get 'payload (car sent))))))))
 
+(ert-deftest rexel-test-reattach-does-not-repeat-a-write ()
+  "A write in flight when the connection dropped is reported, not sent again."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn)
+          messages)
+      (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work")
+      (rexel--pty-out "a")
+      (rexel--pty-out "b")
+      (setq sent nil)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format &rest args)
+                   (push (apply #'format format args) messages))))
+        (rexel--reattach conn))
+      (should (string-match-p "may be lost" (car messages)))
+      (should-not rexel--out-inflight)
+      (should (equal '("session.attach")
+                     (mapcar (lambda (object) (alist-get 'method object)) sent)))
+      ;; What was typed after it follows the attach.
+      (cl-letf (((symbol-function 'rexel--apply-view) #'ignore)
+                ((symbol-function 'rexel--sync-size) #'ignore))
+        (rexel-test--respond conn (car sent) '((view))))
+      (should (equal "b" (rexel-test--sent-data (car sent)))))))
+
 (ert-deftest rexel-test-view-of-detached-session-is-dropped ()
   (rexel-test--with-fake-conn sent
     (let ((conn rexel--conn)
