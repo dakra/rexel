@@ -76,7 +76,7 @@ it again.
 | `session.json` | local, unix, tcp | `new-session`, `type`, `directory`, `rename`, `label-function`, `server-label`, `detach`, `attach`, `kill-buffer`, `host-prompt`, `attach-tabs`, `attach-again`, `detach-refresh`, `destroyed-elsewhere`, `no-server` |
 | `typing.json` | local, unix, tcp, fallback, tls | `echo`, `burst`, `edit`, `paste`, `unicode`, `interrupt`, `full-screen`, `keys`, `scrollback`, `copy-mode`, `flood`, `large-paste`, `bracketed-paste` |
 | `layout.json` | local, unix | `size`, `resize`, `resize-full-screen`, `taken-back`, `smallest-window`, `split-right`, `split-below`, `split-left`, `split-above`, `split`, `sync-layout`, `new-tab`, `sync-tab`, `close-block`, `exit` |
-| `reconnect.json` | unix, tcp | `stream-drop`, `control-drop`, `write-in-flight`, `upload-redial`, `relay-restart`, `half-open`, `upload-stall`, `upload-cut` |
+| `reconnect.json` | unix, tcp | `stream-drop`, `control-drop`, `write-in-flight`, `upload-redial`, `relay-restart`, `half-open`, `upload-stall`, `upload-cut`, `lost-connect` |
 | `upload.json` | unix, tcp, tls | `upload-file`, `several`, `empty`, `boundaries`, `symlink`, `names`, `compressed`, `dnd`, `drop`, `yank-media`, `dired`, `seventeen`, `remote-file`, `not-a-file`, `too-large`, `stays-usable`, `slow`, `file-changes`, `cancel`, `after-cancel`, `cancel-idle`, `two-blocks`, `kill-buffer` |
 | `local.json` | — | `directory`, `command-running`, `upload-file`, `remote-file`, `drop`, `yank-media`, `exec-shell` |
 

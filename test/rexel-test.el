@@ -521,6 +521,139 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
         (rexel-test--respond conn (car sent) '((view))))
       (should (equal "b" (rexel-test--sent-data (car sent)))))))
 
+(defun rexel-test--view (bid)
+  "Return a session view with the one terminal block BID."
+  `((label . "work")
+    (windows . [((layers . [((blocks . [((block_id . ,bid)
+                                         (creator_name . ,rexel--terminal-creator))]))]))])))
+
+(defun rexel-test--count (method sent)
+  "Return how many of the requests SENT call METHOD."
+  (seq-count (lambda (object) (equal method (alist-get 'method object))) sent))
+
+(defmacro rexel-test--with-attached-block (conn &rest body)
+  "Run BODY with this buffer as block \"block:123456\" of session \"s\" on CONN.
+The terminal and the stream's connection are stubbed."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'ghostel--init-buffer) #'ignore)
+             ((symbol-function 'rexel-block-mode) #'ignore)
+             ((symbol-function 'rexel--open-stream) #'ignore)
+             ((symbol-function 'rexel--sync-size) #'ignore))
+     (setq rexel--block-id "block:123456")
+     (setf (alist-get "s" (rexel--conn-sessions ,conn) nil nil #'equal) "work")
+     (puthash rexel--block-id (current-buffer) (rexel--conn-blocks ,conn))
+     ,@body))
+
+(ert-deftest rexel-test-reattach-restreams-lost-connect ()
+  "A block whose `data.connect' went with the connection is streamed again."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn))
+      (rexel-test--with-attached-block conn
+        (rexel--reattach conn)
+        (should (= 0 (rexel-test--count "data.connect" sent)))
+        (rexel-test--respond conn (car sent)
+                             `((view . ,(rexel-test--view rexel--block-id))))
+        (should (= 1 (rexel-test--count "data.connect" sent)))
+        (rexel-test--respond conn (car sent) '((ticket . "AAAA")))
+        (should (eq 'welcome rexel--data-state))))))
+
+(ert-deftest rexel-test-reattach-sends-keys-typed-during-outage ()
+  "Bytes typed while the connection was down go out once, and the block streams."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn))
+      (rexel-test--with-attached-block conn
+        (setq rexel--out-pending "a")
+        (rexel--reattach conn)
+        (rexel-test--respond conn (car sent)
+                             `((view . ,(rexel-test--view rexel--block-id))))
+        (should (= 1 (rexel-test--count "data.connect" sent)))
+        (should (= 1 (rexel-test--count "com.superlogical.terminal.write" sent)))))))
+
+(defun rexel-test--writes (sent)
+  "Return the typed text of the write requests in SENT, oldest first."
+  (nreverse
+   (delq nil (mapcar (lambda (object)
+                       (when (equal "com.superlogical.terminal.write"
+                                    (alist-get 'method object))
+                         (rexel-test--sent-data object)))
+                     sent))))
+
+(ert-deftest rexel-test-restream-keeps-held-back-keys ()
+  "Bytes waiting for a write's answer survive the block's new stream."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn))
+      (rexel-test--with-attached-block conn
+        (rexel--reattach conn)
+        (let ((attach (car sent)))
+          (rexel--pty-out "a")
+          (let ((write (car sent)))
+            (rexel--pty-out "b")
+            (rexel-test--respond conn attach
+                                 `((view . ,(rexel-test--view rexel--block-id))))
+            (rexel-test--respond conn write)
+            (should (equal '("a" "b") (rexel-test--writes sent)))))))))
+
+(ert-deftest rexel-test-restream-keeps-write-in-flight ()
+  "A write sent before the block's new stream still holds back the next."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn))
+      (rexel-test--with-attached-block conn
+        (setq rexel--out-pending "a")
+        (rexel--reattach conn)
+        (rexel-test--respond conn (car sent)
+                             `((view . ,(rexel-test--view rexel--block-id))))
+        (rexel--pty-out "b")
+        (should (equal '("a") (rexel-test--writes sent)))))))
+
+(ert-deftest rexel-test-attach-on-another-connection-drops-typed-bytes ()
+  "A buffer taken over from another connection starts with nothing to send."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn)
+          (other (rexel--make-conn :endpoints (list "other"))))
+      (rexel-test--with-attached-block conn
+        (setq rexel--out-pending "a"
+              rexel--out-inflight other
+              rexel--conn other)
+        (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
+        (should-not rexel--out-pending)
+        (should-not rexel--out-inflight)))))
+
+(ert-deftest rexel-test-reattach-leaves-other-connections-connect ()
+  "A reconnect leaves the `data.connect' of another connection in flight."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn)
+          (other (rexel--make-conn :endpoints (list "other") :client-id t
+                                   :ws (websocket-inner-create :conn nil :url "o"
+                                                               :ready-state 'closed))))
+      (rexel-test--with-attached-block conn
+        (setf (alist-get "s" (rexel--conn-sessions other) nil nil #'equal) "work")
+        (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
+        (rexel--reattach other)
+        (should-not rexel--data-state)))))
+
+(ert-deftest rexel-test-reattach-leaves-running-streams ()
+  "A block with a stream keeps it through a reconnect of the control connection."
+  (dolist (state '(welcome snapshot live))
+    (rexel-test--with-fake-conn sent
+      (let ((conn rexel--conn))
+        (rexel-test--with-attached-block conn
+          (setq rexel--data-state state)
+          (rexel--reattach conn)
+          (rexel-test--respond conn (car sent)
+                               `((view . ,(rexel-test--view rexel--block-id))))
+          (should (= 0 (rexel-test--count "data.connect" sent)))
+          (should (eq state rexel--data-state)))))))
+
+(ert-deftest rexel-test-view-refresh-keeps-first-connect ()
+  "A view applied during a healthy first `data.connect' asks for no second one."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn))
+      (rexel-test--with-attached-block conn
+        (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
+        (should (= 1 (rexel-test--count "data.connect" sent)))
+        (rexel--apply-view conn "s" (rexel-test--view rexel--block-id))
+        (should (= 1 (rexel-test--count "data.connect" sent)))))))
+
 (ert-deftest rexel-test-view-of-detached-session-is-dropped ()
   (rexel-test--with-fake-conn sent
     (let ((conn rexel--conn)

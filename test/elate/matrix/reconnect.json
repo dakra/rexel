@@ -1,6 +1,6 @@
 {
   "name": "reconnect",
-  "comment": "Connections that drop while a session is attached: a lost stream resumes without losing or repeating output, a lost control connection is redialled and typing meanwhile arrives afterwards, a write whose answer was lost is not repeated, uploads during a redial, a relay that dies and comes back, a connection that stays open but silent, an upload whose link stalls, and an upload cut off halfway.",
+  "comment": "Connections that drop while a session is attached: a lost stream resumes without losing or repeating output, a lost control connection is redialled and typing meanwhile arrives afterwards, a write whose answer was lost is not repeated, uploads during a redial, a relay that dies and comes back, a connection that stays open but silent, an upload whose link stalls, an upload cut off halfway, and a block whose data.connect was lost.",
   "params": {"host": "unix"},
   "variants": {
     "unix": {"host": "unix"},
@@ -139,6 +139,20 @@
     {"keys": "RET"},
     {"wait": "until", "pred": "(rexel-elate-has \"x-cut-36$\")", "timeout": 20, "comment": "no path after it; not anchored at the line start, as a resize from a long message makes bash redraw the line"},
     {"wait": "until", "pred": "(= rexel-elate-stored (length (rexel-elate-uploads)))", "timeout": 30},
+
+    {"group": "lost-connect", "comment": "the data.connect of a new block goes with the control connection: after the reconnect the block is streamed and takes keys, and so does the block that was running"},
+    {"eval": "(rexel-elate-clear-messages)"},
+    {"eval": "(setq rexel-elate-first (current-buffer))"},
+    {"eval": "(progn (rexel-elate-drop-after-connect) (rexel-split-below))"},
+    {"wait": "until", "pred": "(rexel-elate-messages-p \"rexel: \\\\(reconnected\\\\|re-attached as a new client\\\\) to {{host}}\")", "timeout": 45},
+    {"wait": "until", "pred": "(and (not (eq (window-buffer) rexel-elate-first)) (rexel-elate-live-p))", "timeout": 20},
+    {"eval": "(rexel-elate-shell)"},
+    {"wait": "until", "pred": "(rexel-elate-prompt-p)"},
+    {"eval": "(rexel-elate-send \"echo m1-$((6*6))\\r\")"},
+    {"wait": "until", "pred": "(rexel-elate-has \"^m1-36$\")"},
+    {"wait": "until", "pred": "(rexel-elate-live-p rexel-elate-first)", "timeout": 20, "comment": "the server may have started a new client, which ends the streams it had"},
+    {"eval": "(rexel-elate-send \"echo m2-$((7*7))\\r\" rexel-elate-first)"},
+    {"wait": "until", "pred": "(rexel-elate-has \"^m2-49$\" rexel-elate-first)"},
 
     {"group": "cleanup"},
     {"eval": "(rexel-elate-cleanup)"}

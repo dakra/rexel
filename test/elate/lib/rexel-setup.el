@@ -476,6 +476,17 @@ WHICH is `data' for its stream or `control' for its server connection."
                        ('data (rexel--stream-ws rexel--stream))
                        ('control (rexel--conn-ws rexel--conn)))))))
 
+(defun rexel-elate-drop-after-connect ()
+  "Drop the control connection right after the next `data.connect' is sent.
+Its answer is lost with the connection."
+  (advice-add 'rexel--request :around
+              (lambda (request conn name &rest args)
+                (apply request conn name args)
+                (when (equal name "data.connect")
+                  (advice-remove 'rexel--request 'rexel-elate-drop)
+                  (delete-process (websocket-conn (rexel--conn-ws conn)))))
+              '((name . rexel-elate-drop))))
+
 (defun rexel-elate-in-order-p (&rest regexps)
   "Return non-nil when REGEXPS match the terminal text one after another."
   (let ((text (rexel-elate-text))

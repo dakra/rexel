@@ -859,7 +859,8 @@ return to when a RESUME is welcomed."
   "This block's current `rexel--stream', or nil.")
 
 (defvar-local rexel--data-state nil
-  "Where the data connection is: `welcome', `snapshot', `live' or `closed'.")
+  "Where the data connection is: `welcome', `snapshot', `live' or `closed'.
+Nil until the answer to `data.connect'.")
 
 (defvar-local rexel--requested-size nil
   "Last (COLS . ROWS) requested from the server for this block.")
@@ -926,7 +927,7 @@ already applied is ignored."
           (substring bid -6)))
 
 (defun rexel--stale-block-buffer (bid)
-  "Return a block buffer for BID left over from an earlier connection."
+  "Return a block buffer for BID whose stream ended, on any connection."
   (seq-find (lambda (buf)
               (and (equal (buffer-local-value 'rexel--block-id buf) bid)
                    (eq (buffer-local-value 'rexel--data-state buf) 'closed)))
@@ -951,6 +952,11 @@ A buffer whose stream ended earlier is reset and streamed again."
   "Make BUF show block BID of session SID on CONN and return it."
   (puthash bid buf (rexel--conn-blocks conn))
   (with-current-buffer buf
+    ;; A block streamed again on its connection keeps its typed bytes
+    ;; and the requests it has in flight.
+    (unless (eq rexel--conn conn)
+      (setq rexel--out-pending nil
+            rexel--out-inflight nil))
     (setq rexel--conn conn
           rexel--session-id sid
           rexel--block-id bid
@@ -960,8 +966,6 @@ A buffer whose stream ended earlier is reset and streamed again."
           rexel--requested-size nil
           rexel--size-take nil
           rexel--size-inflight nil
-          rexel--out-pending nil
-          rexel--out-inflight nil
           ghostel-pty-out-function #'rexel--pty-out
           ghostel-resize-function #'rexel--resize
           ghostel-send-files-function #'rexel--send-files)
@@ -1784,7 +1788,8 @@ once this client owns the block, when the server reports it in the stream."
          (rexel--show-focused-block conn view))))))
 
 (defun rexel--reattach (conn)
-  "Attach CONN again to its sessions and resume their typing and sizing."
+  "Attach CONN again to its sessions and resume their typing and sizing.
+A block whose `data.connect' went with the connection is streamed again."
   (pcase-dolist (`(,sid . ,_) (rexel--conn-sessions conn))
     (dolist (buf (rexel--session-buffers conn sid))
       (with-current-buffer buf
@@ -1794,7 +1799,9 @@ once this client owns the block, when the server reports it in the stream."
           (message "rexel: %s: keys typed as the connection dropped may be lost"
                    (buffer-name)))
         (setq rexel--out-inflight nil
-              rexel--size-inflight nil)))
+              rexel--size-inflight nil)
+        (when (and (eq rexel--conn conn) (null rexel--data-state))
+          (setq rexel--data-state 'closed))))
     (rexel--request
      conn "session.attach" `((session_id . ,sid))
      (lambda (result err)
