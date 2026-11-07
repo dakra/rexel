@@ -919,6 +919,19 @@ The terminal and the stream's connection are stubbed."
           (should-not rexel--size-inflight)
           (should-not sent))))))
 
+(ert-deftest rexel-test-resume-takes-and-sizes ()
+  "A stream that resumes takes the block and sizes it to its windows."
+  (rexel-test--with-fake-conn sent
+    (setq rexel--data-state 'welcome
+          rexel--stream (rexel--make-stream :resume 'live))
+    (cl-letf (((symbol-function 'ghostel--desired-size) (lambda () '(100 . 30))))
+      (rexel--on-welcome (rexel-test--welcome (make-string 16 ?t))))
+    (should (eq 'live rexel--data-state))
+    (should (equal "session.own_block" (alist-get 'method (car sent))))
+    (rexel-test--respond rexel--conn (car sent))
+    (should (equal '((columns . 100) (rows . 30))
+                   (alist-get 'args (alist-get 'payload (car sent)))))))
+
 (ert-deftest rexel-test-size-requests-wait-for-live ()
   (rexel-test--with-fake-conn sent
     (setq rexel--data-state 'snapshot)

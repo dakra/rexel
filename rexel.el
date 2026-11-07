@@ -1165,7 +1165,11 @@ tried once more with a new one."
       (setq rexel--hello-refused nil)
       (setf (rexel--stream-token s) (substring bytes 1 17))
       (if (rexel--stream-resume s)
-          (setq rexel--data-state (rexel--stream-resume s))
+          (progn
+            (setq rexel--data-state (rexel--stream-resume s))
+            ;; Sizes asked for during the RESUME were not sent.
+            (when (eq rexel--data-state 'live)
+              (rexel--sync-size)))
         (setf (rexel--stream-marker s)
               (format "\e_rex1;%d;" (rexel--u64le bytes 24)))
         (setq rexel--data-state 'snapshot))
