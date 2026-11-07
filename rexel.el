@@ -1007,24 +1007,25 @@ Typing while a write is unanswered probes the block's connections."
                (> (length rexel--out-pending) 0))
       (let ((data rexel--out-pending)
             (conn rexel--conn))
-        (setq rexel--out-pending nil)
+        (setq rexel--out-pending nil
+              rexel--out-inflight conn)
         (condition-case err
-            (progn
-              (rexel--request
-               conn "com.superlogical.terminal.write"
-               `((session_id . ,rexel--session-id)
-                 (block_id . ,rexel--block-id)
-                 (args . ((data . ,(decode-coding-string data 'utf-8-unix)))))
-               (lambda (_result err)
-                 (when err
-                   (message "rexel: terminal.write: %s" (rexel--error-string err)))
-                 (when (buffer-live-p buf)
-                   (with-current-buffer buf
-                     (setq rexel--out-inflight nil)
-                     (rexel--flush-out buf)))))
-              (setq rexel--out-inflight conn))
-          (error (message "rexel: dropped %d typed bytes: %s"
-                          (length data) (error-message-string err))))))))
+            (rexel--request
+             conn "com.superlogical.terminal.write"
+             `((session_id . ,rexel--session-id)
+               (block_id . ,rexel--block-id)
+               (args . ((data . ,(decode-coding-string data 'utf-8-unix)))))
+             (lambda (_result err)
+               (when err
+                 (message "rexel: terminal.write: %s" (rexel--error-string err)))
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (setq rexel--out-inflight nil)
+                   (rexel--flush-out buf)))))
+          (error
+           (setq rexel--out-inflight nil)
+           (message "rexel: dropped %d typed bytes: %s"
+                    (length data) (error-message-string err))))))))
 
 
 ;;; Data connection

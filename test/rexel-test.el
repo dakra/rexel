@@ -710,6 +710,50 @@ The terminal and the stream's connection are stubbed."
   "Answer the request OBJECT on CONN with RESULT or the error ERR."
   (funcall (gethash (alist-get 'id object) (rexel--conn-pending conn)) result err))
 
+(ert-deftest rexel-test-pty-out-during-send-waits-for-the-answer ()
+  "Bytes typed while a write is being sent follow its answer."
+  (rexel-test--with-fake-conn sent
+    (let ((buf (current-buffer))
+          (nested nil))
+      (cl-letf (((symbol-function 'rexel--send)
+                 (lambda (_conn object)
+                   (push object sent)
+                   (unless nested
+                     (setq nested t)
+                     (with-current-buffer buf (rexel--pty-out "b"))))))
+        (rexel--pty-out "a"))
+      (should (= 1 (length sent)))
+      (should (equal "a" (rexel-test--sent-data (car sent))))
+      (should (equal "b" rexel--out-pending))
+      (rexel-test--respond rexel--conn (car sent))
+      (should (= 2 (length sent)))
+      (should (equal "b" (rexel-test--sent-data (car sent)))))))
+
+(ert-deftest rexel-test-answer-during-send-clears-the-mark ()
+  "A write answered while it is being sent leaves no write in flight."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn))
+      (cl-letf (((symbol-function 'rexel--send)
+                 (lambda (_conn object)
+                   (push object sent)
+                   (rexel-test--respond conn object))))
+        (rexel--pty-out "a"))
+      (should-not rexel--out-inflight))))
+
+(ert-deftest rexel-test-pty-out-during-failed-send-goes-on ()
+  "A failed send leaves no write in flight, and bytes typed during it follow."
+  (rexel-test--with-fake-conn sent
+    (let ((buf (current-buffer)))
+      (cl-letf (((symbol-function 'rexel--send)
+                 (lambda (&rest _)
+                   (with-current-buffer buf (rexel--pty-out "b"))
+                   (error "Boom"))))
+        (rexel--pty-out "a"))
+      (should-not sent)
+      (should-not rexel--out-inflight)
+      (rexel--pty-out "c")
+      (should (equal "bc" (rexel-test--sent-data (car sent)))))))
+
 (ert-deftest rexel-test-size-requests-serialize-and-take ()
   (rexel-test--with-fake-conn sent
     (setq rexel--data-state 'live)
