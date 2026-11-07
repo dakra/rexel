@@ -862,6 +862,9 @@ return to when a RESUME is welcomed."
   "Where the data connection is: `welcome', `snapshot', `live' or `closed'.
 Nil until the answer to `data.connect'.")
 
+(defvar-local rexel--hello-refused nil
+  "Non-nil when the server refused a HELLO since the last WELCOME.")
+
 (defvar-local rexel--requested-size nil
   "Last (COLS . ROWS) requested from the server for this block.")
 
@@ -1151,10 +1154,12 @@ and restarted if it dropped before."
 (defun rexel--on-welcome (bytes)
   "Read the data handshake answer BYTES.
 A refused RESUME restarts the stream: the server no longer has the
-output this client missed."
+output this client missed.  A refused HELLO uses up its ticket, and is
+tried once more with a new one."
   (cond
    ((and (>= (length bytes) 32) (= (aref bytes 0) #x81))
     (let ((s rexel--stream))
+      (setq rexel--hello-refused nil)
       (setf (rexel--stream-token s) (substring bytes 1 17))
       (if (rexel--stream-resume s)
           (setq rexel--data-state (rexel--stream-resume s))
@@ -1164,12 +1169,18 @@ output this client missed."
       (when (> (length bytes) 32)
         (rexel--on-data (current-buffer) s (substring bytes 32)))))
    ((and (>= (length bytes) 2) (= (aref bytes 0) #x82))
-    (if (rexel--stream-resume rexel--stream)
+    (let ((reason (aref bytes 1)))
+      (cond
+       ((rexel--stream-resume rexel--stream)
         (rexel--restart-stream (current-buffer)
-                               (format "resume refused, reason %d" (aref bytes 1)))
-      (rexel--data-failed (current-buffer)
-                          (format "data connection rejected, reason %d"
-                                  (aref bytes 1)))))
+                               (format "resume refused, reason %d" reason)))
+       (rexel--hello-refused
+        (rexel--data-failed (current-buffer)
+                            (format "data connection rejected, reason %d" reason)))
+       (t
+        (setq rexel--hello-refused t)
+        (rexel--restart-stream (current-buffer)
+                               (format "data connection rejected, reason %d" reason))))))
    (t (rexel--data-failed (current-buffer) "malformed data handshake"))))
 
 (defconst rexel--max-record-bytes (ash 1 28)

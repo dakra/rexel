@@ -487,6 +487,14 @@ Its answer is lost with the connection."
                   (delete-process (websocket-conn (rexel--conn-ws conn)))))
               '((name . rexel-elate-drop))))
 
+(defun rexel-elate-spoil-hello ()
+  "Make the next HELLO carry a ticket the server does not know."
+  (advice-add 'rexel--hello :filter-return
+              (lambda (_hello)
+                (advice-remove 'rexel--hello 'rexel-elate-spoil)
+                (concat "\x01" (make-string 16 ?x)))
+              '((name . rexel-elate-spoil))))
+
 (defun rexel-elate-in-order-p (&rest regexps)
   "Return non-nil when REGEXPS match the terminal text one after another."
   (let ((text (rexel-elate-text))

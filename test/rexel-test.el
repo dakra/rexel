@@ -194,7 +194,7 @@
           (should (eq rexel--data-state 'closed)))))))
 
 (ert-deftest rexel-test-welcome-reject ()
-  "Only a refused RESUME has the block streamed afresh."
+  "A refused RESUME has the block streamed afresh, a repeated refused HELLO not."
   (rexel-test--with-fake-conn _sent
     (let ((conn rexel--conn)
           (buf (current-buffer))
@@ -208,7 +208,9 @@
             (setf (websocket-on-close ws)
                   (lambda (_ws) (rexel--on-data-close buf stream)))
             (puthash "b" buf (rexel--conn-blocks conn))
-            (setq rexel--data-state 'welcome rexel--stream stream)
+            (setq rexel--data-state 'welcome
+                  rexel--stream stream
+                  rexel--hello-refused t)
             (rexel--on-welcome (unibyte-string #x82 3))
             (should (eq rexel--data-state 'closed))
             (should-not rexel--stream)
@@ -638,6 +640,35 @@ The terminal and the stream's connection are stubbed."
         (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
         (rexel--reattach other)
         (should-not rexel--data-state)))))
+
+(ert-deftest rexel-test-refused-hello-streams-again-once ()
+  "A refused first HELLO gets one new ticket, and a second refusal is final."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn)
+          (refreshed 0)
+          (hello-refused (lambda ()
+                           (setq rexel--data-state 'welcome
+                                 rexel--stream (rexel--make-stream))
+                           (rexel--on-welcome (unibyte-string #x82 1)))))
+      (rexel-test--with-attached-block conn
+        (cl-letf (((symbol-function 'rexel--schedule-view-refresh)
+                   (lambda (&rest _) (cl-incf refreshed)))
+                  ((symbol-function 'ghostel--write-vt) #'ignore)
+                  ((symbol-function 'ghostel--invalidate) #'ignore)
+                  ((symbol-function 'message) #'ignore))
+          (funcall hello-refused)
+          (should (= 1 refreshed))
+          (should (eq 'closed rexel--data-state))
+          (puthash rexel--block-id (current-buffer) (rexel--conn-blocks conn))
+          (funcall hello-refused)
+          (should (= 1 refreshed))
+          (should (eq 'closed rexel--data-state))
+          ;; A stream that got through earns the retry back.
+          (setq rexel--data-state 'welcome
+                rexel--stream (rexel--make-stream))
+          (rexel--on-welcome (rexel-test--welcome (make-string 16 ?t)))
+          (funcall hello-refused)
+          (should (= 2 refreshed)))))))
 
 (ert-deftest rexel-test-reattach-leaves-running-streams ()
   "A block with a stream keeps it through a reconnect of the control connection."
