@@ -571,6 +571,10 @@ The terminal and the stream's connection are stubbed."
         (should (= 1 (rexel-test--count "data.connect" sent)))
         (should (= 1 (rexel-test--count "com.superlogical.terminal.write" sent)))))))
 
+(defun rexel-test--find (method sent)
+  "Return the latest request in SENT that calls METHOD."
+  (seq-find (lambda (object) (equal method (alist-get 'method object))) sent))
+
 (defun rexel-test--writes (sent)
   "Return the typed text of the write requests in SENT, oldest first."
   (nreverse
@@ -585,15 +589,43 @@ The terminal and the stream's connection are stubbed."
   (rexel-test--with-fake-conn sent
     (let ((conn rexel--conn))
       (rexel-test--with-attached-block conn
+        (rexel--pty-out "a")
+        (let ((write (car sent)))
+          (rexel--pty-out "b")
+          (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
+          (rexel-test--respond conn write)
+          (should (equal '("a" "b") (rexel-test--writes sent))))))))
+
+(ert-deftest rexel-test-reattach-holds-writes-until-attached ()
+  "Bytes typed before the `session.attach' answer follow it."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn))
+      (rexel-test--with-attached-block conn
+        (setq rexel--data-state 'live)
         (rexel--reattach conn)
-        (let ((attach (car sent)))
-          (rexel--pty-out "a")
-          (let ((write (car sent)))
-            (rexel--pty-out "b")
-            (rexel-test--respond conn attach
-                                 `((view . ,(rexel-test--view rexel--block-id))))
-            (rexel-test--respond conn write)
-            (should (equal '("a" "b") (rexel-test--writes sent)))))))))
+        (rexel--pty-out "a")
+        (rexel--pty-out "b")
+        (should-not (rexel-test--writes sent))
+        (rexel-test--respond conn (rexel-test--find "session.attach" sent)
+                             `((view . ,(rexel-test--view rexel--block-id))))
+        (should (equal '("ab") (rexel-test--writes sent)))))))
+
+(ert-deftest rexel-test-reattach-holds-sizes-until-attached ()
+  "A size asked for before the `session.attach' answer follows it, with a take."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn))
+      (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work")
+      (setq rexel--data-state 'live
+            rexel--block-id "block:123456")
+      (puthash rexel--block-id (current-buffer) (rexel--conn-blocks conn))
+      (cl-letf (((symbol-function 'ghostel--desired-size) (lambda () '(100 . 30))))
+        (rexel--reattach conn)
+        (rexel--resize 30 100)
+        (should (equal '("session.attach")
+                       (mapcar (lambda (o) (alist-get 'method o)) sent)))
+        (rexel-test--respond conn (car sent)
+                             `((view . ,(rexel-test--view rexel--block-id))))
+        (should (equal "session.own_block" (alist-get 'method (car sent))))))))
 
 (ert-deftest rexel-test-reattach-clears-size-in-flight ()
   "A size request whose answer the dropped connection lost holds nothing back."

@@ -119,8 +119,10 @@ or https URL.  ENDPOINT is the one that last answered, and UNTRIED are
 those left to try while a connection is being opened.  HOST is the
 server's label, nil for this machine's server.  TOKEN is the
 reconnect token of the latest welcome.  While the connection is being redialled,
-TIMER is the pending attempt and DELAY the seconds until the one after it."
-  ws endpoints endpoint untried host client-id token timer delay
+TIMER is the pending attempt and DELAY the seconds until the one after it.
+ATTACHING are the sessions whose `session.attach' after a redial is
+unanswered: the server refuses their typing and sizing until then."
+  ws endpoints endpoint untried host client-id token timer delay attaching
   (next-id 0)
   (pending (make-hash-table :test #'equal))
   (sessions nil)
@@ -1007,6 +1009,7 @@ Typing while a write is unanswered probes the block's connections."
   (with-current-buffer buf
     (when (and (rexel--ready-p rexel--conn)
                (not (eq rexel--out-inflight rexel--conn))
+               (not (member rexel--session-id (rexel--conn-attaching rexel--conn)))
                (> (length rexel--out-pending) 0))
       (let ((data rexel--out-pending)
             (conn rexel--conn))
@@ -1732,7 +1735,8 @@ Resizes run concurrently on the server, so one is sent at a time and
 the latest requested size follows when it completes.  The size applies
 once this client owns the block, when the server reports it in the stream."
   (with-current-buffer buf
-    (unless (eq rexel--size-inflight rexel--conn)
+    (unless (or (eq rexel--size-inflight rexel--conn)
+                (member rexel--session-id (rexel--conn-attaching rexel--conn)))
       (let* ((conn rexel--conn)
              (sid rexel--session-id)
              (bid rexel--block-id)
@@ -1810,6 +1814,7 @@ once this client owns the block, when the server reports it in the stream."
 (defun rexel--reattach (conn)
   "Attach CONN again to its sessions and resume their typing and sizing.
 A block whose `data.connect' went with the connection is streamed again."
+  (setf (rexel--conn-attaching conn) (mapcar #'car (rexel--conn-sessions conn)))
   (pcase-dolist (`(,sid . ,_) (rexel--conn-sessions conn))
     (dolist (buf (rexel--session-buffers conn sid))
       (with-current-buffer buf
@@ -1825,6 +1830,8 @@ A block whose `data.connect' went with the connection is streamed again."
     (rexel--request
      conn "session.attach" `((session_id . ,sid))
      (lambda (result err)
+       (setf (rexel--conn-attaching conn)
+             (delete sid (rexel--conn-attaching conn)))
        (cond
         ((equal (alist-get 'code err) "session_not_found")
          (rexel--forget-session conn sid))

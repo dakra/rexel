@@ -1,6 +1,6 @@
 {
   "name": "reconnect",
-  "comment": "Connections that drop while a session is attached: a lost stream resumes without losing or repeating output, a lost control connection is redialled and typing meanwhile arrives afterwards, a write whose answer was lost is not repeated, uploads during a redial, a relay that dies and comes back, a connection that stays open but silent, an upload whose link stalls, an upload cut off halfway, a block whose data.connect was lost, and a refused HELLO.",
+  "comment": "Connections that drop while a session is attached: a lost stream resumes without losing or repeating output, a lost control connection is redialled and typing meanwhile arrives afterwards, a write whose answer was lost is not repeated, uploads during a redial, a relay that dies and comes back, a connection that stays open but silent, an upload whose link stalls, an upload cut off halfway, a block whose data.connect was lost, a refused HELLO, and keys typed before a new client is attached.",
   "params": {"host": "unix"},
   "variants": {
     "unix": {"host": "unix"},
@@ -160,6 +160,16 @@
     {"assert": {"eval": "(not (advice-member-p 'rexel-elate-spoil 'rexel--hello))"}, "comment": "the spoiled HELLO was sent"},
     {"eval": "(rexel-elate-send \"echo h1-$((5*7))\\r\")"},
     {"wait": "until", "pred": "(rexel-elate-has \"^h1-35$\")"},
+
+    {"group": "attach-hold", "comment": "after a reconnect the server does not resume, keys typed before the session.attach answer wait for it: the server refuses typing from a connection not attached"},
+    {"eval": "(rexel-elate-clear-messages)"},
+    {"eval": "(progn (rexel-elate-delay-request \"session.attach\" 1.5) (setf (rexel--conn-token rexel--conn) nil) (rexel-elate-drop-connection 'control))", "comment": "without its token the hello starts a new client"},
+    {"wait": "until", "pred": "(rexel-elate-messages-p \"rexel: re-attached as a new client to {{host}}\")"},
+    {"eval": "(rexel-elate-send \"echo g1-$((4*12))\\r\")", "comment": "typed while the attach is on its way"},
+    {"eval": "(rexel-elate-undelay-requests)"},
+    {"wait": "until", "pred": "(rexel-elate-live-p)", "timeout": 20},
+    {"wait": "until", "pred": "(rexel-elate-has \"^g1-48$\")", "timeout": 20},
+    {"assert": {"eval": "(not (rexel-elate-messages-p \"terminal.write\"))"}, "comment": "no write was refused"},
 
     {"group": "cleanup"},
     {"eval": "(rexel-elate-cleanup)"}
