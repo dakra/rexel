@@ -593,6 +593,14 @@ The terminal and the stream's connection are stubbed."
             (rexel-test--respond conn write)
             (should (equal '("a" "b") (rexel-test--writes sent)))))))))
 
+(ert-deftest rexel-test-reattach-clears-size-in-flight ()
+  "A size request whose answer the dropped connection lost holds nothing back."
+  (rexel-test--with-fake-conn sent
+    (setf (alist-get "s" (rexel--conn-sessions rexel--conn) nil nil #'equal) "work")
+    (setq rexel--size-inflight rexel--conn)
+    (rexel--reattach rexel--conn)
+    (should-not rexel--size-inflight)))
+
 (ert-deftest rexel-test-restream-keeps-write-in-flight ()
   "A write sent before the block's new stream still holds back the next."
   (rexel-test--with-fake-conn sent
@@ -776,6 +784,77 @@ The terminal and the stream's connection are stubbed."
     (should (equal "com.superlogical.terminal.resize"
                    (alist-get 'method (car sent))))
     (should (= 3 (length sent)))))
+
+(ert-deftest rexel-test-resize-during-send-waits-for-the-answer ()
+  "A size requested while another is being sent follows its answer."
+  (rexel-test--with-fake-conn sent
+    (setq rexel--data-state 'live)
+    (let ((buf (current-buffer))
+          (nested nil))
+      (cl-letf (((symbol-function 'rexel--send)
+                 (lambda (_conn object)
+                   (push object sent)
+                   (unless nested
+                     (setq nested t)
+                     (with-current-buffer buf (rexel--resize 30 100))))))
+        (rexel--resize 24 80))
+      (should (= 1 (length sent)))
+      (rexel-test--respond rexel--conn (car sent))
+      (should (= 2 (length sent)))
+      (should (equal '((columns . 100) (rows . 30))
+                     (alist-get 'args (alist-get 'payload (car sent))))))))
+
+(ert-deftest rexel-test-size-answer-during-send-clears-the-mark ()
+  "A size answered while it is being sent leaves no request in flight."
+  (rexel-test--with-fake-conn sent
+    (setq rexel--data-state 'live)
+    (let ((conn rexel--conn))
+      (cl-letf (((symbol-function 'rexel--send)
+                 (lambda (_conn object)
+                   (push object sent)
+                   (rexel-test--respond conn object))))
+        (rexel--resize 24 80))
+      (should-not rexel--size-inflight))))
+
+(ert-deftest rexel-test-size-failed-send-clears-the-mark ()
+  "A size that cannot be sent signals and leaves no request in flight."
+  (rexel-test--with-fake-conn sent
+    (setq rexel--data-state 'live)
+    (cl-letf (((symbol-function 'rexel--send)
+               (lambda (&rest _) (error "Boom"))))
+      (should-error (rexel--resize 24 80)))
+    (should-not rexel--size-inflight)
+    (rexel--resize 30 100)
+    (should (= 1 (length sent)))))
+
+(ert-deftest rexel-test-restream-keeps-size-in-flight ()
+  "A size request outlives the block's new stream, and sends nothing after it."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn))
+      (rexel-test--with-attached-block conn
+        (setq rexel--data-state 'live)
+        (rexel--resize 24 80)
+        (let ((resize (car sent)))
+          (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
+          (should (eq conn rexel--size-inflight))
+          (setq sent nil)
+          (rexel-test--respond conn resize)
+          (should-not rexel--size-inflight)
+          (should-not sent))))))
+
+(ert-deftest rexel-test-restream-during-take-sends-no-size ()
+  "A take answered after the block's new stream began sends no resize."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn))
+      (rexel-test--with-attached-block conn
+        (setq rexel--data-state 'live)
+        (rexel--resize 24 80 t)
+        (let ((take (car sent)))
+          (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
+          (setq sent nil)
+          (rexel-test--respond conn take)
+          (should-not rexel--size-inflight)
+          (should-not sent))))))
 
 (ert-deftest rexel-test-size-requests-wait-for-live ()
   (rexel-test--with-fake-conn sent

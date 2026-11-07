@@ -956,7 +956,8 @@ A buffer whose stream ended earlier is reset and streamed again."
     ;; and the requests it has in flight.
     (unless (eq rexel--conn conn)
       (setq rexel--out-pending nil
-            rexel--out-inflight nil))
+            rexel--out-inflight nil
+            rexel--size-inflight nil))
     (setq rexel--conn conn
           rexel--session-id sid
           rexel--block-id bid
@@ -965,7 +966,6 @@ A buffer whose stream ended earlier is reset and streamed again."
           rexel--data-state nil
           rexel--requested-size nil
           rexel--size-take nil
-          rexel--size-inflight nil
           ghostel-pty-out-function #'rexel--pty-out
           ghostel-resize-function #'rexel--resize
           ghostel-send-files-function #'rexel--send-files)
@@ -1733,28 +1733,36 @@ once this client owns the block, when the server reports it in the stream."
                      (when (buffer-live-p buf)
                        (with-current-buffer buf
                          (setq rexel--size-inflight nil)
-                         (when (or rexel--size-take
-                                   (not (equal size rexel--requested-size)))
+                         (when (and rexel--requested-size
+                                    (or rexel--size-take
+                                        (not (equal size rexel--requested-size))))
                            (rexel--send-size buf))))))
              (resize (lambda ()
                        (when (buffer-live-p buf)
                          (setq size (buffer-local-value 'rexel--requested-size buf)))
-                       (rexel--request
-                        conn "com.superlogical.terminal.resize"
-                        `((session_id . ,sid) (block_id . ,bid)
-                          (args . ((columns . ,(car size)) (rows . ,(cdr size)))))
-                        done))))
-        (setq rexel--size-take nil)
-        (if (not take)
-            (funcall resize)
-          (rexel--request
-           conn "session.own_block"
-           `((session_id . ,sid) (block_ids . ,(vector bid)) (mode . "take"))
-           (lambda (result err)
-             (if err
-                 (funcall done result err)
-               (funcall resize)))))
-        (setq rexel--size-inflight conn)))))
+                       (if size
+                           (rexel--request
+                            conn "com.superlogical.terminal.resize"
+                            `((session_id . ,sid) (block_id . ,bid)
+                              (args . ((columns . ,(car size))
+                                       (rows . ,(cdr size)))))
+                            done)
+                         (funcall done nil nil)))))
+        (setq rexel--size-take nil
+              rexel--size-inflight conn)
+        (condition-case err
+            (if (not take)
+                (funcall resize)
+              (rexel--request
+               conn "session.own_block"
+               `((session_id . ,sid) (block_ids . ,(vector bid)) (mode . "take"))
+               (lambda (result err)
+                 (if err
+                     (funcall done result err)
+                   (funcall resize)))))
+          (error
+           (setq rexel--size-inflight nil)
+           (signal (car err) (cdr err))))))))
 
 
 ;;; Commands
