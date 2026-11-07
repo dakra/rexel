@@ -81,7 +81,9 @@ command runs from.  An empty or nil result lets the server choose one."
   :type 'key-sequence)
 
 (defvar rexel--connect-timeout 10
-  "Seconds a connection may take to open its WebSocket or answer a ping.")
+  "Seconds a connection may take to open its WebSocket or answer a ping.
+A write has as long, plus the time its size takes, see
+`rexel--watched-write'.")
 
 (defvar rexel--keepalive-interval 30
   "Seconds a connection may stay silent before it is pinged.")
@@ -240,6 +242,109 @@ once."
       (error "Cannot connect to %s" endpoint))
     proc))
 
+(cl-defstruct (rexel--write (:constructor rexel--make-write) (:copier nil))
+  "A write that may wait for room in the socket of PROCESS.
+ON-STALL gives it up, TIMER watches it, and it has until DEADLINE.  SIZE
+is the bytes it writes, nil for a filter, which may write none."
+  process on-stall timer deadline size)
+
+(defvar rexel--writes nil
+  "The `rexel--write's in progress, innermost first.
+`process-send-string' returns only when the socket took everything, and
+Emacs reads no keys meanwhile.  Timers and filters run during that wait,
+so writes nest in it, and a write can only return after those inside it.
+The symbol `handler' stands for a message handler running.")
+
+(defvar rexel--writes-overdue nil
+  "The writes held up by one to another socket beyond their first deadline.
+To give them the chance to return, upload chunks wait, except in a message
+handler.")
+
+(defvar rexel--handler-began nil
+  "When the running message handler began or last had its time counted.")
+
+(defconst rexel--write-rate 16384
+  "Bytes per second the slowest working link is expected to take.")
+
+(defun rexel--write-earliest (process)
+  "Return the earliest write in progress to the socket of PROCESS, if any."
+  (car (last (seq-filter (lambda (write)
+                           (and (rexel--write-p write)
+                                (rexel--write-size write)
+                                (eq (rexel--write-process write) process)))
+                         rexel--writes))))
+
+(defun rexel--watched-write (process on-stall write &optional size)
+  "Call WRITE, which writes SIZE bytes to PROCESS, and return its value.
+A write not done within `rexel--connect-timeout', plus the time SIZE takes
+at `rexel--write-rate', is given up by calling ON-STALL, or by deleting
+PROCESS if that is nil.  A write queued behind another to the socket adds
+the time of its SIZE to that one's."
+  (let* ((seconds (/ (or size 0) rexel--write-rate))
+         (earliest (rexel--write-earliest process))
+         (entry (rexel--make-write
+                 :process process :on-stall on-stall :size size
+                 :deadline (+ (float-time) rexel--connect-timeout seconds)))
+         (rexel--writes (progn (rexel--count-handler-time)
+                               (cons entry rexel--writes))))
+    (when earliest
+      (cl-incf (rexel--write-deadline earliest) seconds))
+    (setf (rexel--write-timer entry)
+          (run-at-time (+ rexel--connect-timeout seconds) 1
+                       #'rexel--write-stalled entry))
+    (unwind-protect
+        (funcall write)
+      (cancel-timer (rexel--write-timer entry))
+      (setq rexel--writes-overdue (delq entry rexel--writes-overdue)))))
+
+(defun rexel--count-handler-time ()
+  "Add the time of the innermost message handler to the writes around it.
+They cannot return before it does.  Its clock starts again."
+  (when (eq (car rexel--writes) 'handler)
+    (let ((now (float-time)))
+      (dolist (write (seq-take-while #'rexel--write-p (cdr rexel--writes)))
+        (cl-incf (rexel--write-deadline write) (- now rexel--handler-began)))
+      (setq rexel--handler-began now))))
+
+(defun rexel--unwatched (function)
+  "Call FUNCTION, a message handler, which is no write.
+It runs in the filter that may be answering a ping and can take as long
+as it likes: it may prompt the user.  No write counts as stalled while
+it is the innermost entry."
+  (let ((rexel--writes (cons 'handler rexel--writes))
+        (rexel--handler-began (float-time))
+        (rexel--writes-overdue nil))
+    (unwind-protect
+        (funcall function)
+      (rexel--count-handler-time))))
+
+(defun rexel--write-blocking ()
+  "Return the write that everything in progress waits for, if there is one.
+That is the innermost write, or the earliest to the same socket, which
+it queues behind.  With a message handler innermost it is nil."
+  (let ((innermost (car rexel--writes)))
+    (when (rexel--write-p innermost)
+      (or (rexel--write-earliest (rexel--write-process innermost))
+          innermost))))
+
+(defun rexel--write-stalled (write)
+  "Give up WRITE if it is what the others wait for and out of time.
+Runs every second from its first deadline on.  A write held up by one to
+another socket holds upload chunks back meanwhile, so that it can return;
+one waiting for a message handler cannot return before that does."
+  (let ((blocking (rexel--write-blocking)))
+    (cond
+     ((and (eq write blocking) (>= (float-time) (rexel--write-deadline write)))
+      (if (rexel--write-on-stall write)
+          (funcall (rexel--write-on-stall write))
+        (delete-process (rexel--write-process write))))
+     ((and blocking
+           (not (eq (rexel--write-process write)
+                    (rexel--write-process blocking)))
+           (not (memq 'handler (cl-ldiff rexel--writes
+                                         (memq write rexel--writes)))))
+      (cl-pushnew write rexel--writes-overdue :test #'eq)))))
+
 (defun rexel--ws-open (endpoint path protocol on-open on-message on-close)
   "Open a WebSocket to PATH on the server at ENDPOINT asking for PROTOCOL.
 ENDPOINT is a Unix socket path or an http or https URL.  ON-OPEN,
@@ -262,7 +367,10 @@ websocket.el for the handshake and framing."
               :conn conn :url url :protocols protocols
               ;; websocket.el also calls this after a refused handshake.
               :on-open (lambda (ws) (when (websocket-openp ws) (funcall on-open ws)))
-              :on-message on-message :on-close on-close
+              :on-message (lambda (ws frame)
+                            (rexel--unwatched
+                             (lambda () (funcall on-message ws frame))))
+              :on-close on-close
               :on-error #'rexel--ws-error
               :accept-string (websocket-calculate-accept key)))
          (sentinel (websocket-sentinel url conn key protocols nil nil nil)))
@@ -310,11 +418,16 @@ a large frame arriving in many reads would cost quadratic time."
     (if (and need (< have need))
         (process-put process :queued queued)
       (process-put process :queued nil)
-      ;; A message handler can close WS while a ping is queued behind the
-      ;; message; websocket.el then signals when it tries to answer the ping.
-      (condition-case nil
-          (websocket-outer-filter ws (apply #'concat (nreverse queued)))
-        (websocket-closed nil)))))
+      (condition-case err
+          ;; websocket.el answers a ping from here.
+          (rexel--watched-write
+           process nil
+           (lambda ()
+             (websocket-outer-filter ws (apply #'concat (nreverse queued)))))
+        ;; A message handler can close WS while a ping is queued behind the
+        ;; message, and a pong can stall; either ends with the connection.
+        (error (when (process-live-p process)
+                 (signal (car err) (cdr err))))))))
 
 (defun rexel--keepalive ()
   "Probe every connection silent for `rexel--keepalive-interval'.
@@ -337,16 +450,22 @@ Run again when the next connection falls due, until none is left."
 (defun rexel--probe (ws)
   "Ping the open WS and close its connection if the server stays silent.
 A connection has one probe at a time.  Closing it runs the on-close
-callback of WS, which redials or resumes."
+callback of WS, which redials or resumes.  A write in progress on the
+connection is watched itself, and a ping would only queue behind it."
   (let ((process (websocket-conn ws))
         (sent (float-time)))
     (when (and (eq (websocket-ready-state ws) 'open)
-               (not (process-get process :probe)))
+               (not (process-get process :probe))
+               (not (rexel--write-earliest process)))
       (condition-case nil
           (progn
             ;; The server closes a connection on a ping without payload.
-            (websocket-send ws (make-websocket-frame
-                                :opcode 'ping :payload "rexel" :completep t))
+            (rexel--watched-write
+             process nil
+             (lambda ()
+               (websocket-send ws (make-websocket-frame
+                                   :opcode 'ping :payload "rexel" :completep t)))
+             0)
             (process-put
              process :probe
              (run-at-time rexel--connect-timeout nil
@@ -370,7 +489,11 @@ callback of WS, which redials or resumes."
 
 (defun rexel--send (conn object)
   "Send OBJECT as one JSON text message on CONN."
-  (websocket-send-text (rexel--conn-ws conn) (json-serialize object)))
+  (let ((ws (rexel--conn-ws conn))
+        (text (json-serialize object)))
+    (rexel--watched-write (websocket-conn ws) nil
+                          (lambda () (websocket-send-text ws text))
+                          (string-bytes text))))
 
 (defun rexel--error-string (err)
   "Format a server ERR object."

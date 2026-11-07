@@ -659,6 +659,7 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
 The process was last read from SILENCE seconds ago, by default now."
   (let* ((process (make-pipe-process :name "rexel-test" :noquery t))
          (ws (websocket-inner-create :conn process :url "u"
+                                     :on-close #'ignore
                                      :ready-state (or state 'open))))
     (process-put process :websocket ws)
     (process-put process :last-read (- (float-time) (or silence 0)))
@@ -730,6 +731,463 @@ The process was last read from SILENCE seconds ago, by default now."
           (should (= 3 pings))
           (timer-event-handler (process-get process :probe))
           (should-not (process-live-p process)))
+      (rexel-test--ws-delete ws))))
+
+(defun rexel-test--expire (write)
+  "Run the timer of WRITE as if it were past its deadline."
+  (setf (rexel--write-deadline write) 0)
+  (timer-event-handler (rexel--write-timer write)))
+
+(ert-deftest rexel-test-write-stall-ends-innermost-write ()
+  "A write held up by one to another socket is not what stalled."
+  (let (stalled
+        (rexel--writes-overdue nil))
+    (rexel--watched-write
+     'outer (lambda () (push 'outer stalled))
+     (lambda ()
+       (let ((outer (car rexel--writes)))
+         (rexel--watched-write
+          'inner (lambda () (push 'inner stalled))
+          (lambda ()
+            (rexel-test--expire outer)
+            (should-not stalled)
+            (should (equal (list outer) rexel--writes-overdue))
+            (should (memq (rexel--write-timer outer) timer-list))
+            (rexel-test--expire (car rexel--writes))
+            (should (equal '(inner) stalled))))
+         (should (equal (list outer) rexel--writes-overdue))
+         ;; Once the inner write is gone the outer one is the innermost.
+         (rexel-test--expire outer)
+         (should (equal '(outer inner) stalled)))))
+    (should-not rexel--writes-overdue)
+    (should-not rexel--writes)
+    (should-not (seq-find (lambda (timer)
+                            (eq (timer--function timer) #'rexel--write-stalled))
+                          timer-list))))
+
+(ert-deftest rexel-test-write-queued-behind-another-is-not-stalled ()
+  "A write to a busy socket waits for the earlier write, whose time counts."
+  (let (stalled
+        (rexel--writes-overdue nil))
+    (rexel--watched-write
+     'socket (lambda () (push 'earlier stalled))
+     (lambda ()
+       (let ((earlier (car rexel--writes)))
+         (rexel--watched-write
+          'other #'ignore
+          (lambda ()
+            (rexel--watched-write
+             'socket (lambda () (push 'queued stalled))
+             (lambda ()
+               (let ((queued (car rexel--writes)))
+                 (rexel-test--expire queued)
+                 (should-not stalled)
+                 (should-not rexel--writes-overdue)
+                 (rexel-test--expire earlier)
+                 (should (equal '(earlier) stalled))))
+             0))
+          0)))
+     0)))
+
+(ert-deftest rexel-test-new-writes-do-not-buy-a-stalled-socket-time ()
+  "A queued write adds its bytes' time to the earliest write, nothing more."
+  (rexel--watched-write
+   'socket #'ignore
+   (lambda ()
+     (let* ((earliest (car rexel--writes))
+            (deadline (rexel--write-deadline earliest)))
+       (rexel--watched-write 'socket #'ignore #'ignore 100)
+       (should (= deadline (rexel--write-deadline earliest)))
+       (rexel--watched-write 'other #'ignore #'ignore (* 10 rexel--write-rate))
+       (should (= deadline (rexel--write-deadline earliest)))
+       (rexel--watched-write 'socket #'ignore #'ignore (* 10 rexel--write-rate))
+       (should (= (+ deadline 10) (rexel--write-deadline earliest)))))
+   0))
+
+(ert-deftest rexel-test-write-in-time-is-left-alone ()
+  "A tick before the deadline, moved by bytes or a handler, gives up nothing."
+  (let (stalled)
+    (rexel--watched-write
+     'socket (lambda () (push 'write stalled))
+     (lambda ()
+       (let ((write (car rexel--writes)))
+         (timer-event-handler (rexel--write-timer write))
+         (should-not stalled)
+         (setf (rexel--write-deadline write) (- (float-time) 1))
+         (rexel--watched-write 'socket #'ignore
+                               (lambda ()
+                                 (timer-event-handler (rexel--write-timer write))
+                                 (should-not stalled))
+                               (* 10 rexel--write-rate))
+         (setf (rexel--write-deadline write) (+ (float-time) 0.1))
+         (rexel--unwatched (lambda () (sleep-for 0.15)))
+         (timer-event-handler (rexel--write-timer write))
+         (should-not stalled)))
+     0)))
+
+(ert-deftest rexel-test-prompt-counts-before-the-handler-writes ()
+  "A write of the handler itself finds the prompt's time counted."
+  (rexel--watched-write
+   'socket #'ignore
+   (lambda ()
+     (let* ((write (car rexel--writes))
+            (deadline (rexel--write-deadline write)))
+       (rexel--unwatched
+        (lambda ()
+          (sleep-for 0.03)
+          (rexel--watched-write
+           'socket #'ignore
+           (lambda ()
+             (should (<= 0.02 (- (rexel--write-deadline write) deadline))))
+           0)
+          ;; Counted once: the time before the write does not come back.
+          (setq deadline (rexel--write-deadline write))))
+       (should (< (- (rexel--write-deadline write) deadline) 0.02))))
+   0))
+
+(ert-deftest rexel-test-a-stall-under-a-handler-has-a-bound ()
+  "While the handler's own write waits, no further time is counted."
+  (rexel--watched-write
+   'socket #'ignore
+   (lambda ()
+     (let ((write (car rexel--writes)))
+       (rexel--unwatched
+        (lambda ()
+          (rexel--watched-write
+           'socket #'ignore
+           (lambda ()
+             (let ((deadline (rexel--write-deadline write)))
+               (sleep-for 0.02)
+               (rexel--write-stalled (car rexel--writes))
+               (should (= deadline (rexel--write-deadline write)))))
+           0)))))
+   0))
+
+(ert-deftest rexel-test-overdue-set-below-an-outer-handler ()
+  "A handler outside a write does not excuse it from holding uploads back."
+  (let ((rexel--writes-overdue nil))
+    (rexel--unwatched
+     (lambda ()
+       (rexel--watched-write
+        'held #'ignore
+        (lambda ()
+          (let ((held (car rexel--writes)))
+            (rexel--watched-write
+             'other #'ignore
+             (lambda ()
+               (rexel-test--expire held)
+               (should (equal (list held) rexel--writes-overdue)))
+             0)))
+        0)))))
+
+(ert-deftest rexel-test-stall-is-looked-at-every-second ()
+  (rexel--watched-write
+   nil #'ignore
+   (lambda ()
+     (should (= 1 (timer--repeat-delay (rexel--write-timer (car rexel--writes))))))))
+
+(ert-deftest rexel-test-overdue-writes-are-held-separately ()
+  "One overdue write ending does not release another."
+  (let ((rexel--writes-overdue nil))
+    (rexel--watched-write
+     'first #'ignore
+     (lambda ()
+       (let ((first (car rexel--writes)))
+         (rexel--watched-write
+          'second #'ignore
+          (lambda ()
+            (let ((second (car rexel--writes)))
+              (rexel--watched-write
+               'third #'ignore
+               (lambda ()
+                 (rexel-test--expire first)
+                 (rexel-test--expire second)
+                 (rexel-test--expire first)
+                 (should (= 2 (length rexel--writes-overdue))))
+               0)))
+          0)
+         (should (equal (list first) rexel--writes-overdue))))
+     0)
+    (should-not rexel--writes-overdue)))
+
+(ert-deftest rexel-test-write-timer-goes-with-its-write ()
+  "A write that ends, or signals, leaves no timer."
+  (should (eq 'done (rexel--watched-write nil #'ignore (lambda () 'done))))
+  (should-error (rexel--watched-write nil #'ignore (lambda () (error "Boom"))))
+  (should-not rexel--writes)
+  (should-not (seq-find (lambda (timer)
+                          (eq (timer--function timer) #'rexel--write-stalled))
+                        timer-list)))
+
+(ert-deftest rexel-test-write-time-grows-with-its-size ()
+  (rexel--watched-write
+   nil #'ignore
+   (lambda ()
+     (should (< -11 (timer-until (rexel--write-timer (car rexel--writes))
+                                 (current-time))
+                -9))))
+  (rexel--watched-write
+   nil #'ignore
+   (lambda ()
+     (should (< -75 (timer-until (rexel--write-timer (car rexel--writes))
+                                 (current-time))
+                -70)))
+   (* 1024 1024)))
+
+(ert-deftest rexel-test-send-tells-the-size-of-its-write ()
+  (let ((conn (rexel--make-conn :ws (rexel-test--ws)))
+        seconds)
+    (unwind-protect
+        (cl-letf (((symbol-function 'websocket-send-text)
+                   (lambda (_ws _text)
+                     (setq seconds (- (timer-until
+                                       (rexel--write-timer (car rexel--writes))
+                                       (current-time)))))))
+          ;; Three bytes each.
+          (rexel--send conn `((data . ,(make-string 54614 ?日))))
+          (should (< 19 seconds 21)))
+      (rexel-test--ws-delete (rexel--conn-ws conn)))))
+
+(ert-deftest rexel-test-unwatched-holds-every-write ()
+  "No write counts as stalled while a handler runs, and gets its time back."
+  (let (stalled
+        (rexel--writes-overdue nil))
+    (rexel--watched-write
+     'outer (lambda () (push 'outer stalled))
+     (lambda ()
+       (rexel--watched-write
+        'inner (lambda () (push 'inner stalled))
+        (lambda ()
+          (let* ((writes rexel--writes)
+                 (deadlines (mapcar #'rexel--write-deadline writes))
+                 (rexel--writes-overdue (list (car writes))))
+            (rexel--unwatched
+             (lambda ()
+               (should-not (rexel--write-blocking))
+               (should-not rexel--writes-overdue)
+               (dolist (write writes)
+                 (timer-event-handler (rexel--write-timer write)))
+               (should-not rexel--writes-overdue)
+               (sleep-for 0.02)))
+            (should-not stalled)
+            (should (equal writes rexel--writes))
+            (should (equal (list (car writes)) rexel--writes-overdue))
+            (cl-mapc (lambda (write deadline)
+                       (should (> (rexel--write-deadline write) (+ deadline 0.01))))
+                     writes deadlines)
+            (rexel-test--expire (car writes))
+            (should (equal '(inner) stalled)))))))))
+
+(ert-deftest rexel-test-unwatched-gives-time-back-after-an-error ()
+  (rexel--watched-write
+   nil #'ignore
+   (lambda ()
+     (let* ((write (car rexel--writes))
+            (deadline (rexel--write-deadline write)))
+       (should-error (rexel--unwatched (lambda ()
+                                         (sleep-for 0.02)
+                                         (error "Boom"))))
+       (should (> (rexel--write-deadline write) deadline))))))
+
+(ert-deftest rexel-test-big-write-outlives-the-filter-it-runs-in ()
+  "A filter on a socket does not cut a write sent from its message handler."
+  (let (stalled)
+    (rexel--watched-write
+     'socket (lambda () (push 'filter stalled))
+     (lambda ()
+       (let ((filter (car rexel--writes)))
+         (rexel--unwatched
+          (lambda ()
+            (rexel--watched-write
+             'socket (lambda () (push 'write stalled))
+             (lambda ()
+               (should (> (rexel--write-deadline (car rexel--writes))
+                          (+ (float-time) 70)))
+               (rexel-test--expire filter)
+               (should-not stalled)
+               (rexel-test--expire (car rexel--writes))
+               (should (equal '(write) stalled)))
+             (* 1024 1024)))))))))
+
+(ert-deftest rexel-test-pong-queues-behind-a-write ()
+  "A filter nested in a write to its socket waits for that write."
+  (let (stalled)
+    (rexel--watched-write
+     'socket (lambda () (push 'write stalled))
+     (lambda ()
+       (let ((write (car rexel--writes)))
+         (rexel--watched-write
+          'socket (lambda () (push 'filter stalled))
+          (lambda ()
+            (should (eq write (rexel--write-blocking)))
+            (rexel-test--expire (car rexel--writes))
+            (should-not stalled)))))
+     0)))
+
+(ert-deftest rexel-test-write-blocking-is-the-earliest-to-the-socket ()
+  (rexel--watched-write
+   'socket #'ignore
+   (lambda ()
+     (let ((earliest (car rexel--writes)))
+       (rexel--watched-write
+        'socket #'ignore
+        (lambda ()
+          (rexel--watched-write
+           'socket #'ignore
+           (lambda ()
+             (should (eq earliest (rexel--write-blocking))))
+           0))
+        0)))
+   0))
+
+(ert-deftest rexel-test-nested-handlers-count-their-time-once ()
+  (rexel--watched-write
+   nil #'ignore
+   (lambda ()
+     (let* ((write (car rexel--writes))
+            (deadline (rexel--write-deadline write))
+            (began (float-time)))
+       (rexel--unwatched
+        (lambda ()
+          (rexel--unwatched (lambda () (sleep-for 0.02)))
+          (rexel--unwatched (lambda () (sleep-for 0.02)))))
+       (should (<= 0.03 (- (rexel--write-deadline write) deadline)
+                   (+ 0.01 (- (float-time) began))))))))
+
+(ert-deftest rexel-test-write-under-handler-holds-no-uploads-back ()
+  "A write waiting for a prompt does not stop the chunks of other sockets."
+  (let ((rexel--writes-overdue nil))
+    (rexel--watched-write
+     'filter #'ignore
+     (lambda ()
+       (let ((filter (car rexel--writes)))
+         (rexel--unwatched
+          (lambda ()
+            (rexel--watched-write
+             'upload #'ignore
+             (lambda ()
+               (rexel-test--expire filter)
+               (should-not rexel--writes-overdue))))))))))
+
+(ert-deftest rexel-test-write-in-handler-queues-behind-outer-write ()
+  "A handler's write to a busy socket does not take the blame for it."
+  (let (stalled)
+    (rexel--watched-write
+     'socket (lambda () (push 'earlier stalled))
+     (lambda ()
+       (let ((earlier (car rexel--writes)))
+         (rexel--unwatched
+          (lambda ()
+            (rexel--watched-write
+             'socket (lambda () (push 'queued stalled))
+             (lambda ()
+               (rexel-test--expire (car rexel--writes))
+               (should-not stalled)
+               (rexel-test--expire earlier)
+               (should (equal '(earlier) stalled)))
+             0)))))
+     0)))
+
+(ert-deftest rexel-test-ws-open-runs-messages-unwatched ()
+  "A message handler does not count as a write of the filter it runs in."
+  (let* ((socket (make-temp-name
+                  (expand-file-name "rexel-test" temporary-file-directory)))
+         (server (make-network-process :name "rexel-test-server" :server t
+                                       :family 'local :service socket :noquery t))
+         stack)
+    (unwind-protect
+        (let ((ws (rexel--ws-open socket "/api/data" "p" #'ignore
+                                  (lambda (_ws _frame)
+                                    (setq stack (car rexel--writes)))
+                                  #'ignore)))
+          (cl-letf (((symbol-function 'websocket-outer-filter)
+                     (lambda (ws _output)
+                       (funcall (websocket-on-message ws) ws nil))))
+            (rexel--ws-filter (websocket-conn ws) "x"))
+          (should (eq 'handler stack))
+          (delete-process (websocket-conn ws)))
+      (delete-process server)
+      (when (file-exists-p socket)
+        (delete-file socket)))))
+
+(ert-deftest rexel-test-send-stall-deletes-connection ()
+  "A control write that takes too long closes its connection."
+  (let* ((ws (rexel-test--ws))
+         (conn (rexel--make-conn :ws ws)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'websocket-send-text)
+                   (lambda (_ws _text)
+                     (rexel-test--expire (car rexel--writes)))))
+          (rexel--send conn '((type . "hello")))
+          (should-not (process-live-p (websocket-conn ws))))
+      (rexel-test--ws-delete ws))))
+
+(ert-deftest rexel-test-filter-error-on-live-connection-surfaces ()
+  (let ((ws (rexel-test--ws)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'websocket-outer-filter)
+                   (lambda (_ws _output) (error "Boom"))))
+          (should-error (rexel--ws-filter (websocket-conn ws) "x")))
+      (rexel-test--ws-delete ws))))
+
+(ert-deftest rexel-test-probe-skips-a-socket-being-written ()
+  "A ping would queue behind the write, which is watched itself."
+  (let ((ws (rexel-test--ws))
+        pings)
+    (unwind-protect
+        (cl-letf (((symbol-function 'websocket-send)
+                   (lambda (&rest _) (cl-incf pings))))
+          (setq pings 0)
+          (rexel--watched-write (websocket-conn ws) #'ignore
+                                (lambda () (rexel--probe ws))
+                                0)
+          (should (= 0 pings))
+          (rexel--probe ws)
+          (should (= 1 pings)))
+      (rexel-test--ws-delete ws))))
+
+(ert-deftest rexel-test-filter-is-no-write ()
+  "A filter does not count as a write, so a ping can go out from under one."
+  (let ((ws (rexel-test--ws))
+        filter ping)
+    (unwind-protect
+        (cl-letf (((symbol-function 'websocket-outer-filter)
+                   (lambda (ws _output)
+                     (setq filter (car rexel--writes))
+                     (rexel--probe ws)))
+                  ((symbol-function 'websocket-send)
+                   (lambda (&rest _) (setq ping (car rexel--writes)))))
+          (rexel--ws-filter (websocket-conn ws) "x")
+          (should-not (rexel--write-size filter))
+          (should ping)
+          (should (rexel--write-size ping)))
+      (rexel-test--ws-delete ws))))
+
+(ert-deftest rexel-test-probe-stall-deletes-connection ()
+  "A ping that finds the socket full closes its connection."
+  (let ((ws (rexel-test--ws))
+        watched)
+    (unwind-protect
+        (cl-letf (((symbol-function 'websocket-send)
+                   (lambda (_ws _frame)
+                     (setq watched (car rexel--writes))
+                     (when watched
+                       (rexel-test--expire watched)))))
+          (rexel--probe ws)
+          (should watched)
+          (should-not (process-live-p (websocket-conn ws))))
+      (rexel-test--ws-delete ws))))
+
+(ert-deftest rexel-test-pong-stall-deletes-connection ()
+  "The pong websocket.el sends from the filter is watched too."
+  (let ((ws (rexel-test--ws)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'websocket-outer-filter)
+                   (lambda (_ws _output)
+                     (rexel-test--expire (car rexel--writes))
+                     (error "Output file descriptor is closed"))))
+          (rexel--ws-filter (websocket-conn ws) "x")
+          (should-not (process-live-p (websocket-conn ws))))
       (rexel-test--ws-delete ws))))
 
 (ert-deftest rexel-test-probe-send-error-closes-connection ()
