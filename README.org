@@ -178,5 +178,6 @@ Rex.app, which uses the directory report and ignores the rest.
 
 * Development
 
-=make= byte-compiles, runs the tests and lints.  The tests cover the stream
-parsing; everything else needs a live server.
+=make= byte-compiles, runs the tests and lints.  The tests cover what runs
+without a server.  =test/elate/run.sh= drives rexel in a sandboxed Emacs
+against this machine's Rex server; see =test/elate/README.md=.
