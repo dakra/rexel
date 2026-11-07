@@ -721,7 +721,101 @@ The process was last read from SILENCE seconds ago, by default now."
     (should (eq (rexel--shell-process fg (vector bash login)) bash))
     (should (eq (rexel--shell-process fg (vector bash)) bash))
     (should (eq (rexel--shell-process fg (vector '((name . "sudo")) bash login))
-                bash))))
+                bash))
+    ;; The wrapper is reported before the shell it starts, also before
+    ;; it execs `login'.
+    (should-not (rexel--shell-process login nil))
+    (should-not (rexel--shell-process '((name . "rex") (pid . 1)) nil))
+    ;; A `rex' run from the shell is a command like any other.
+    (should (equal bash (rexel--shell-process '((name . "rex") (pid . 3))
+                                              (vector bash login))))))
+
+(defun rexel-test--process-event (fg &rest ancestors)
+  "Return the event that FG runs in block \"b\" below ANCESTORS."
+  `((block_id . "b") (creator_name . ,rexel--terminal-creator)
+    (name . "process_changed")
+    (payload . ((foreground . ,fg) (ancestors . ,(vconcat ancestors))))))
+
+(ert-deftest rexel-test-command-running-follows-processes ()
+  "A command runs while another process than the shell is in the foreground."
+  (rexel-test--with-fake-conn _sent
+    (puthash "b" (current-buffer) (rexel--conn-blocks rexel--conn))
+    (let ((login '((name . "login") (pid . 1)))
+          (bash '((name . "bash") (pid . 2)))
+          (sleep '((name . "sleep") (pid . 3))))
+      (rexel--on-block-event rexel--conn (rexel-test--process-event login))
+      (should-not rexel--shell-pid)
+      (rexel--on-block-event rexel--conn (rexel-test--process-event bash login))
+      (should (= 2 rexel--shell-pid))
+      (should-not ghostel--command-running)
+      (rexel--on-block-event rexel--conn
+                             (rexel-test--process-event sleep bash login))
+      (should ghostel--command-running)
+      ;; Without ancestors the shell stays known.
+      (rexel--on-block-event rexel--conn (rexel-test--process-event sleep))
+      (should (= 2 rexel--shell-pid))
+      (rexel--on-block-event rexel--conn (rexel-test--process-event bash login))
+      (should-not ghostel--command-running))))
+
+(ert-deftest rexel-test-exec-ends-prompt-marks ()
+  "OSC 133 marks hide the reported processes until the shell execs."
+  (rexel-test--with-fake-conn _sent
+    (puthash "b" (current-buffer) (rexel--conn-blocks rexel--conn))
+    (let* ((login '((name . "login") (pid . 1)))
+           (shell '((name . "bash") (pid . 2) (path . "/opt/bash") (argv0 . "-bash")))
+           (plain '((name . "bash") (pid . 2) (path . "/bin/bash") (argv0 . "bash")))
+           (sleep '((name . "sleep") (pid . 3)))
+           (report (lambda (&rest processes)
+                     (rexel--on-block-event
+                      rexel--conn (apply #'rexel-test--process-event processes)))))
+      (funcall report shell login)
+      (ghostel--osc133-marker "A" nil)
+      ;; The shell's own marks say when a command runs.
+      (funcall report sleep shell login)
+      (should-not ghostel--command-running)
+      ;; The command is `exec'; no mark follows it.
+      (ghostel--osc133-marker "C" nil)
+      (funcall report shell login)
+      (should ghostel--command-running)
+      (funcall report sleep plain login)
+      (should ghostel--command-running)
+      (funcall report plain login)
+      (should-not ghostel--command-running)
+      ;; A shell that marks its prompt takes over again.
+      (ghostel--osc133-marker "A" nil)
+      (funcall report sleep plain login)
+      (should-not ghostel--command-running))))
+
+(ert-deftest rexel-test-exec-noticed-without-ancestors ()
+  "An exec shows in a report of the shell alone, under the same pid."
+  (rexel-test--with-fake-conn _sent
+    (puthash "b" (current-buffer) (rexel--conn-blocks rexel--conn))
+    (let ((shell '((name . "bash") (pid . 2) (path . "/opt/bash") (argv0 . "-bash")))
+          (plain '((name . "bash") (pid . 2) (path . "/bin/bash") (argv0 . "bash")))
+          (other '((name . "zsh") (pid . 5) (path . "/bin/zsh") (argv0 . "zsh")))
+          (sleep '((name . "sleep") (pid . 3))))
+      (rexel--on-block-event rexel--conn (rexel-test--process-event shell))
+      (ghostel--osc133-marker "A" nil)
+      (rexel--on-block-event rexel--conn (rexel-test--process-event plain))
+      (rexel--on-block-event rexel--conn (rexel-test--process-event sleep plain))
+      (should ghostel--command-running)
+      ;; Another process as the shell is no exec.
+      (rexel--on-block-event rexel--conn (rexel-test--process-event plain))
+      (ghostel--osc133-marker "A" nil)
+      (rexel--on-block-event rexel--conn (rexel-test--process-event sleep other))
+      (should (= 5 rexel--shell-pid))
+      (should-not ghostel--command-running))))
+
+(ert-deftest rexel-test-exec-survives-stream-restart ()
+  "Prompt marks an exec ended stay ended when the block is streamed afresh."
+  (rexel-test--with-fake-conn _sent
+    (let ((conn rexel--conn)
+          (mark '(fake)))
+      (setq ghostel--prompt-positions (list mark)
+            rexel--stale-prompt mark)
+      (cl-letf (((symbol-function 'rexel-block-mode) #'ignore))
+        (rexel--attach-block-buffer conn "s" "b" (current-buffer)))
+      (should (eq mark rexel--stale-prompt)))))
 
 (ert-deftest rexel-test-replies-dropped ()
   "Replies made while parsing the stream are dropped, typed bytes are sent."

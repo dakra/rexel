@@ -586,6 +586,13 @@ response or repeat a change the view already has."
 (defvar-local rexel--shell-pid nil
   "Pid of the block's shell, from the processes Rex reports.")
 
+(defvar-local rexel--shell-program nil
+  "Path and argv0 of the block's shell; they change when the shell execs.")
+
+(defvar-local rexel--stale-prompt nil
+  "The newest of `ghostel--prompt-positions' when the shell last execed.
+OSC 133 marks count again once a prompt was marked after it.")
+
 (defun rexel--on-block-event (conn payload)
   "Handle the block event PAYLOAD of a session on CONN.
 A terminal's `process_changed' event names the foreground process, the PTY
@@ -602,25 +609,43 @@ and a foreground other than the shell means a command is running."
       (with-current-buffer buf
         ;; Ancestors are left out when too many or one exited; a shell known
         ;; from them outlives such an event.
-        (when (or (not (eq shell fg)) (null rexel--shell-pid))
-          (setq rexel--shell-pid (alist-get 'pid shell)))
+        (when (and shell (or (not (eq shell fg)) (null rexel--shell-pid)
+                             (eql (alist-get 'pid fg) rexel--shell-pid)))
+          (rexel--note-shell shell))
         ;; The path is the server's.
         (unless (rexel--conn-host conn)
           (ghostel--update-directory (alist-get 'cwd shell)))
-        ;; OSC 133 markers from the shell are exact and take over once seen.
-        (unless ghostel--prompt-positions
+        ;; OSC 133 marks from the shell are exact and take over once seen.
+        (unless (and ghostel--prompt-positions
+                     (not (eq (car ghostel--prompt-positions) rexel--stale-prompt)))
           (rexel--set-command-running
            (and fg rexel--shell-pid
                 (not (eql (alist-get 'pid fg) rexel--shell-pid)))))))))
 
+(defun rexel--note-shell (shell)
+  "Remember SHELL, this block's shell process as Rex reports it.
+A shell that became another program, as after `exec', may send no OSC 133
+marks, so those seen so far stop counting.  Rex names a process by its
+path and argv0; an `exec' that keeps both goes unnoticed."
+  (let ((pid (alist-get 'pid shell))
+        (program (list (alist-get 'path shell) (alist-get 'argv0 shell))))
+    (when (and (eql pid rexel--shell-pid)
+               (not (equal program rexel--shell-program)))
+      (setq rexel--stale-prompt (car ghostel--prompt-positions)))
+    (setq rexel--shell-pid pid
+          rexel--shell-program program)))
+
 (defun rexel--shell-process (fg ancestors)
   "Return the shell among the foreground process FG and its ANCESTORS.
 ANCESTORS run from FG's parent to the terminal's program.  The shell is the
-process below the `login' wrapper, or FG when only the wrapper is above it."
+process below the `login' wrapper, or FG when only the wrapper is above it.
+Return nil while the wrapper itself is in the foreground; before it execs
+`login' the wrapper is still called `rex'."
   (let ((chain (append ancestors nil)))
     (when (equal (alist-get 'name (car (last chain))) "login")
       (setq chain (butlast chain)))
-    (if chain (car (last chain)) fg)))
+    (cond (chain (car (last chain)))
+          ((not (member (alist-get 'name fg) '("login" "rex"))) fg))))
 
 (defun rexel--set-command-running (running)
   "Set `ghostel--command-running' to RUNNING, running ghostel's hooks on a change."
@@ -783,6 +808,7 @@ A buffer whose stream ended earlier is reset and streamed again."
           rexel--session-id sid
           rexel--block-id bid
           rexel--shell-pid nil
+          rexel--shell-program nil
           rexel--data-state nil
           rexel--requested-size nil
           rexel--size-take nil
