@@ -21,8 +21,8 @@
 ;; terminal.  Keystrokes travel back over Rex's control connection.
 ;;
 ;; `rexel-attach' picks a session and `rexel-new-session' creates one.
-;; In a block buffer `rexel-prefix-key' (C-c C-r) prefixes the layout
-;; commands in `rexel-prefix-map'.
+;; In a block buffer `rexel-prefix-key' (C-c C-r) prefixes the block and
+;; session commands in `rexel-prefix-map'.
 ;;
 ;; A file dropped on a block buffer, pasted with `yank-media' or given to
 ;; `rexel-upload-file' is sent to the server's machine, and its path
@@ -95,7 +95,8 @@ A string in `kbd' syntax or a key vector."
   :type 'key-sequence
   :set (lambda (symbol key)
          (when (boundp 'rexel-block-mode-map)
-           (define-key rexel-block-mode-map (rexel--key (default-value symbol)) nil)
+           (define-key rexel-block-mode-map
+                       (rexel--key (default-value symbol)) nil)
            (define-key rexel-block-mode-map (rexel--key key) rexel-prefix-map))
          (set-default symbol key)))
 
@@ -104,7 +105,7 @@ A string in `kbd' syntax or a key vector."
 
 (defvar rexel--connect-timeout 10
   "Seconds a connection may take to open its WebSocket or answer a ping.
-A write has as long, plus the time its size takes, see
+A write gets this long plus the time its size takes; see
 `rexel--watched-write'.")
 
 (defvar rexel--keepalive-interval 30
@@ -127,9 +128,10 @@ A write has as long, plus the time its size takes, see
 ENDPOINTS are the server's addresses, each a Unix socket path or an http
 or https URL.  ENDPOINT is the one that last answered, and UNTRIED are
 those left to try while a connection is being opened.  HOST is the
-server's label, nil for this machine's server.  TOKEN is the
-reconnect token of the latest welcome.  While the connection is being redialled,
-TIMER is the pending attempt and DELAY the seconds until the one after it.
+server's label, nil for this machine's server.  CLIENT-ID is non-nil
+from a welcome until the connection closes, and TOKEN is the reconnect
+token of the latest welcome.  While the connection is being redialled, TIMER is
+the pending attempt and DELAY the seconds until the one after it.
 ATTACHING are the sessions whose `session.attach' after a redial is
 unanswered: the server refuses their typing and sizing until then."
   ws endpoints endpoint untried host client-id token timer delay attaching
@@ -173,8 +175,8 @@ unanswered: the server refuses their typing and sizing until then."
 
 (defun rexel--normalize-endpoint (address)
   "Return the server ADDRESS as a socket path or an http or https URL.
-A unix:// URL or an absolute file name gives the socket path, and an
-address without a scheme an https URL.  Return nil for anything else,
+A unix:// URL or an absolute file name gives the socket path; an
+address without a scheme gives an https URL.  Return nil for anything else,
 such as another scheme or a URL with user information or a query."
   (let ((case-fold-search t)
         (host-and-path "\\([^/@?#[:space:]]+\\(?:/[^?#[:space:]]*\\)?\\)\\'"))
@@ -342,8 +344,9 @@ a large frame arriving in many reads would cost quadratic time."
            process nil
            (lambda ()
              (websocket-outer-filter ws (apply #'concat (nreverse queued)))))
-        ;; A message handler can close WS while a ping is queued behind the
-        ;; message, and a pong can stall; either ends with the connection.
+        ;; Errors matter only while the connection lives: a message handler
+        ;; can close WS while a ping waits behind the message, and a stalled
+        ;; pong deletes the process.
         (error (when (process-live-p process)
                  (signal (car err) (cdr err))))))))
 
@@ -496,7 +499,7 @@ Signal the last error if none can be dialled."
 
 (defun rexel--on-dial-close (conn)
   "Handle the close of CONN's control connection.
-One that closed without a welcome moves on to the endpoints not yet tried."
+If it closed before a welcome, dial the endpoints not yet tried."
   (let ((untried (rexel--conn-untried conn)))
     (unless (and untried (ignore-errors (rexel--dial conn untried)))
       (rexel--on-control-close conn))))
@@ -575,9 +578,9 @@ Return non-nil if there were any."
 
 (defun rexel--on-control-close (conn)
   "Redial CONN if sessions are attached to it, else forget it.
-Block streams run on their own connections and stay up meanwhile.
-Without sessions the block buffers stay for reading and `rexel-attach'
-reuses them."
+Uploads fail either way.  Block streams run on their own connections and
+stay up while CONN redials; without sessions they end, and the buffers
+stay for reading until `rexel-attach' reuses them."
   (pcase-dolist (`(,_sid . ,timer) (rexel--conn-refresh-timers conn))
     (cancel-timer timer))
   (setf (rexel--conn-refresh-timers conn) nil
@@ -643,9 +646,10 @@ so writes nest in it, and a write can only return after those inside it.
 The symbol `handler' stands for a message handler running.")
 
 (defvar rexel--writes-overdue nil
-  "The writes held up by one to another socket beyond their first deadline.
-To give them the chance to return, upload chunks wait, except in a message
-handler.")
+  "Writes past their first deadline that wait for a write to another socket.
+Upload chunks hold back while there are any, so that these can return.
+Inside a message handler it starts empty: the writes around the handler
+cannot return before it does.")
 
 (defvar rexel--handler-began nil
   "When the running message handler began or last had its time counted.")
@@ -654,7 +658,8 @@ handler.")
   "Bytes per second the slowest working link is expected to take.")
 
 (defun rexel--write-earliest (process)
-  "Return the earliest write in progress to the socket of PROCESS, if any."
+  "Return the earliest write in progress to the socket of PROCESS, if any.
+A filter, which has no SIZE, does not count."
   (cl-find-if (lambda (write)
                 (and (rexel--write-p write)
                      (rexel--write-size write)
@@ -664,9 +669,9 @@ handler.")
 (defun rexel--watched-write (process on-stall write &optional size)
   "Call WRITE, which writes SIZE bytes to PROCESS, and return its value.
 A write not done within `rexel--connect-timeout', plus the time SIZE takes
-at `rexel--write-rate', is given up by calling ON-STALL, or by deleting
-PROCESS if that is nil.  A write queued behind another to the socket adds
-the time of its SIZE to that one's."
+at `rexel--write-rate', is given up by calling ON-STALL or, without it, by
+deleting PROCESS.  A write queued behind an earlier one to the same socket
+adds the time of its SIZE to that write's deadline."
   (let* ((seconds (/ (or size 0) (float rexel--write-rate)))
          (earliest (rexel--write-earliest process))
          (entry (rexel--make-write
@@ -686,7 +691,7 @@ the time of its SIZE to that one's."
 
 (defun rexel--count-handler-time ()
   "Add the time of the innermost message handler to the writes around it.
-They cannot return before it does.  Its clock starts again."
+They cannot return before it does.  The handler's clock then restarts."
   (when (eq (car rexel--writes) 'handler)
     (let ((now (float-time)))
       (dolist (write (seq-take-while #'rexel--write-p (cdr rexel--writes)))
@@ -694,10 +699,10 @@ They cannot return before it does.  Its clock starts again."
       (setq rexel--handler-began now))))
 
 (defun rexel--unwatched (function)
-  "Call FUNCTION, a message handler, which is no write.
-It runs in the filter that may be answering a ping and can take as long
-as it likes: it may prompt the user.  No write counts as stalled while
-it is the innermost entry."
+  "Call FUNCTION, a message handler, marked on `rexel--writes'.
+It runs inside the filter's watched write and may take as long as it
+likes, as when it prompts: no write counts as stalled while it is
+innermost, and its time extends the writes around it."
   (let ((rexel--writes (cons 'handler rexel--writes))
         (rexel--handler-began (float-time))
         (rexel--writes-overdue nil))
@@ -716,9 +721,10 @@ it queues behind.  With a message handler innermost it is nil."
 
 (defun rexel--write-stalled (write)
   "Give up WRITE if it is what the others wait for and out of time.
-Runs every second from its first deadline on.  A write held up by one to
-another socket holds upload chunks back meanwhile, so that it can return;
-one waiting for a message handler cannot return before that does."
+Runs every second from its first deadline on.  A write held up by a
+write to another socket goes on `rexel--writes-overdue', which holds
+upload chunks back so that it can return; one waiting for a message
+handler does not, as it cannot return before the handler."
   (let ((blocking (rexel--write-blocking)))
     (cond
      ((and (eq write blocking) (>= (float-time) (rexel--write-deadline write)))
@@ -773,7 +779,7 @@ Nil until the answer to `data.connect'.")
   "The connection a size request is in flight on, or nil.")
 
 (defvar-local rexel--out-pending nil
-  "Bytes typed while a write to the server is in flight.")
+  "Typed bytes not yet sent to the server.")
 
 (defvar-local rexel--out-inflight nil
   "The connection a `terminal.write' is in flight on, or nil.")
@@ -874,7 +880,8 @@ A block whose `data.connect' went with the connection is streamed again."
                        ((equal (alist-get 'code err) "session_not_found"))
                        (err (message "rexel: session.view: %s"
                                      (rexel--error-string err)))
-                       ;; Detached while the request was in flight.
+                       ;; The session may have been detached while the
+                       ;; request was in flight.
                        ((assoc sid (rexel--conn-sessions conn))
                         (rexel--apply-view conn sid view)))))))
 
@@ -1049,9 +1056,10 @@ Typing while a write is unanswered probes the block's connections."
 
 (defun rexel--on-block-event (conn payload)
   "Handle the block event PAYLOAD of a session on CONN.
-A terminal's `process_changed' event names the foreground process, the PTY
-probe ghostel cannot run here: the shell's cwd becomes `default-directory'
-and a foreground other than the shell means a command is running."
+A terminal's `process_changed' event names the foreground process, in
+place of ghostel's PTY probe: a foreground other than the shell means a
+command is running, and on this machine's server the shell's cwd becomes
+`default-directory'."
   (when-let* ((buf (gethash (alist-get 'block_id payload)
                             (rexel--conn-blocks conn)))
               ((buffer-live-p buf))
@@ -1061,12 +1069,13 @@ and a foreground other than the shell means a command is running."
            (fg (alist-get 'foreground event))
            (shell (rexel--shell-process fg (alist-get 'ancestors event))))
       (with-current-buffer buf
-        ;; Ancestors are left out when too many or one exited; a shell known
-        ;; from them outlives such an event.
+        ;; Rex leaves out the ancestors when there are too many or one
+        ;; exited, so FG without them counts as the shell only if none is
+        ;; known yet or it has the known shell's pid.
         (when (and shell (or (not (eq shell fg)) (null rexel--shell-pid)
                              (eql (alist-get 'pid fg) rexel--shell-pid)))
           (rexel--note-shell shell))
-        ;; The path is the server's.
+        ;; The cwd is a path on the server's machine.
         (unless (rexel--conn-host conn)
           (ghostel--update-directory (alist-get 'cwd shell)))
         ;; OSC 133 marks from the shell are exact and take over once seen.
@@ -1102,7 +1111,7 @@ Return nil while the wrapper itself is in the foreground; before it execs
           ((not (member (alist-get 'name fg) '("login" "rex"))) fg))))
 
 (defun rexel--set-command-running (running)
-  "Set `ghostel--command-running' to RUNNING, running ghostel's hooks on a change."
+  "Set `ghostel--command-running' to RUNNING; run ghostel's hooks on a change."
   (unless (eq running ghostel--command-running)
     (setq ghostel--command-running running)
     (if running
@@ -1143,7 +1152,8 @@ Return nil while the wrapper itself is in the foreground; before it execs
 
 (defun rexel--open-data-ws (protocol hello on-message on-close)
   "Open a data connection speaking PROTOCOL for this block and send HELLO.
-ON-MESSAGE and ON-CLOSE are `websocket-open' callbacks."
+ON-MESSAGE and ON-CLOSE are `websocket-open' callbacks.  Return the
+WebSocket."
   (rexel--ws-open (rexel--conn-endpoint rexel--conn) "/api/data" protocol
                   (lambda (ws)
                     (websocket-send ws (make-websocket-frame
@@ -1151,8 +1161,8 @@ ON-MESSAGE and ON-CLOSE are `websocket-open' callbacks."
                   on-message on-close))
 
 (defun rexel--handshake (bytes)
-  "Return what the data handshake answer BYTES is.
-That is `welcome' for a WELCOME, the reason code of a REJECT, or nil."
+  "Classify the data handshake answer BYTES.
+Return `welcome' for a WELCOME, a REJECT's reason code, or nil."
   (cond ((and (>= (length bytes) 32) (= (aref bytes 0) #x81)) 'welcome)
         ((and (>= (length bytes) 2) (= (aref bytes 0) #x82)) (aref bytes 1))))
 
@@ -1189,7 +1199,7 @@ The stream is forgotten before the close, so that
     (ignore-errors (websocket-close (rexel--stream-ws stream)))))
 
 (defun rexel--data-failed (buf reason)
-  "Mark BUF's stream as failed for REASON."
+  "Close BUF's stream and report REASON."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (rexel--close-stream)
@@ -1241,9 +1251,8 @@ and restarted if it dropped before."
 
 (defun rexel--on-welcome (bytes)
   "Read the data handshake answer BYTES.
-A refused RESUME restarts the stream: the server no longer has the
-output this client missed.  A refused HELLO uses up its ticket, and is
-tried once more with a new one."
+A refused RESUME streams the block afresh.  A refused HELLO uses up its
+ticket, and is tried once more with a new one."
   (pcase (rexel--handshake bytes)
     ('welcome
      (let ((s rexel--stream))
@@ -1282,7 +1291,7 @@ tried once more with a new one."
   "Walk the snapshot records in BYTES from the record header at POS.
 A header is 10 bytes: a u16 tag and a u32 payload length, then a CRC.
 Return (t END) when the FINISH record ends at END.
-Otherwise return \(nil END NEED): END is the start of the first
+Otherwise return (nil END NEED): END is the start of the first
 incomplete record and NEED the bytes from END that complete it,
 or its header if that is cut off.
 Signal an error on a record longer than `rexel--max-record-bytes'."
@@ -1359,7 +1368,7 @@ Signal an error on a record longer than `rexel--max-record-bytes'."
 
 (defun rexel--split-stream (data marker)
   "Split DATA into terminal output and control messages.
-MARKER introduces a control message, which ends at ST.  Returns
+MARKER introduces a control message, which ends at ST.  Return
 \(ITEMS . PENDING): ITEMS are output strings and (message . JSON)
 conses in order; PENDING is the tail that may begin a message and
 must be prepended to the next chunk.  A message still unterminated
@@ -1442,12 +1451,12 @@ larger one Emacs looks for room only every 20 ms.")
 
 (cl-defstruct (rexel--upload (:constructor rexel--make-upload) (:copier nil))
   "One file on its way to the machine a block runs on.
-FILE is the local file, NAME the name it gets, SIZE its bytes and SENT
-those sent so far.  REF names its data stream and WS is that stream's
-WebSocket.  STATE is `begin' while the ticket is requested, `welcome'
-until the server answers the HELLO, then `ready', `sending', `ending'
-once the end marker is sent, and `done'.  TEMP is non-nil when FILE is a
-copy to delete afterwards.  SIZE is nil until `rexel--upload-fetch'."
+FILE is the local file, NAME the name it gets, SIZE its bytes, nil until
+`rexel--upload-fetch', and SENT those sent so far.  REF names its data
+stream and WS is that stream's WebSocket.  STATE is `begin' while the
+ticket is requested, `welcome' until the server answers the HELLO, then
+`ready', `sending', `ending' once the end marker is sent, and `done'.
+TEMP is non-nil when FILE is a copy to delete afterwards."
   file name size ref ws state (sent 0) temp)
 
 (defun rexel--uuid ()
@@ -1457,11 +1466,11 @@ copy to delete afterwards.  SIZE is nil until `rexel--upload-fetch'."
           (logior #x8000 (random (ash 1 14))) (random (ash 1 48))))
 
 (defun rexel--send-files (files)
-  "Hand the local FILES to the program in this block.
-Their paths are typed into the terminal.  Unless they are all on the same
-machine as the server, it gets the files themselves, in batches of
-`rexel--upload-batch-max', and types the paths they are stored under;
-calls made in one command share a batch.  ghostel calls this as
+  "Hand FILES to the program in this block by typing their paths.
+When the server runs on this machine and all FILES are local, their own
+paths are typed.  Otherwise the files are uploaded in batches of
+`rexel--upload-batch-max' and the server types the paths it stores them
+under; calls made in one command share a batch.  ghostel calls this as
 `ghostel-send-files-function'."
   (cond
    ((null rexel--conn)
@@ -1548,7 +1557,7 @@ while timers and filters run."
           (error "Cannot read %s" file)))))
 
 (defun rexel--local-copy (file)
-  "Return a temporary copy of the remote FILE, or nil if FILE is on this machine.
+  "Return a temporary local copy of the remote FILE, or nil for a local FILE.
 A compressed file is copied as it is."
   (let ((inhibit-file-name-handlers
          (cons 'jka-compr-handler inhibit-file-name-handlers))
@@ -1664,7 +1673,7 @@ them done, report it and start the next batch."
 (defun rexel--upload-pause (process)
   "Return the seconds to wait before the next chunk goes to PROCESS.
 Timers due at once run in a row and Emacs reads no process output between
-them, so once per `rexel--upload-slice' the next chunk is not due at once."
+them, so once per `rexel--upload-slice' the next chunk waits 1 ms."
   (let ((now (float-time)))
     (if (< (- now (or (process-get process :upload-paused) 0)) rexel--upload-slice)
         0
@@ -1672,7 +1681,8 @@ them, so once per `rexel--upload-slice' the next chunk is not due at once."
       0.001)))
 
 (defun rexel--upload-send-chunk (buf upload)
-  "Send the next chunk of UPLOAD in BUF, and the rest from a timer."
+  "Send the next chunk of UPLOAD in BUF, and the rest from a timer.
+A chunk waits while `rexel--writes-overdue' holds writes."
   (when (rexel--upload-current-p buf upload)
     (if rexel--writes-overdue
         (run-at-time 0.01 nil #'rexel--upload-send-chunk buf upload)
@@ -1696,8 +1706,8 @@ them, so once per `rexel--upload-slice' the next chunk is not due at once."
 (defun rexel--upload-write (buf upload)
   "Write the next chunk of UPLOAD in BUF and schedule the one after it.
 An empty message after the last chunk ends the file.  Emacs reads no keys
-while a chunk waits for room in the socket, so a chunk not taken within
-`rexel--connect-timeout' fails the batch."
+while a chunk waits for room in the socket, so a chunk that stalls (see
+`rexel--watched-write') fails the batch."
   (let* ((process (websocket-conn (rexel--upload-ws upload)))
          (sent (rexel--upload-sent upload))
          (end (min (rexel--upload-size upload)
@@ -1762,7 +1772,7 @@ a batch after typing the paths.  Any other close fails the batch."
                        "connection lost")))))))
 
 (defun rexel--upload-end ()
-  "Forget this buffer's batch, delete its temporary copies and return it."
+  "Forget this buffer's batch, delete its temporary copies, return the batch."
   (let ((uploads rexel--uploads))
     (setq rexel--uploads nil
           rexel--upload-reporter nil)
@@ -1913,7 +1923,7 @@ With no host known, offer to start this machine's server."
     (rexel--choose "Rex host: " names)))
 
 (defun rexel--ensure-block-buffer-context ()
-  "Signal an error unless the current buffer shows a live Rex block."
+  "Signal an error unless this buffer shows a block on a ready connection."
   (unless (and (rexel--ready-p rexel--conn) rexel--block-id)
     (user-error "Not in a connected Rex block buffer")))
 
@@ -2038,7 +2048,7 @@ below if `window-splittable-p' allows, else right, and let
   (rexel-split 'above))
 
 (defun rexel-new-tab (label)
-  "Open a new tab holding one shell in the current session, labelled LABEL.
+  "Open a tab labelled LABEL with one shell in the current session.
 A tab is what the Rex API calls a window."
   (interactive "sTab label: ")
   (rexel--ensure-block-buffer-context)
@@ -2101,8 +2111,9 @@ its window as it is.  A split that does not fit shows its before side."
 ;;;###autoload
 (defun rexel-sync-layout (&optional choose)
   "Rebuild the selected frame's windows from a Rex tab's layout.
-The tab is the current block's, with prefix argument CHOOSE one picked by label,
-and outside a block buffer the active tab of a chosen attached session.
+The tab is the one holding the current block or, outside a block buffer,
+the active tab of a chosen attached session.  With prefix argument
+CHOOSE, pick the tab from a list.
 Every block shown becomes Emacs-owned and sized to its window.
 Floating blocks and zoom are ignored."
   (interactive "P")
@@ -2113,7 +2124,8 @@ Floating blocks and zoom are ignored."
      (lambda (view err)
        (cond
         (err (message "rexel: session.view: %s" (rexel--error-string err)))
-        ;; Detached while the request was in flight.
+        ;; The session may have been detached while the request was in
+        ;; flight.
         ((assoc sid (rexel--conn-sessions conn))
          (rexel--apply-view conn sid view)
          (let* ((tabs (alist-get 'windows view))
