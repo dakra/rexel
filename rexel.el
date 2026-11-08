@@ -440,19 +440,18 @@ HOST is a (LABEL . ENDPOINTS) pair as `rexel--hosts' returns them."
      ((and conn (websocket-openp (rexel--conn-ws conn))
            (rexel--conn-client-id conn))
       (funcall callback conn))
-     ;; Opening, or open and not yet welcomed.
-     ((and conn (process-live-p (websocket-conn (rexel--conn-ws conn))))
-      (push callback (rexel--conn-on-ready conn)))
      (conn
       (push callback (rexel--conn-on-ready conn))
-      (setf (rexel--conn-delay conn) nil)
-      (rexel--reconnect conn))
+      ;; Unless opening, or open and not yet welcomed.
+      (unless (process-live-p (websocket-conn (rexel--conn-ws conn)))
+        (setf (rexel--conn-delay conn) nil)
+        (rexel--reconnect conn)))
      (t
       (unless (seq-some (lambda (e) (or (rexel--network-endpoint-p e) (file-exists-p e)))
                         endpoints)
         (user-error "Rex server socket %s does not exist" (car endpoints)))
-      (setq conn (rexel--make-conn :endpoints endpoints :host (car host)))
-      (push callback (rexel--conn-on-ready conn))
+      (setq conn (rexel--make-conn :endpoints endpoints :host (car host)
+                                   :on-ready (list callback)))
       (rexel--dial conn)
       (push conn rexel--conns)))))
 
@@ -527,11 +526,17 @@ Once no session or callback waits for CONN, it is forgotten instead."
                              (condition-case nil
                                  (rexel--dial conn)
                                (error
-                                (when (rexel--conn-on-ready conn)
-                                  (setf (rexel--conn-on-ready conn) nil)
-                                  (message "rexel: cannot reach %s" (rexel--conn-name conn)))
+                                (rexel--fail-waiters conn)
                                 (rexel--reconnect conn)))
                            (setq rexel--conns (delq conn rexel--conns))))))))
+
+(defun rexel--fail-waiters (conn)
+  "Drop the callbacks waiting for CONN, saying it cannot be reached.
+Return non-nil if there were any."
+  (when (rexel--conn-on-ready conn)
+    (setf (rexel--conn-on-ready conn) nil)
+    (message "rexel: cannot reach %s" (rexel--conn-name conn))
+    t))
 
 (defun rexel--on-control-message (conn text)
   "Dispatch the control message TEXT received on CONN."
@@ -541,26 +546,25 @@ Once no session or callback waits for CONN, it is forgotten instead."
        (setf (rexel--conn-untried conn) nil)
        (let ((protocol (alist-get 'protocol msg))
              (revision (or (alist-get 'api_revision msg) 0)))
-         (if (not (and (equal protocol "rex.control.v1")
-                       (eql revision rexel--api-revision)))
-             (progn
-               (websocket-close (rexel--conn-ws conn))
-               (message "rexel: server speaks %s revision %s, rexel needs %s revision %d; update Rex"
-                        protocol revision "rex.control.v1" rexel--api-revision))
-           (let ((client (alist-get 'client msg)))
-             (setf (rexel--conn-client-id conn) (or (alist-get 'id client) t)
-                   (rexel--conn-token conn) (alist-get 'reconnect_token client))
-             (when (rexel--conn-delay conn)
-               (setf (rexel--conn-delay conn) nil)
-               (message "rexel: %s to %s"
-                        (if (alist-get 'resumed client)
-                            "reconnected"
-                          "re-attached as a new client")
-                        (rexel--conn-name conn))
-               (rexel--reattach conn)))
-           (let ((callbacks (nreverse (rexel--conn-on-ready conn))))
-             (setf (rexel--conn-on-ready conn) nil)
-             (dolist (callback callbacks) (funcall callback conn))))))
+         (if (and (equal protocol "rex.control.v1")
+                  (eql revision rexel--api-revision))
+             (let ((client (alist-get 'client msg)))
+               (setf (rexel--conn-client-id conn) (or (alist-get 'id client) t)
+                     (rexel--conn-token conn) (alist-get 'reconnect_token client))
+               (when (rexel--conn-delay conn)
+                 (setf (rexel--conn-delay conn) nil)
+                 (message "rexel: %s to %s"
+                          (if (alist-get 'resumed client)
+                              "reconnected"
+                            "re-attached as a new client")
+                          (rexel--conn-name conn))
+                 (rexel--reattach conn))
+               (let ((callbacks (nreverse (rexel--conn-on-ready conn))))
+                 (setf (rexel--conn-on-ready conn) nil)
+                 (dolist (callback callbacks) (funcall callback conn))))
+           (websocket-close (rexel--conn-ws conn))
+           (message "rexel: server speaks %s revision %s, rexel needs %s revision %d; update Rex"
+                    protocol revision "rex.control.v1" rexel--api-revision))))
       ("response"
        (let* ((id (alist-get 'id msg))
               (callback (gethash id (rexel--conn-pending conn))))
@@ -586,22 +590,17 @@ reuses them."
   (if (rexel--conn-sessions conn)
       (progn
         (setf (rexel--conn-revisions conn) nil)
-        (cond ((rexel--conn-on-ready conn)
-               (setf (rexel--conn-on-ready conn) nil)
-               (message "rexel: cannot reach %s" (rexel--conn-name conn)))
-              ((not (rexel--conn-delay conn))
-               (message "rexel: connection to %s lost, reconnecting"
-                        (rexel--conn-name conn))))
+        (unless (or (rexel--fail-waiters conn) (rexel--conn-delay conn))
+          (message "rexel: connection to %s lost, reconnecting"
+                   (rexel--conn-name conn)))
         (rexel--reconnect conn))
     (setq rexel--conns (delq conn rexel--conns))
     (dolist (buf (buffer-list))
       (when (eq (buffer-local-value 'rexel--conn buf) conn)
         (rexel--end-stream buf "control connection closed")
         (with-current-buffer buf (setq rexel--conn nil))))
-    (message (if (rexel--conn-on-ready conn)
-                 "rexel: cannot reach %s"
-               "rexel: control connection to %s closed")
-             (rexel--conn-name conn))))
+    (unless (rexel--fail-waiters conn)
+      (message "rexel: control connection to %s closed" (rexel--conn-name conn)))))
 
 (defun rexel--on-event (conn event)
   "Handle EVENT received on CONN.
@@ -656,11 +655,11 @@ handler.")
 
 (defun rexel--write-earliest (process)
   "Return the earliest write in progress to the socket of PROCESS, if any."
-  (car (last (seq-filter (lambda (write)
-                           (and (rexel--write-p write)
-                                (rexel--write-size write)
-                                (eq (rexel--write-process write) process)))
-                         rexel--writes))))
+  (cl-find-if (lambda (write)
+                (and (rexel--write-p write)
+                     (rexel--write-size write)
+                     (eq (rexel--write-process write) process)))
+              rexel--writes :from-end t))
 
 (defun rexel--watched-write (process on-stall write &optional size)
   "Call WRITE, which writes SIZE bytes to PROCESS, and return its value.
@@ -811,7 +810,7 @@ OSC 133 marks count again once a prompt was marked after it.")
 A block whose `data.connect' went with the connection is streamed again."
   (setf (rexel--conn-attaching conn) (mapcar #'car (rexel--conn-sessions conn)))
   (pcase-dolist (`(,sid . ,_) (rexel--conn-sessions conn))
-    (dolist (buf (rexel--session-buffers conn sid))
+    (dolist (buf (rexel--session-buffers sid))
       (with-current-buffer buf
         (when (eq rexel--conn conn)
           ;; The server may have run the write whose answer was lost, so
@@ -838,21 +837,24 @@ A block whose `data.connect' went with the connection is streamed again."
          (rexel--forget-session conn sid))
         (err (message "rexel: session.attach: %s" (rexel--error-string err)))
         (t
-         (dolist (buf (rexel--session-buffers conn sid))
+         (dolist (buf (rexel--session-buffers sid))
            (rexel--flush-out buf))
          (rexel--apply-view conn sid (alist-get 'view result))
-         (dolist (buf (rexel--session-buffers conn sid))
+         (dolist (buf (rexel--session-buffers sid))
            (with-current-buffer buf (rexel--sync-size)))))))))
 
 (defun rexel--show-focused-block (conn view)
   "Pop to the buffer of VIEW's focused block on CONN."
-  (let* ((active (alist-get 'active_window_id view))
-         (window (seq-find (lambda (w) (equal (alist-get 'window_id w) active))
-                           (alist-get 'windows view)))
-         (bid (and window (alist-get 'focused_block_id window)))
+  (let* ((bid (alist-get 'focused_block_id (rexel--active-tab view)))
          (buf (and bid (gethash bid (rexel--conn-blocks conn)))))
     (when (buffer-live-p buf)
       (pop-to-buffer buf))))
+
+(defun rexel--active-tab (view)
+  "Return VIEW's active tab, or nil."
+  (seq-find (lambda (w) (equal (alist-get 'window_id w)
+                               (alist-get 'active_window_id view)))
+            (alist-get 'windows view)))
 
 (defun rexel--schedule-view-refresh (conn sid)
   "Refresh session SID's view on CONN shortly, coalescing bursts of events."
@@ -862,8 +864,7 @@ A block whose `data.connect' went with the connection is streamed again."
 
 (defun rexel--refresh-view (conn sid)
   "Fetch session SID's view on CONN and reconcile block buffers."
-  (setf (rexel--conn-refresh-timers conn)
-        (assoc-delete-all sid (rexel--conn-refresh-timers conn)))
+  (setf (alist-get sid (rexel--conn-refresh-timers conn) nil t #'equal) nil)
   (when (rexel--ready-p conn)
     (rexel--request conn "session.view" `((session_id . ,sid))
                     (lambda (view err)
@@ -881,17 +882,16 @@ A block whose `data.connect' went with the connection is streamed again."
   "Drop session SID from CONN and kill its block buffers."
   (when-let* ((timer (alist-get sid (rexel--conn-refresh-timers conn)
                                 nil nil #'equal)))
-    (cancel-timer timer)
-    (setf (rexel--conn-refresh-timers conn)
-          (assoc-delete-all sid (rexel--conn-refresh-timers conn))))
-  (setf (alist-get sid (rexel--conn-sessions conn) nil t #'equal) nil)
-  (setf (alist-get sid (rexel--conn-revisions conn) nil t #'equal) nil)
-  (setf (rexel--conn-attaching conn) (delete sid (rexel--conn-attaching conn)))
-  (dolist (buf (rexel--session-buffers conn sid))
+    (cancel-timer timer))
+  (setf (alist-get sid (rexel--conn-refresh-timers conn) nil t #'equal) nil
+        (alist-get sid (rexel--conn-sessions conn) nil t #'equal) nil
+        (alist-get sid (rexel--conn-revisions conn) nil t #'equal) nil
+        (rexel--conn-attaching conn) (delete sid (rexel--conn-attaching conn)))
+  (dolist (buf (rexel--session-buffers sid))
     (kill-buffer buf)))
 
-(defun rexel--session-buffers (_conn sid)
-  "Return the block buffers of session SID, streaming or not."
+(defun rexel--session-buffers (sid)
+  "Return the block buffers of session SID on any connection, streaming or not."
   (seq-filter (lambda (buf)
                 (equal (buffer-local-value 'rexel--session-id buf) sid))
               (buffer-list)))
@@ -921,13 +921,13 @@ already applied is ignored."
               (alist-get 'label view))
         (pcase-dolist (`(,bid . ,_) blocks)
           (rexel--ensure-block-buffer conn sid bid))
-        (dolist (buf (rexel--session-buffers conn sid))
+        (dolist (buf (rexel--session-buffers sid))
           (with-current-buffer buf
-            (if (not (assoc rexel--block-id blocks))
-                (kill-buffer buf)
-              (let ((name (rexel--buffer-name conn sid rexel--block-id)))
-                (unless (equal name (buffer-name))
-                  (rename-buffer name t))))))))))
+            (if (assoc rexel--block-id blocks)
+                (let ((name (rexel--buffer-name conn sid rexel--block-id)))
+                  (unless (equal name (buffer-name))
+                    (rename-buffer name t)))
+              (kill-buffer buf))))))))
 
 (defun rexel--buffer-name (conn sid bid)
   "Return the buffer name for block BID of session SID on CONN."
@@ -1141,17 +1141,28 @@ Return nil while the wrapper itself is in the foreground; before it execs
   "Return the HELLO message opening a data connection with TICKET."
   (concat "\x01" (base64-decode-string ticket t)))
 
+(defun rexel--open-data-ws (protocol hello on-message on-close)
+  "Open a data connection speaking PROTOCOL for this block and send HELLO.
+ON-MESSAGE and ON-CLOSE are `websocket-open' callbacks."
+  (rexel--ws-open (rexel--conn-endpoint rexel--conn) "/api/data" protocol
+                  (lambda (ws)
+                    (websocket-send ws (make-websocket-frame
+                                        :opcode 'binary :payload hello :completep t)))
+                  on-message on-close))
+
+(defun rexel--handshake (bytes)
+  "Return what the data handshake answer BYTES is.
+That is `welcome' for a WELCOME, the reason code of a REJECT, or nil."
+  (cond ((and (>= (length bytes) 32) (= (aref bytes 0) #x81)) 'welcome)
+        ((and (>= (length bytes) 2) (= (aref bytes 0) #x82)) (aref bytes 1))))
+
 (defun rexel--open-stream (hello)
   "Connect this buffer's stream to the data endpoint and send HELLO."
   (let ((buf (current-buffer))
         (stream rexel--stream))
     (setf (rexel--stream-ws stream)
-          (rexel--ws-open
-           (rexel--conn-endpoint rexel--conn) "/api/data"
-           "rex.data.terminal.v1"
-           (lambda (ws)
-             (websocket-send ws (make-websocket-frame
-                                 :opcode 'binary :payload hello :completep t)))
+          (rexel--open-data-ws
+           "rex.data.terminal.v1" hello
            (lambda (_ws frame)
              (rexel--on-data buf stream (websocket-frame-payload frame)))
            (lambda (_ws) (rexel--on-data-close buf stream))))))
@@ -1228,48 +1239,41 @@ and restarted if it dropped before."
              (rexel--on-snapshot-bytes bytes)
            (rexel--on-live-bytes bytes)))))))
 
-(defun rexel--u64le (bytes offset)
-  "Return the little-endian 64-bit integer at OFFSET in BYTES."
-  (let ((n 0))
-    (dotimes (i 8)
-      (setq n (logior n (ash (aref bytes (+ offset i)) (* 8 i)))))
-    n))
-
 (defun rexel--on-welcome (bytes)
   "Read the data handshake answer BYTES.
 A refused RESUME restarts the stream: the server no longer has the
 output this client missed.  A refused HELLO uses up its ticket, and is
 tried once more with a new one."
-  (cond
-   ((and (>= (length bytes) 32) (= (aref bytes 0) #x81))
-    (let ((s rexel--stream))
-      (setq rexel--hello-refused nil)
-      (setf (rexel--stream-token s) (substring bytes 1 17))
-      (if (rexel--stream-resume s)
-          (progn
-            (setq rexel--data-state (rexel--stream-resume s))
-            ;; Sizes asked for during the RESUME were not sent.
-            (when (eq rexel--data-state 'live)
-              (rexel--sync-size)))
-        (setf (rexel--stream-marker s)
-              (format "\e_rex1;%d;" (rexel--u64le bytes 24)))
-        (setq rexel--data-state 'snapshot))
-      (when (> (length bytes) 32)
-        (rexel--on-data (current-buffer) s (substring bytes 32)))))
-   ((and (>= (length bytes) 2) (= (aref bytes 0) #x82))
-    (let ((reason (aref bytes 1)))
-      (cond
-       ((rexel--stream-resume rexel--stream)
-        (rexel--restart-stream (current-buffer)
-                               (format "resume refused, reason %d" reason)))
-       (rexel--hello-refused
-        (rexel--data-failed (current-buffer)
-                            (format "data connection rejected, reason %d" reason)))
-       (t
-        (setq rexel--hello-refused t)
-        (rexel--restart-stream (current-buffer)
-                               (format "data connection rejected, reason %d" reason))))))
-   (t (rexel--data-failed (current-buffer) "malformed data handshake"))))
+  (pcase (rexel--handshake bytes)
+    ('welcome
+     (let ((s rexel--stream))
+       (setq rexel--hello-refused nil)
+       (setf (rexel--stream-token s) (substring bytes 1 17))
+       (if-let* ((state (rexel--stream-resume s)))
+           (progn
+             (setq rexel--data-state state)
+             ;; Sizes asked for during the RESUME were not sent.
+             (when (eq state 'live)
+               (rexel--sync-size)))
+         (setf (rexel--stream-marker s)
+               (format "\e_rex1;%d;"
+                       (bindat-unpack (bindat-type uintr 64) bytes 24)))
+         (setq rexel--data-state 'snapshot))
+       (when (> (length bytes) 32)
+         (rexel--on-data (current-buffer) s (substring bytes 32)))))
+    ((and (pred integerp) reason)
+     (cond
+      ((rexel--stream-resume rexel--stream)
+       (rexel--restart-stream (current-buffer)
+                              (format "resume refused, reason %d" reason)))
+      (rexel--hello-refused
+       (rexel--data-failed (current-buffer)
+                           (format "data connection rejected, reason %d" reason)))
+      (t
+       (setq rexel--hello-refused t)
+       (rexel--restart-stream (current-buffer)
+                              (format "data connection rejected, reason %d" reason)))))
+    (_ (rexel--data-failed (current-buffer) "malformed data handshake"))))
 
 (defconst rexel--max-record-bytes (ash 1 28)
   "Snapshot records claiming more bytes than this end the stream.")
@@ -1331,18 +1335,17 @@ Signal an error on a record longer than `rexel--max-record-bytes'."
     (setf (rexel--stream-snapshot s) nil
           (rexel--stream-tail s) nil)
     (condition-case err
-        (progn
-          ;; The server answers the program's terminal queries.
-          (let ((ghostel-pty-out-function #'ignore))
-            (ghostel-snapshot-restore snapshot))
-          (setq rexel--data-state 'live))
+        ;; The server answers the program's terminal queries.
+        (let ((ghostel-pty-out-function #'ignore))
+          (ghostel-snapshot-restore snapshot))
       (error (rexel--end-stream (current-buffer)
                                 (format "bad snapshot: %s"
-                                        (error-message-string err)))))
-    (when (eq rexel--data-state 'live)
-      (when (> (length rest) 0)
-        (rexel--on-live-bytes rest))
-      (rexel--sync-size))))
+                                        (error-message-string err))))
+      (:success
+       (setq rexel--data-state 'live)
+       (when (> (length rest) 0)
+         (rexel--on-live-bytes rest))
+       (rexel--sync-size)))))
 
 (defconst rexel--max-message-bytes 65536
   "Longest stream control message held back waiting for its end.")
@@ -1503,8 +1506,7 @@ sent, so the server refuses a batch over its limits with nothing sent."
                                    :file file :state 'begin
                                    :name (file-name-nondirectory file)
                                    :ref (concat "upload:" (rexel--uuid))))
-                                files))
-               (index 0))
+                                files)))
           (setq rexel--upload-queue (nthcdr count rexel--upload-queue)
                 rexel--uploads uploads)
           (condition-case err
@@ -1521,9 +1523,9 @@ sent, so the server refuses a batch over its limits with nothing sent."
                                  (rexel--conn-name rexel--conn))
                          0 (max 1 (apply #'+ (mapcar #'rexel--upload-size
                                                      uploads)))))
-                  (dolist (upload uploads)
-                    (rexel--upload-begin buf upload batch index count)
-                    (setq index (1+ index)))))
+                  (seq-do-indexed (lambda (upload index)
+                                    (rexel--upload-begin buf upload batch index count))
+                                  uploads)))
             (error (when (rexel--upload-current-p buf (car uploads))
                      (rexel--upload-fail buf (error-message-string err))))))))))
 
@@ -1578,11 +1580,8 @@ With BATCH, UPLOAD is file INDEX of COUNT in the batch of that ID."
 
 (defun rexel--upload-open (buf upload hello)
   "Connect the stream of UPLOAD in BUF to the data endpoint and send HELLO."
-  (let ((ws (rexel--ws-open
-             (rexel--conn-endpoint rexel--conn) "/api/data" "rex.data.bytes.v1"
-             (lambda (ws)
-               (websocket-send ws (make-websocket-frame
-                                   :opcode 'binary :payload hello :completep t)))
+  (let ((ws (rexel--open-data-ws
+             "rex.data.bytes.v1" hello
              (lambda (_ws frame)
                (rexel--on-upload-message buf upload
                                          (websocket-frame-payload frame)))
@@ -1634,16 +1633,14 @@ Frames websocket.el cannot read end the search."
 (defun rexel--on-upload-message (buf upload bytes)
   "Handle BYTES, the server's answer to the HELLO of UPLOAD in BUF."
   (when (rexel--upload-current-p buf upload)
-    (cond
-     ((and (eq (rexel--upload-state upload) 'welcome)
-           (>= (length bytes) 32) (= (aref bytes 0) #x81))
-      (setf (rexel--upload-state upload) 'ready)
-      (rexel--upload-pump buf))
-     ((and (>= (length bytes) 2) (= (aref bytes 0) #x82))
-      (rexel--upload-fail buf (format "%s: data connection rejected, reason %d"
-                                      (rexel--upload-name upload)
-                                      (aref bytes 1))))
-     (t (rexel--upload-fail buf "malformed data handshake")))))
+    (pcase (rexel--handshake bytes)
+      ((and 'welcome (guard (eq (rexel--upload-state upload) 'welcome)))
+       (setf (rexel--upload-state upload) 'ready)
+       (rexel--upload-pump buf))
+      ((and (pred integerp) reason)
+       (rexel--upload-fail buf (format "%s: data connection rejected, reason %d"
+                                       (rexel--upload-name upload) reason)))
+      (_ (rexel--upload-fail buf "malformed data handshake")))))
 
 (defun rexel--upload-pump (buf)
   "Send the first unfinished file of BUF's batch once its stream is ready.
@@ -1655,8 +1652,7 @@ them done, report it and start the next batch."
           (count (length rexel--uploads)))
       (cond
        ((null upload)
-        (rexel--upload-cleanup rexel--uploads)
-        (setq rexel--uploads nil)
+        (rexel--upload-end)
         (message "rexel: uploaded %d file%s to %s"
                  count (if (= count 1) "" "s") (rexel--conn-name rexel--conn))
         ;; This runs in a sentinel, and fetching a remote file can block.
@@ -1765,12 +1761,15 @@ a batch after typing the paths.  Any other close fails the batch."
                          (format "server closed the upload with status %d" status)
                        "connection lost")))))))
 
-(defun rexel--upload-cleanup (uploads)
-  "Delete the temporary copies of UPLOADS and forget the progress reporter."
-  (setq rexel--upload-reporter nil)
-  (dolist (upload uploads)
-    (when (rexel--upload-temp upload)
-      (ignore-errors (delete-file (rexel--upload-file upload))))))
+(defun rexel--upload-end ()
+  "Forget this buffer's batch, delete its temporary copies and return it."
+  (let ((uploads rexel--uploads))
+    (setq rexel--uploads nil
+          rexel--upload-reporter nil)
+    (dolist (upload uploads)
+      (when (rexel--upload-temp upload)
+        (ignore-errors (delete-file (rexel--upload-file upload)))))
+    uploads))
 
 (defun rexel--upload-fail (buf reason)
   "Give up BUF's batch and its queued files, reporting REASON.
@@ -1778,11 +1777,9 @@ A connection closed before the end of its file makes the server discard
 the batch, so no path is typed."
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (let ((uploads rexel--uploads))
-        ;; Forgotten first, so that the closes below are ignored.
-        (setq rexel--uploads nil
-              rexel--upload-queue nil)
-        (rexel--upload-cleanup uploads)
+      ;; Forgotten first, so that the closes below are ignored.
+      (setq rexel--upload-queue nil)
+      (let ((uploads (rexel--upload-end)))
         ;; A close frame would wait for room in a stalled connection.
         (dolist (upload uploads)
           (when-let* ((ws (rexel--upload-ws upload)))
@@ -1877,13 +1874,15 @@ once this client owns the block, when the server reports it in the stream."
        (let ((sessions (mapcar (lambda (s) (cons (alist-get 'label s)
                                                  (alist-get 'session_id s)))
                                (alist-get 'sessions result))))
-         (cond
-          ((null sessions) (message "rexel: the server has no sessions"))
-          ((null (cdr sessions)) (funcall callback (cdar sessions)))
-          (t (funcall callback
-                      (cdr (assoc (completing-read "Rex session: " sessions
-                                                   nil t)
-                                  sessions))))))))))
+         (if sessions
+             (funcall callback (rexel--choose "Rex session: " sessions))
+           (message "rexel: the server has no sessions")))))))
+
+(defun rexel--choose (prompt alist)
+  "Return the value of ALIST's only entry, or of one read with PROMPT."
+  (if (cdr alist)
+      (cdr (assoc (completing-read prompt alist nil t) alist))
+    (cdar alist)))
 
 ;;;###autoload
 (defun rexel-start-server ()
@@ -1909,9 +1908,9 @@ With no host known, offer to start this machine's server."
   (let* ((hosts (or (rexel--hosts)
                     (progn (rexel--autostart-server) (rexel--hosts))))
          (names (mapcar (lambda (h) (cons (or (car h) "this machine") h)) hosts)))
-    (cond ((null hosts) (user-error "No Rex server found; see `rexel-hosts'"))
-          ((null (cdr hosts)) (car hosts))
-          (t (cdr (assoc (completing-read "Rex host: " names nil t) names))))))
+    (unless hosts
+      (user-error "No Rex server found; see `rexel-hosts'"))
+    (rexel--choose "Rex host: " names)))
 
 (defun rexel--ensure-block-buffer-context ()
   "Signal an error unless the current buffer shows a live Rex block."
@@ -1921,10 +1920,9 @@ With no host known, offer to start this machine's server."
 (defconst rexel--shell-flavor "com.superlogical.terminal.shell"
   "Flavor of a new shell block.")
 
-(defun rexel--new-shell-layout (&optional label)
-  "Return a layout object holding one shell block, labelled LABEL."
-  `((block . ((flavor . ,rexel--shell-flavor)
-              ,@(when label `((label . ,label)))))))
+(defun rexel--new-shell-layout ()
+  "Return a layout object holding one shell block."
+  `((block . ((flavor . ,rexel--shell-flavor)))))
 
 ;;;###autoload
 (defun rexel-attach ()
@@ -1987,16 +1985,15 @@ RESULT and ERR are the response.  With DIRECTION, a side such as
 `below', show it on that side of WINDOW."
   (if err
       (message "rexel: %s: %s" method (rexel--error-string err))
-    (let ((bid (seq-first (alist-get 'block_ids result))))
-      (when bid
-        (pop-to-buffer (rexel--ensure-block-buffer conn sid bid)
-                       (when direction
-                         ;; A nil `window-height' keeps the half split
-                         ;; instead of fitting the still empty buffer.
-                         `(display-buffer-in-direction
-                           (window-height . nil)
-                           (direction . ,direction)
-                           (window . ,window))))))))
+    (when-let* ((bid (seq-first (alist-get 'block_ids result))))
+      (pop-to-buffer (rexel--ensure-block-buffer conn sid bid)
+                     (when direction
+                       ;; A nil `window-height' keeps the half split
+                       ;; instead of fitting the still empty buffer.
+                       `(display-buffer-in-direction
+                         (window-height . nil)
+                         (direction . ,direction)
+                         (window . ,window)))))))
 
 (defun rexel-split (&optional direction)
   "Split the current block with a new shell on side DIRECTION.
@@ -2067,10 +2064,9 @@ A tab is what the Rex API calls a window."
                           label)
                         (cons conn sid))
                   sessions))))
-      (cond ((null sessions) (user-error "No attached Rex session"))
-            ((null (cdr sessions)) (cdar sessions))
-            (t (cdr (assoc (completing-read "Rex session: " sessions nil t)
-                           sessions)))))))
+      (unless sessions
+        (user-error "No attached Rex session"))
+      (rexel--choose "Rex session: " sessions))))
 
 (defun rexel--read-tab (view)
   "Let the user pick one of VIEW's tabs by label and return it."
@@ -2094,11 +2090,10 @@ its window as it is.  A split that does not fit shows its before side."
              (total (if horizontal
                         (window-total-width window)
                       (window-total-height window)))
-             (new (condition-case nil
-                      (split-window window
-                                    (round (* (alist-get 'ratio split) total))
-                                    (if horizontal 'right 'below))
-                    (error nil))))
+             (new (ignore-errors
+                    (split-window window
+                                  (round (* (alist-get 'ratio split) total))
+                                  (if horizontal 'right 'below)))))
         (rexel--show-layout conn sid (alist-get 'before split) blocks window)
         (when new
           (rexel--show-layout conn sid (alist-get 'after split) blocks new))))))
@@ -2130,10 +2125,7 @@ Floating blocks and zoom are ignored."
                                         (alist-get 'blocks
                                                    (seq-first (alist-get 'layers w)))))
                             tabs)
-                           (seq-find (lambda (w)
-                                       (equal (alist-get 'window_id w)
-                                              (alist-get 'active_window_id view)))
-                                     tabs))))
+                           (rexel--active-tab view))))
                 (layout (alist-get 'layout (seq-first (alist-get 'layers tab))))
                 (window (seq-find (lambda (w) (not (window-parameter w 'window-side)))
                                   (window-list nil 'no-mini))))

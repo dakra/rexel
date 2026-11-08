@@ -148,10 +148,6 @@
       (should (eq 'snapshot rexel--data-state))
       (should (eq stream rexel--stream)))))
 
-(ert-deftest rexel-test-u64le ()
-  (should (= 1 (rexel--u64le (unibyte-string 1 0 0 0 0 0 0 0) 0)))
-  (should (= (ash 1 56) (rexel--u64le (unibyte-string 9 0 0 0 0 0 0 0 1) 1))))
-
 (ert-deftest rexel-test-welcome-reads-nonce ()
   (with-temp-buffer
     (setq rexel--data-state 'welcome rexel--stream (rexel--make-stream))
