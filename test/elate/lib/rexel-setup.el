@@ -289,6 +289,21 @@ CONN defaults to the block buffer's connection.  Signal the server's error."
   "Return the ID of the session labelled LABEL on the server of CONN, or nil."
   (cdr (assoc label (rexel-elate-sessions conn))))
 
+(defun rexel-elate-client-count (sid)
+  "Return the number of rexel clients connected and attached to SID.
+A control connection of its own attaches to ask, and is not counted.
+Clients whose connection was lost stay listed for a while and are skipped."
+  (rexel-elate--control
+   (lambda (conn)
+     (rexel-elate-call "session.attach" `((session_id . ,sid)) conn)
+     (1- (seq-count
+          (lambda (client)
+            (and (equal (alist-get 'name (alist-get 'info client)) "rexel")
+                 (equal (alist-get 'connection_state client) "connected")))
+          (alist-get 'clients
+                     (rexel-elate-call "session.list_clients"
+                                       `((session_id . ,sid)) conn)))))))
+
 (defun rexel-elate-view ()
   "Return the server's view of the block buffer's session."
   (with-current-buffer (rexel-elate-block)
