@@ -82,9 +82,22 @@ It receives the label, \"\" when none was given, in the buffer the
 command runs from.  An empty or nil result lets the server choose one."
   :type '(choice (const :tag "None" nil) function))
 
+(defvar rexel-prefix-map)
+(defvar rexel-block-mode-map)
+
+(defun rexel--key (key)
+  "Return KEY, a string in `kbd' syntax or a key vector, as a key."
+  (if (stringp key) (kbd key) key))
+
 (defcustom rexel-prefix-key "C-c C-r"
-  "Prefix key for `rexel-prefix-map' in block buffers."
-  :type 'key-sequence)
+  "Prefix key for `rexel-prefix-map' in block buffers.
+A string in `kbd' syntax or a key vector."
+  :type 'key-sequence
+  :set (lambda (symbol key)
+         (when (boundp 'rexel-block-mode-map)
+           (define-key rexel-block-mode-map (rexel--key (default-value symbol)) nil)
+           (define-key rexel-block-mode-map (rexel--key key) rexel-prefix-map))
+         (set-default symbol key)))
 
 (defvar rexel--connect-timeout 10
   "Seconds a connection may take to open its WebSocket or answer a ping.
@@ -99,6 +112,9 @@ A write has as long, plus the time its size takes, see
 
 (defvar rexel--default-port 7297
   "Port a Rex server listens on unless told another.")
+
+(defconst rexel--version (package-get-version)
+  "This package's version, sent in the hello.")
 
 (defconst rexel--api-revision 11
   "Control API revision this client speaks.")
@@ -288,7 +304,7 @@ A write not done within `rexel--connect-timeout', plus the time SIZE takes
 at `rexel--write-rate', is given up by calling ON-STALL, or by deleting
 PROCESS if that is nil.  A write queued behind another to the socket adds
 the time of its SIZE to that one's."
-  (let* ((seconds (/ (or size 0) rexel--write-rate))
+  (let* ((seconds (/ (or size 0) (float rexel--write-rate)))
          (earliest (rexel--write-earliest process))
          (entry (rexel--make-write
                  :process process :on-stall on-stall :size size
@@ -586,8 +602,7 @@ Signal the last error if none can be dialled."
                           `((reconnect_token . ,(rexel--conn-token conn))))
                       (client . ((kind . "other")
                                  (name . "rexel")
-                                 (version . ,(or (package-get-version)
-                                                 "unknown")))))))
+                                 (version . ,(or rexel--version "unknown")))))))
 
 (defun rexel--on-dial-close (conn)
   "Handle the close of CONN's control connection.
@@ -827,6 +842,7 @@ Return nil while the wrapper itself is in the foreground; before it execs
           (assoc-delete-all sid (rexel--conn-refresh-timers conn))))
   (setf (alist-get sid (rexel--conn-sessions conn) nil t #'equal) nil)
   (setf (alist-get sid (rexel--conn-revisions conn) nil t #'equal) nil)
+  (setf (rexel--conn-attaching conn) (delete sid (rexel--conn-attaching conn)))
   (dolist (buf (rexel--session-buffers conn sid))
     (kill-buffer buf)))
 
@@ -1388,10 +1404,16 @@ calls made in one command share a batch.  ghostel calls this as
     (run-at-time 0 nil #'rexel--upload-next (current-buffer)))))
 
 (defun rexel--upload-next (buf)
-  "Start the next batch of BUF's queued files unless a write is innermost.
-A fetch of a remote file inside that write's wait would keep it from
+  "Start the next batch of BUF's queued files once it can go out.
+That is once no write is innermost and BUF's session is attached.  A
+fetch of a remote file inside a write's wait would keep it from
 returning, until it counts as stalled."
-  (if (rexel--write-p (car rexel--writes))
+  (if (or (rexel--write-p (car rexel--writes))
+          (and (buffer-live-p buf)
+               (with-current-buffer buf
+                 (and (rexel--ready-p rexel--conn)
+                      (member rexel--session-id
+                              (rexel--conn-attaching rexel--conn))))))
       (run-at-time 0.01 nil #'rexel--upload-next buf)
     (rexel--upload-start buf)))
 
@@ -1822,21 +1844,27 @@ A block whose `data.connect' went with the connection is streamed again."
   (pcase-dolist (`(,sid . ,_) (rexel--conn-sessions conn))
     (dolist (buf (rexel--session-buffers conn sid))
       (with-current-buffer buf
-        ;; The server may have run the write whose answer was lost, so it
-        ;; is not sent again.
-        (when rexel--out-inflight
-          (message "rexel: %s: keys typed as the connection dropped may be lost"
-                   (buffer-name)))
-        (setq rexel--out-inflight nil
-              rexel--size-inflight nil)
-        (when (and (eq rexel--conn conn) (null rexel--data-state))
-          (setq rexel--data-state 'closed))))
+        (when (eq rexel--conn conn)
+          ;; The server may have run the write whose answer was lost, so
+          ;; it is not sent again.
+          (when rexel--out-inflight
+            (message "rexel: %s: keys typed as the connection dropped may be lost"
+                     (buffer-name)))
+          (setq rexel--out-inflight nil
+                rexel--size-inflight nil)
+          (unless rexel--data-state
+            (setq rexel--data-state 'closed)))))
     (rexel--request
      conn "session.attach" `((session_id . ,sid))
      (lambda (result err)
        (setf (rexel--conn-attaching conn)
              (delete sid (rexel--conn-attaching conn)))
        (cond
+        ;; Detached while the request was in flight; the detach may have
+        ;; reached the server first.
+        ((not (assoc sid (rexel--conn-sessions conn)))
+         (unless err
+           (rexel--request conn "session.detach" `((session_id . ,sid)))))
         ((equal (alist-get 'code err) "session_not_found")
          (rexel--forget-session conn sid))
         (err (message "rexel: session.attach: %s" (rexel--error-string err)))
@@ -2176,7 +2204,7 @@ marked files to a block buffer read from the minibuffer."
 
 (defvar rexel-block-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd rexel-prefix-key) rexel-prefix-map)
+    (define-key map (rexel--key rexel-prefix-key) rexel-prefix-map)
     map)
   "Keymap of `rexel-block-mode'; binds `rexel-prefix-key'.")
 

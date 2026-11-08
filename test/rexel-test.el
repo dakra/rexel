@@ -660,8 +660,8 @@ The terminal and the stream's connection are stubbed."
         (should-not rexel--out-pending)
         (should-not rexel--out-inflight)))))
 
-(ert-deftest rexel-test-reattach-leaves-other-connections-connect ()
-  "A reconnect leaves the `data.connect' of another connection in flight."
+(ert-deftest rexel-test-reattach-leaves-other-connections-requests ()
+  "A reconnect leaves the requests of another connection in flight."
   (rexel-test--with-fake-conn sent
     (let ((conn rexel--conn)
           (other (rexel--make-conn :endpoints (list "other") :client-id t
@@ -670,8 +670,12 @@ The terminal and the stream's connection are stubbed."
       (rexel-test--with-attached-block conn
         (setf (alist-get "s" (rexel--conn-sessions other) nil nil #'equal) "work")
         (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
+        (setq rexel--out-inflight conn
+              rexel--size-inflight conn)
         (rexel--reattach other)
-        (should-not rexel--data-state)))))
+        (should-not rexel--data-state)
+        (should (eq conn rexel--out-inflight))
+        (should (eq conn rexel--size-inflight))))))
 
 (ert-deftest rexel-test-refused-hello-streams-again-once ()
   "A refused first HELLO gets one new ticket, and a second refusal is final."
@@ -753,6 +757,45 @@ The terminal and the stream's connection are stubbed."
         (rexel--forget-session conn "t")
         (rexel-test--respond conn (car sent) '((revision . 1)))
         (should (= 0 applied))))))
+
+(ert-deftest rexel-test-reattach-answer-after-detach-is-dropped ()
+  "A session detached before its `session.attach' answer stays detached."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn)
+          (applied 0))
+      (setf (alist-get "t" (rexel--conn-sessions conn) nil nil #'equal) "work")
+      (cl-letf (((symbol-function 'rexel--apply-view)
+                 (lambda (&rest _) (cl-incf applied))))
+        (rexel--reattach conn)
+        (rexel--forget-session conn "t")
+        (should-not (rexel--conn-attaching conn))
+        (rexel-test--respond conn (car sent) '((view)))
+        (should (= 0 applied))
+        (should-not (rexel--conn-sessions conn))
+        (should (equal "session.detach" (alist-get 'method (car sent))))))))
+
+(ert-deftest rexel-test-upload-waits-for-attach ()
+  "A batch starts only once the redialled session is attached."
+  (rexel-test--with-fake-conn sent
+    (let ((started 0))
+      (cl-letf (((symbol-function 'rexel--upload-start)
+                 (lambda (_buf) (cl-incf started)))
+                ((symbol-function 'run-at-time) #'ignore))
+        (setf (rexel--conn-attaching rexel--conn) (list "s"))
+        (rexel--upload-next (current-buffer))
+        (should (= 0 started))
+        (setf (rexel--conn-attaching rexel--conn) nil)
+        (rexel--upload-next (current-buffer))
+        (should (= 1 started))))))
+
+(ert-deftest rexel-test-prefix-key-rebinds ()
+  "Customizing `rexel-prefix-key' moves the prefix map, also to a key vector."
+  (let ((rexel-block-mode-map (make-sparse-keymap))
+        (rexel-prefix-key "C-c C-r"))
+    (define-key rexel-block-mode-map (kbd "C-c C-r") rexel-prefix-map)
+    (funcall (get 'rexel-prefix-key 'custom-set) 'rexel-prefix-key [f5])
+    (should (eq rexel-prefix-map (lookup-key rexel-block-mode-map [f5])))
+    (should-not (lookup-key rexel-block-mode-map (kbd "C-c C-r")))))
 
 (ert-deftest rexel-test-pty-out-serializes-and-coalesces ()
   (rexel-test--with-fake-conn sent
@@ -1132,12 +1175,13 @@ The process was last read from SILENCE seconds ago, by default now."
    (lambda ()
      (let* ((earliest (car rexel--writes))
             (deadline (rexel--write-deadline earliest)))
-       (rexel--watched-write 'socket #'ignore #'ignore 100)
-       (should (= deadline (rexel--write-deadline earliest)))
        (rexel--watched-write 'other #'ignore #'ignore (* 10 rexel--write-rate))
        (should (= deadline (rexel--write-deadline earliest)))
        (rexel--watched-write 'socket #'ignore #'ignore (* 10 rexel--write-rate))
-       (should (= (+ deadline 10) (rexel--write-deadline earliest)))))
+       (should (= (+ deadline 10) (rexel--write-deadline earliest)))
+       (rexel--watched-write 'socket #'ignore #'ignore (/ rexel--write-rate 4))
+       (should (< (abs (- (+ deadline 10.25) (rexel--write-deadline earliest)))
+                  1e-6))))
    0))
 
 (ert-deftest rexel-test-write-in-time-is-left-alone ()
