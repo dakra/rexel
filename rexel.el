@@ -1014,6 +1014,22 @@ its block's ID or its tab's number appended."
                       (cddr e)))
               entries))))
 
+(defvar rexel-read-choice-function #'rexel--read-choice
+  "Function that reads one of a session's blocks and tabs.
+Its arguments are the prompt, an alist of (NAME . CHOICE) with the
+default first, and the session's connection, ID and view.
+It returns the CHOICE read: (block . BLOCK-ID) or (tab . TAB).")
+
+(defun rexel--read-choice (prompt choices &rest _)
+  "Return the CHOICE read with PROMPT from CHOICES, an alist kept in order."
+  (let ((table (lambda (string pred action)
+                 (if (eq action 'metadata)
+                     '(metadata (display-sort-function . identity)
+                                (cycle-sort-function . identity))
+                   (complete-with-action action choices string pred)))))
+    (cdr (assoc (completing-read prompt table nil t nil nil (caar choices))
+                choices))))
+
 (defun rexel--read-attach-choice (conn sid view callback)
   "Ask for one of the blocks or tabs of session SID's VIEW on CONN.
 Call CALLBACK with the CHOICE of `rexel--attach-choices' read.  The blocks'
@@ -1032,18 +1048,11 @@ or done with the answer, once the session is detached."
                   (when (funcall attached)
                     (rexel--prompt-later
                      (lambda ()
-                       (let* ((choices (rexel--attach-choices view processes))
-                              (table (lambda (string pred action)
-                                       (if (eq action 'metadata)
-                                           '(metadata (display-sort-function . identity)
-                                                      (cycle-sort-function . identity))
-                                         (complete-with-action
-                                          action choices string pred))))
-                              (choice (cdr (assoc (completing-read
-                                                   "Rex block or layout: " table
-                                                   nil t nil nil (caar choices))
-                                                  choices))))
-                         (when (funcall attached)
+                       (let ((choice (funcall rexel-read-choice-function
+                                              "Rex block or layout: "
+                                              (rexel--attach-choices view processes)
+                                              conn sid view)))
+                         (when (and choice (funcall attached))
                            (funcall callback choice))))))))))
     (setq timer (run-at-time 1.5 nil ask))
     (pcase-dolist (`(,bid . ,_) blocks)
@@ -2480,14 +2489,15 @@ A tab is what the Rex API calls a window."
         (user-error "No attached Rex session"))
       (rexel--choose "Rex session: " sessions))))
 
-(defun rexel--read-tab (view)
-  "Let the user pick one of VIEW's tabs by label and return it."
-  (let* ((tabs (alist-get 'windows view))
-         (names (seq-map-indexed
-                 (lambda (tab i) (format "%d: %s" (1+ i) (alist-get 'label tab)))
-                 tabs))
-         (name (completing-read "Rex tab: " names nil t nil nil (car names))))
-    (seq-elt tabs (seq-position names name))))
+(defun rexel--read-tab (conn sid view)
+  "Let the user pick one of the tabs of session SID's VIEW on CONN; return it."
+  (cdr (funcall rexel-read-choice-function "Rex tab: "
+                (seq-map-indexed
+                 (lambda (tab i)
+                   (cons (format "%d: %s" (1+ i) (alist-get 'label tab))
+                         (cons 'tab tab)))
+                 (alist-get 'windows view))
+                conn sid view)))
 
 (defun rexel--show-layout (conn sid layout blocks window)
   "Show LAYOUT's blocks of session SID on CONN in WINDOW, splitting it.
@@ -2529,19 +2539,24 @@ its focused block alone."
            (rexel--prompt-later
             (lambda ()
               (rexel--tab-again
-               conn sid (alist-get 'window_id (rexel--read-tab view))
+               conn sid (alist-get 'window_id (rexel--read-tab conn sid view))
                (apply-partially #'rexel--layout-windows conn sid))))
          (rexel--layout-windows
           conn sid view
           (or (rexel--block-tab view bid) (rexel--active-tab view))))))))
 
+(defun rexel--tab-windows (tab)
+  "Return the layout to show for TAB: its own, else its focused block alone.
+Nil when TAB holds no terminal."
+  (or (rexel--tab-layout tab)
+      (when-let* ((bid (rexel--tab-block tab)))
+        `((block_id . ,bid)))))
+
 (defun rexel--layout-windows (conn sid view tab)
   "Rebuild the selected frame's windows from TAB of session SID's VIEW on CONN.
 Select the window of the tab's focused block.  A tab whose layout is
 empty shows its focused block alone."
-  (let ((layout (or (rexel--tab-layout tab)
-                    (when-let* ((bid (rexel--tab-block tab)))
-                      `((block_id . ,bid)))))
+  (let ((layout (rexel--tab-windows tab))
         (window (seq-find (lambda (w) (not (window-parameter w 'window-side)))
                           (window-list nil 'no-mini))))
     (if (null layout)

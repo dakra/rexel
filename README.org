@@ -18,6 +18,7 @@ same session at the same time.
 - Drop or paste files onto a terminal to send them to the server's machine.
 - Directory tracking and command state from the processes Rex reports.
 - Your ghostel key bindings and settings apply in every block buffer.
+- Optional pickers with previews and Embark actions, see [[*Consult and Embark][Consult and Embark]].
 
 * Quick start
 
@@ -83,6 +84,8 @@ The rest of this document covers each part in detail.
 - [[https://github.com/ahyatt/emacs-websocket][websocket]] 1.15 or later.
 - Emacs 28.1 or later with native JSON support (=json-serialize=): built in
   since Emacs 30, libjansson on 28 and 29.
+- For =consult-rexel=, [[https://github.com/minad/consult][consult]] 1.5 or later.  It uses [[https://github.com/oantolin/embark][Embark]] and
+  =consult-ghostel= when they are installed.
 
 * Servers
 
@@ -224,6 +227,48 @@ takes it only if it still shows it once the minibuffer exits.  Another client su
 take the block back; the terminal then follows that client's size until
 Emacs takes it again.
 
+* Consult and Embark
+
+Block buffers are ghostel buffers, so the buffer pickers list them,
+annotated with the block's tab.  =consult-rexel=, in
+=extensions/consult-rexel/=, adds pickers of its own on top of [[https://github.com/minad/consult][consult]]:
+
+#+begin_src emacs-lisp
+(use-package consult-rexel
+  :vc (:url "https://github.com/dakra/rexel"
+       :lisp-dir "extensions/consult-rexel")
+  :hook (after-init . consult-rexel-mode)
+  :bind (:map rexel-prefix-map
+         ("r" . consult-rexel)
+         ("t" . consult-rexel-tab)))
+#+end_src
+
+The mode loads rexel and consult when Emacs starts.  The pickers are then
+on =C-c C-r r= and =C-c C-r t=: in a block buffer, and everywhere with the
+=:bind-keymap= line of the [[*Quick start][Quick start]].
+
+- =M-x consult-rexel= lists the block buffers and, below them, every
+  session of the connected servers.  A block is previewed as its buffer.
+  A session that is not attached is previewed by the end of the text in
+  its focused block, without attaching to it.  Choosing a session
+  attaches it as =rexel-attach= does, and a name that matches nothing
+  creates a session with that label.  Without a connection, or with
+  =C-u=, it connects to a server first.  Listing the sessions subscribes
+  the connection to the session events of the whole server.
+- =M-x consult-rexel-tab= picks a tab of a session and rebuilds the
+  frame's windows from it, previewing each layout in the selected window.
+- =consult-rexel-mode= adds the blocks to =consult-ghostel= and
+  =consult-buffer= as a hidden source.  The narrow key =r= shows it alone,
+  as in =consult-rexel=; in =consult-buffer=, where =r= shows the registers,
+  the key is =x=.  The mode also gives the prompts of =rexel-attach= and
+  =C-u M-x rexel-sync-layout= the same previews of blocks and layouts.
+
+With [[https://github.com/oantolin/embark][Embark]] installed the mode also adds actions.  On a buffer, in any
+buffer prompt, =R= (=consult-rexel-embark-key=) prefixes the actions on a
+Rex block: =R d= detaches its session, =R x= closes the block and =R $=
+renames the session, the keys of =C-c C-r=.  On a session in
+=consult-rexel=, =a= attaches, =d= detaches, =$= renames and =k= destroys it.
+
 * Uploading files
 
 A file dropped on a block buffer, or an image pasted with =M-x yank-media=,
@@ -324,6 +369,6 @@ address.
 
 * Development
 
-=make= byte-compiles, runs the tests and lints.  The tests cover what runs
+=make= byte-compiles, runs the tests and lints, =consult-rexel= included.  The tests cover what runs
 without a server.  =test/elate/run.sh= drives rexel in a sandboxed Emacs
 against this machine's Rex server; see =test/elate/README.md=.

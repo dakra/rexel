@@ -3171,6 +3171,18 @@ is waiting to be read."
                                 'rexel--tab (gethash bid (rexel--conn-blocks conn))))
                              '("block:00000a" "block:00000b" "block:00000c")))))))
 
+(ert-deftest rexel-test-read-tab-uses-the-choice-function ()
+  "The tab prompt goes through `rexel-read-choice-function'."
+  (let* ((asked nil)
+         (rexel-read-choice-function
+          (lambda (prompt choices conn sid view)
+            (setq asked (list prompt (mapcar #'car choices) conn sid
+                              (eq view rexel-test--attach-view)))
+            (cdr (nth 1 choices)))))
+    (should (equal "w2" (alist-get 'window_id
+                                   (rexel--read-tab 'conn "s" rexel-test--attach-view))))
+    (should (equal '("Rex tab: " ("1: main" "2: " "3: main") conn "s" t) asked))))
+
 (ert-deftest rexel-test-block-shown-from-minibuffer-is-taken-after-it ()
   "A block shown from a minibuffer is taken once that exits, if still shown."
   (let ((in-minibuffer t) (taken nil) (timers nil)
