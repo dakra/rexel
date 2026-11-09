@@ -2430,9 +2430,7 @@ marked files to a block buffer read from the minibuffer."
 
 (defvar rexel-prefix-map
   (let ((map (make-sparse-keymap)))
-    (define-key map "%" #'rexel-split-right)
     (define-key map "3" #'rexel-split-right)
-    (define-key map "\"" #'rexel-split-below)
     (define-key map "2" #'rexel-split-below)
     (define-key map [right] #'rexel-split-right)
     (define-key map [down] #'rexel-split-below)
@@ -2440,6 +2438,8 @@ marked files to a block buffer read from the minibuffer."
     (define-key map [up] #'rexel-split-above)
     (define-key map (kbd "RET") #'rexel-split)
     (define-key map "c" #'rexel-new-tab)
+    (define-key map "a" #'rexel-attach)
+    (define-key map "n" #'rexel-new-session)
     (define-key map "=" #'rexel-sync-layout)
     (define-key map "$" #'rexel-rename-session)
     (define-key map "u" #'rexel-upload-file)
