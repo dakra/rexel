@@ -46,6 +46,14 @@ sessions and opens one ghostel buffer per terminal block.  Servers are this
 machine's (from =rex server status=), the hosts known to Rex (=rex hosts=)
 and =rexel-hosts=.
 
+For a session of several blocks it then asks what to show: a block, named
+after its tab and the program and directory running in it, with the
+focused one first, or a tab's layout.  A block pops up and leaves your
+windows as they are; the layout of a tab with a split rebuilds the frame's
+windows from it, as =rexel-sync-layout= does.  =rexel-attach-display= set to
+=focused= shows the focused block without asking, and =layout= the active
+tab's layout; =C-u M-x rexel-attach= asks whatever it is set to.
+
 =M-x rexel-new-session= creates a session with one shell and attaches to it,
 asking for its label with a prefix argument.  On this machine's server the
 shell starts in =default-directory=, elsewhere in the home directory.  =rexel-session-label-function=

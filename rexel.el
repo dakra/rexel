@@ -82,6 +82,18 @@ It receives the label, \"\" when none was given, in the buffer the
 command runs from.  An empty or nil result lets the server choose one."
   :type '(choice (const :tag "None" nil) function))
 
+(defcustom rexel-attach-display 'ask
+  "What `rexel-attach' shows of a session with several blocks.
+`ask' reads a block, or a tab whose layout to show, from a list.
+`focused' shows the active tab's focused block.  `layout' shows the
+active tab's layout.  A block is shown with `pop-to-buffer', which keeps
+the other windows; a tab with a split rebuilds the selected frame's
+windows as `rexel-sync-layout' does, and a tab of one block shows it as
+a block.  A session of one block is shown without asking."
+  :type '(choice (const :tag "Ask for a block or a tab" ask)
+                 (const :tag "The focused block" focused)
+                 (const :tag "The active tab's layout" layout)))
+
 (defvar rexel-prefix-map)
 (defvar rexel-block-mode-map)
 
@@ -800,8 +812,9 @@ Nil until the answer to `data.connect'.")
   "The newest of `ghostel--prompt-positions' when the shell last execed.
 OSC 133 marks count again once a prompt was marked after it.")
 
-(defun rexel--attach-session (conn sid)
-  "Attach CONN to session SID and show its focused block."
+(defun rexel--attach-session (conn sid &optional display)
+  "Attach CONN to session SID and show it as DISPLAY says.
+DISPLAY is a value of `rexel-attach-display'; nil shows the focused block."
   (rexel--request
    conn "session.attach" `((session_id . ,sid))
    (lambda (result err)
@@ -809,7 +822,189 @@ OSC 133 marks count again once a prompt was marked after it.")
          (message "rexel: session.attach: %s" (rexel--error-string err))
        (let ((view (alist-get 'view result)))
          (rexel--apply-view conn sid view)
-         (rexel--show-focused-block conn view))))))
+         (rexel--show-attached conn sid view display))))))
+
+(defun rexel--show-attached (conn sid view display)
+  "Show session SID's VIEW on CONN as DISPLAY, a `rexel-attach-display' value."
+  (let ((tab (rexel--active-tab view)))
+    (cond
+     ((null (cdr (rexel--view-terminal-blocks view)))
+      (rexel--show-focused-block conn view))
+     ((eq display 'ask)
+      (rexel--read-attach-choice
+       conn sid view
+       (lambda (choice)
+         (pcase choice
+           (`(block . ,bid)
+            (unless (rexel--pop-to-block conn bid)
+              (message "rexel: the Rex block is gone")))
+           (`(tab . ,tab)
+            (rexel--tab-again conn sid (alist-get 'window_id tab)
+                              (apply-partially #'rexel--show-tab conn sid)))))))
+     ((and (eq display 'layout) (rexel--tab-layout tab))
+      (rexel--show-tab conn sid view tab))
+     (t (rexel--show-focused-block conn view)))))
+
+(defun rexel--prompt-later (function)
+  "Call FUNCTION, which prompts, from a timer and ignore a quit out of it.
+A message handler that prompts holds up the messages after it in the
+same read, and a quit out of it drops them."
+  (run-at-time 0 nil
+               (lambda ()
+                 (rexel--unwatched
+                  (lambda () (condition-case nil (funcall function) (quit nil)))))))
+
+(defun rexel--with-view (conn sid callback)
+  "Fetch session SID's view on CONN, apply it and call CALLBACK with it.
+A session detached meanwhile is left alone."
+  (rexel--request
+   conn "session.view" `((session_id . ,sid))
+   (lambda (view err)
+     (cond
+      (err (message "rexel: session.view: %s" (rexel--error-string err)))
+      ((assoc sid (rexel--conn-sessions conn))
+       (rexel--apply-view conn sid view)
+       (funcall callback view))))))
+
+(defun rexel--tab-again (conn sid tab-id callback)
+  "Call CALLBACK with session SID's current view on CONN and tab TAB-ID in it."
+  (rexel--with-view
+   conn sid
+   (lambda (view)
+     (if-let* ((tab (seq-find (lambda (w) (equal (alist-get 'window_id w) tab-id))
+                              (alist-get 'windows view))))
+         (funcall callback view tab)
+       (message "rexel: the Rex tab is gone")))))
+
+(defun rexel--pop-to-block (conn bid)
+  "Pop to the buffer of block BID on CONN and return it, if it has one."
+  (let ((buf (gethash bid (rexel--conn-blocks conn))))
+    (when (buffer-live-p buf)
+      (pop-to-buffer buf))))
+
+(defun rexel--tab-layout (tab)
+  "Return the layout of TAB's tiled blocks, or nil."
+  (alist-get 'layout (seq-first (alist-get 'layers tab))))
+
+(defun rexel--show-tab (conn sid view tab)
+  "Show TAB of session SID's VIEW on CONN.
+A tab with a split gets the selected frame's windows rebuilt from its
+layout; a tab of one block pops to it."
+  (let ((layout (rexel--tab-layout tab)))
+    (if (and layout (not (alist-get 'split layout)))
+        (unless (rexel--pop-to-block conn (alist-get 'block_id layout))
+          (message "rexel: Rex tab %s holds no terminal" (rexel--tab-name view tab)))
+      (rexel--layout-windows conn sid view tab))))
+
+(defun rexel--tab-name (view tab)
+  "Return TAB's label, or for a tab without one its number in VIEW."
+  (let ((label (alist-get 'label tab)))
+    (if (member label '(nil ""))
+        (format "tab %d" (1+ (or (seq-position (alist-get 'windows view) tab #'eq)
+                                 0)))
+      label)))
+
+(defun rexel--home-relative (dir home)
+  "Return DIR with a leading HOME directory written as ~."
+  (let ((home (and home (file-name-as-directory home))))
+    (cond ((null home) dir)
+          ((equal (file-name-as-directory dir) home) "~")
+          ((string-prefix-p home dir) (concat "~/" (substring dir (length home))))
+          (t dir))))
+
+(defun rexel--block-description (block process)
+  "Describe BLOCK by the foreground program and directory in PROCESS.
+PROCESS is a `terminal.process' report, or nil; without one, or before
+the block's shell started, BLOCK's label describes it.  The program is
+named by the base name of the first of its script, argv0 and name."
+  (let* ((fg (alist-get 'foreground process))
+         (program (seq-some (lambda (key) (alist-get key fg)) '(script argv0 name)))
+         (cwd (alist-get 'cwd fg)))
+    (if (or (null program) (member (alist-get 'name fg) '(nil "login" "rex")))
+        (let ((label (alist-get 'label block)))
+          (if (member label '(nil "")) "block" label))
+      (concat (string-remove-prefix "-" (file-name-nondirectory program))
+              (when cwd
+                (concat " in " (rexel--home-relative cwd (alist-get 'home process))))))))
+
+(defun rexel--attach-choices (view processes)
+  "Return VIEW's terminal blocks and tabs as (NAME . CHOICE).
+CHOICE is (block . BLOCK-ID) or (tab . TAB).  PROCESSES maps block IDs
+to their `terminal.process' reports, which describe the blocks.  The
+active tab's focused block comes first, the tabs last.  A name that
+repeats gets its block's ID or its tab's number appended."
+  (let ((focused (alist-get 'focused_block_id (rexel--active-tab view)))
+        blocks tabs)
+    ;; Each entry is (NAME SUFFIX . CHOICE) until the names are unique.
+    (seq-do-indexed
+     (lambda (tab i)
+       (let ((name (rexel--tab-name view tab)))
+         (seq-doseq (layer (alist-get 'layers tab))
+           (seq-doseq (block (alist-get 'blocks layer))
+             (when (equal (alist-get 'creator_name block) rexel--terminal-creator)
+               (let ((bid (alist-get 'block_id block)))
+                 (push `(,(format "%s: %s" name
+                                  (rexel--block-description
+                                   block (cdr (assoc bid processes))))
+                         ,(substring bid -6) block . ,bid)
+                       blocks)))))
+         (push `(,(format "Layout of %s" name) ,(number-to-string (1+ i))
+                 tab . ,tab)
+               tabs)))
+     (alist-get 'windows view))
+    (setq blocks (nreverse blocks))
+    (when-let* ((first (seq-find (lambda (e) (equal (cdddr e) focused)) blocks)))
+      (setq blocks (cons first (delq first blocks))))
+    (let ((entries (append blocks (nreverse tabs))))
+      (mapcar (lambda (e)
+                (cons (if (cdr (seq-filter (lambda (o) (equal (car o) (car e)))
+                                           entries))
+                          (format "%s <%s>" (car e) (cadr e))
+                        (car e))
+                      (cddr e)))
+              entries))))
+
+(defun rexel--read-attach-choice (conn sid view callback)
+  "Ask for one of the blocks or tabs of session SID's VIEW on CONN.
+Call CALLBACK with the CHOICE of `rexel--attach-choices' read.  The blocks'
+process reports, which name them, are fetched first, for up to 1.5 seconds.
+A block without one is named by its label.  Nothing is asked,
+or done with the answer, once the session is detached."
+  (let* ((blocks (rexel--view-terminal-blocks view))
+         (pending (length blocks))
+         (processes nil)
+         (timer nil)
+         (attached (lambda () (assoc sid (rexel--conn-sessions conn))))
+         (ask (lambda ()
+                (when timer
+                  (cancel-timer timer)
+                  (setq timer nil)
+                  (when (funcall attached)
+                    (rexel--prompt-later
+                     (lambda ()
+                       (let* ((choices (rexel--attach-choices view processes))
+                              (table (lambda (string pred action)
+                                       (if (eq action 'metadata)
+                                           '(metadata (display-sort-function . identity)
+                                                      (cycle-sort-function . identity))
+                                         (complete-with-action
+                                          action choices string pred))))
+                              (choice (cdr (assoc (completing-read
+                                                   "Rex block or layout: " table
+                                                   nil t nil nil (caar choices))
+                                                  choices))))
+                         (when (funcall attached)
+                           (funcall callback choice))))))))))
+    (setq timer (run-at-time 1.5 nil ask))
+    (pcase-dolist (`(,bid . ,_) blocks)
+      (rexel--request
+       conn "com.superlogical.terminal.process"
+       `((session_id . ,sid) (block_id . ,bid))
+       (lambda (result err)
+         (unless err
+           (push (cons bid result) processes))
+         (when (zerop (cl-decf pending))
+           (funcall ask)))))))
 
 (defun rexel--reattach (conn)
   "Attach CONN again to its sessions and resume their typing and sizing.
@@ -850,11 +1045,11 @@ A block whose `data.connect' went with the connection is streamed again."
            (with-current-buffer buf (rexel--sync-size)))))))))
 
 (defun rexel--show-focused-block (conn view)
-  "Pop to the buffer of VIEW's focused block on CONN."
-  (let* ((bid (alist-get 'focused_block_id (rexel--active-tab view)))
-         (buf (and bid (gethash bid (rexel--conn-blocks conn)))))
-    (when (buffer-live-p buf)
-      (pop-to-buffer buf))))
+  "Pop to the buffer of VIEW's focused block on CONN.
+Without a focused terminal block, pop to VIEW's first terminal block."
+  (let ((blocks (rexel--view-terminal-blocks view))
+        (bid (alist-get 'focused_block_id (rexel--active-tab view))))
+    (rexel--pop-to-block conn (if (assoc bid blocks) bid (caar blocks)))))
 
 (defun rexel--active-tab (view)
   "Return VIEW's active tab, or nil."
@@ -1885,7 +2080,8 @@ once this client owns the block, when the server reports it in the stream."
                                                  (alist-get 'session_id s)))
                                (alist-get 'sessions result))))
          (if sessions
-             (funcall callback (rexel--choose "Rex session: " sessions))
+             (rexel--prompt-later
+              (lambda () (funcall callback (rexel--choose "Rex session: " sessions))))
            (message "rexel: the server has no sessions")))))))
 
 (defun rexel--choose (prompt alist)
@@ -1963,13 +2159,17 @@ else `rexel--shell-directory', else nil."
                     fallback))))))
 
 ;;;###autoload
-(defun rexel-attach ()
-  "Attach to a Rex session and show its terminals as ghostel buffers."
-  (interactive)
+(defun rexel-attach (&optional ask)
+  "Attach to a Rex session and show its terminals as ghostel buffers.
+`rexel-attach-display' says what is shown; with prefix argument ASK,
+ask for a block or a tab to show."
+  (interactive "P")
   (rexel--connect
    (rexel--read-host)
    (lambda (conn)
-     (rexel--pick-session conn (lambda (sid) (rexel--attach-session conn sid))))))
+     (rexel--pick-session
+      conn (lambda (sid)
+             (rexel--attach-session conn sid (if ask 'ask rexel-attach-display)))))))
 
 ;;;###autoload
 (defun rexel-new-session (&optional label)
@@ -2155,39 +2355,39 @@ Floating blocks and zoom are ignored."
   (interactive "P")
   (pcase-let ((`(,conn . ,sid) (rexel--read-session))
               (bid rexel--block-id))
-    (rexel--request
-     conn "session.view" `((session_id . ,sid))
-     (lambda (view err)
-       (cond
-        (err (message "rexel: session.view: %s" (rexel--error-string err)))
-        ;; The session may have been detached while the request was in
-        ;; flight.
-        ((assoc sid (rexel--conn-sessions conn))
-         (rexel--apply-view conn sid view)
-         (let* ((tabs (alist-get 'windows view))
-                (tab (if choose
-                         (rexel--read-tab view)
-                       (or (seq-find
-                            (lambda (w)
-                              (seq-find (lambda (b) (equal (alist-get 'block_id b) bid))
-                                        (alist-get 'blocks
-                                                   (seq-first (alist-get 'layers w)))))
-                            tabs)
-                           (rexel--active-tab view))))
-                (layout (alist-get 'layout (seq-first (alist-get 'layers tab))))
-                (window (seq-find (lambda (w) (not (window-parameter w 'window-side)))
-                                  (window-list nil 'no-mini))))
-           (if (null layout)
-               (message "rexel: Rex tab %s has no tiled blocks"
-                        (alist-get 'label tab))
-             (delete-other-windows window)
-             (set-window-dedicated-p window nil)
-             (rexel--show-layout conn sid layout
-                                 (rexel--view-terminal-blocks view) window)
-             (when-let* ((buf (gethash (alist-get 'focused_block_id tab)
-                                       (rexel--conn-blocks conn)))
-                         (w (get-buffer-window buf)))
-               (select-window w))))))))))
+    (rexel--with-view
+     conn sid
+     (lambda (view)
+       (if choose
+           (rexel--prompt-later
+            (lambda ()
+              (rexel--tab-again
+               conn sid (alist-get 'window_id (rexel--read-tab view))
+               (apply-partially #'rexel--layout-windows conn sid))))
+         (rexel--layout-windows
+          conn sid view
+          (or (seq-find
+               (lambda (w)
+                 (seq-find (lambda (b) (equal (alist-get 'block_id b) bid))
+                           (alist-get 'blocks (seq-first (alist-get 'layers w)))))
+               (alist-get 'windows view))
+              (rexel--active-tab view))))))))
+
+(defun rexel--layout-windows (conn sid view tab)
+  "Rebuild the selected frame's windows from TAB of session SID's VIEW on CONN.
+Select the window of the tab's focused block."
+  (let ((layout (rexel--tab-layout tab))
+        (window (seq-find (lambda (w) (not (window-parameter w 'window-side)))
+                          (window-list nil 'no-mini))))
+    (if (null layout)
+        (message "rexel: Rex tab %s has no tiled blocks" (rexel--tab-name view tab))
+      (delete-other-windows window)
+      (set-window-dedicated-p window nil)
+      (rexel--show-layout conn sid layout (rexel--view-terminal-blocks view) window)
+      (when-let* ((buf (gethash (alist-get 'focused_block_id tab)
+                                (rexel--conn-blocks conn)))
+                  (w (get-buffer-window buf)))
+        (select-window w)))))
 
 (defun rexel-close-block ()
   "Close the current block on the server, ending its program."

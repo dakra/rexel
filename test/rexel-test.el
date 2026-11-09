@@ -767,6 +767,249 @@ The terminal and the stream's connection are stubbed."
         (rexel-test--respond conn (car sent) '((revision . 1)))
         (should (= 0 applied))))))
 
+;;; Attach display
+
+(defun rexel-test--block (bid &optional label creator)
+  "Return a view block BID labelled LABEL, made by CREATOR or a terminal."
+  `((block_id . ,bid) (label . ,(or label "shell"))
+    (creator_name . ,(or creator rexel--terminal-creator))))
+
+(defun rexel-test--tab (id label layout &rest blocks)
+  "Return a view tab ID labelled LABEL with LAYOUT and BLOCKS in one layer."
+  `((window_id . ,id) (label . ,label) (focused_block_id . ,(caar blocks))
+    (layers . [((layout . ,layout) (blocks . ,(vconcat blocks)))])))
+
+(defconst rexel-test--attach-view
+  `((active_window_id . "w1")
+    (windows
+     . [,(append
+          '((focused_block_id . "block:00000b"))
+          (rexel-test--tab
+           "w1" "main"
+           '((split (direction . "horizontal") (ratio . 0.5)
+                    (before (block_id . "block:00000a"))
+                    (after (block_id . "block:00000b"))))
+           (rexel-test--block "block:00000a")
+           (rexel-test--block "block:00000b")))
+        ,(rexel-test--tab "w2" "" '((block_id . "block:00000c"))
+                          (rexel-test--block "block:00000c"))
+        ,(rexel-test--tab "w3" "main" '((block_id . "block:00000d"))
+                          (rexel-test--block "block:00000d" "web" "browser"))]))
+  "A view of three tabs: a split, one block, and one block of no terminal.")
+
+(ert-deftest rexel-test-attach-choices ()
+  "Blocks are named by process, focused first; every tab follows."
+  (should
+   (equal
+    (rexel--attach-choices
+     rexel-test--attach-view
+     '(("block:00000a" (foreground (name . "bash") (cwd . "/home/d/src"))
+        (home . "/home/d"))
+       ("block:00000b" (foreground (name . "vim") (cwd . "/home/d"))
+        (home . "/home/d"))
+       ("block:00000c" (foreground (name . "login")))))
+    `(("main: vim in ~" block . "block:00000b")
+      ("main: bash in ~/src" block . "block:00000a")
+      ("tab 2: shell" block . "block:00000c")
+      ("Layout of main <1>" tab . ,(aref (alist-get 'windows rexel-test--attach-view) 0))
+      ("Layout of tab 2" tab . ,(aref (alist-get 'windows rexel-test--attach-view) 1))
+      ("Layout of main <3>" tab . ,(aref (alist-get 'windows rexel-test--attach-view) 2)))))
+  (should (equal (mapcar #'car (rexel--attach-choices rexel-test--attach-view nil))
+                 '("main: shell <00000b>" "main: shell <00000a>" "tab 2: shell"
+                   "Layout of main <1>" "Layout of tab 2" "Layout of main <3>"))))
+
+(ert-deftest rexel-test-block-description ()
+  "A program is named after its script, argv0 or name, its directory after home."
+  (let ((block (rexel-test--block "block:00000a")))
+    (dolist (case '((((script . "/usr/lib/node_modules/x/cli.js") (argv0 . "node")
+                      (name . "node") (cwd . "/home/d/src"))
+                     "/home/d/" "cli.js in ~/src")
+                    (((argv0 . "-zsh") (name . "zsh") (cwd . "/home/d")) "/home/d" "zsh in ~")
+                    (((name . "vim") (cwd . "/home/dx")) "/home/d" "vim in /home/dx")
+                    (((name . "vim") (cwd . "/etc")) "/" "vim in ~/etc")
+                    (((name . "vim")) nil "vim")
+                    (((name . "login")) nil "shell")))
+      (should (equal (nth 2 case)
+                     (rexel--block-description
+                      block `((foreground . ,(nth 0 case)) (home . ,(nth 1 case)))))))
+    (should (equal "shell" (rexel--block-description block nil)))))
+
+(defmacro rexel-test--with-attach (view sent &rest body)
+  "Run BODY with a fake connection attached to session \"s\" of VIEW.
+Each terminal block of VIEW has a buffer, two windows show the scratch
+buffer, and the requests sent collect in SENT.  Timers do not run until
+BODY calls `run-timers'."
+  (declare (indent 2))
+  `(rexel-test--with-fake-conn ,sent
+     (let ((conn rexel--conn)
+           (buffers nil)
+           (timers nil))
+       (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work")
+       (pcase-dolist (`(,bid . ,_) (rexel--view-terminal-blocks ,view))
+         (let ((buf (generate-new-buffer bid)))
+           (push buf buffers)
+           (puthash bid buf (rexel--conn-blocks conn))))
+       (cl-letf (((symbol-function 'run-at-time)
+                  (lambda (_time _repeat function &rest args)
+                    (setq timers (append timers (list (cons function args))))
+                    (timer-create))))
+         (cl-flet ((run-timers ()
+                     (while timers
+                       (let ((timer (pop timers)))
+                         (apply (car timer) (cdr timer))))))
+           (save-window-excursion
+             (switch-to-buffer "*scratch*")
+             (delete-other-windows)
+             (split-window)
+             (unwind-protect (progn ,@body)
+               (mapc #'kill-buffer buffers))))))))
+
+(defun rexel-test--shown ()
+  "Return the sorted names of the buffers the windows show."
+  (sort (mapcar (lambda (w) (buffer-name (window-buffer w))) (window-list))
+        #'string<))
+
+(defun rexel-test--answer-processes (conn sent answers)
+  "Answer the process requests in SENT on CONN from ANSWERS, by block ID.
+A block without an answer gets a conflict error."
+  (dolist (request (reverse sent))
+    (let ((answer (assoc (alist-get 'block_id (alist-get 'payload request)) answers)))
+      (if answer
+          (rexel-test--respond conn request (cdr answer))
+        (rexel-test--respond conn request nil '((code . "conflict")))))))
+
+(ert-deftest rexel-test-attach-one-block-asks-nothing ()
+  "A session of one block shows it without asking or fetching anything."
+  (let ((view `((active_window_id . "w")
+                (windows . [,(rexel-test--tab "w" "x" '((block_id . "block:00000a"))
+                                              (rexel-test--block "block:00000a"))]))))
+    (rexel-test--with-attach view sent
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (error "Asked"))))
+        (rexel--show-attached conn "s" view 'ask)
+        (run-timers))
+      (should-not sent)
+      (should (equal '("*scratch*" "block:00000a") (rexel-test--shown))))))
+
+(ert-deftest rexel-test-attach-asks-after-process-reports ()
+  "`ask' prompts from a timer once every report is in, the focused block first."
+  (rexel-test--with-attach rexel-test--attach-view sent
+    (let (offered default)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt table _pred _require _initial _hist def)
+                   (setq offered (all-completions "" table)
+                         default def)
+                   "main: shell")))
+        (rexel--show-attached conn "s" rexel-test--attach-view 'ask)
+        (should (= 3 (length sent)))
+        (rexel-test--answer-processes
+         conn sent '(("block:00000b" (foreground (name . "vim")))))
+        (should-not offered)
+        (run-timers))
+      (should (equal '("main: vim" "main: shell") (seq-take offered 2)))
+      (should (= 6 (length offered)))
+      (should (equal "main: vim" default))
+      (should (equal "block:00000a" (buffer-name (window-buffer))))
+      (should (equal '("*scratch*" "block:00000a") (rexel-test--shown))))))
+
+(ert-deftest rexel-test-attach-asks-without-missing-reports ()
+  "Reports lost with the connection do not keep the prompt away."
+  (rexel-test--with-attach rexel-test--attach-view sent
+    (let (offered)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt table &rest _)
+                   (setq offered (all-completions "" table))
+                   (car offered))))
+        (rexel--show-attached conn "s" rexel-test--attach-view 'ask)
+        (rexel-test--respond conn (car (last sent)) '((foreground (name . "vim"))))
+        (clrhash (rexel--conn-pending conn))
+        (run-timers))
+      (should (equal '("main: shell" "main: vim" "tab 2: shell")
+                     (seq-take offered 3))))))
+
+(ert-deftest rexel-test-attach-detached-asks-nothing ()
+  "A session detached before or during the prompt is not shown."
+  (rexel-test--with-attach rexel-test--attach-view sent
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) (error "Asked"))))
+      (rexel--show-attached conn "s" rexel-test--attach-view 'ask)
+      (rexel--forget-session conn "s")
+      (rexel-test--answer-processes conn sent nil)
+      (run-timers)))
+  (rexel-test--with-attach rexel-test--attach-view sent
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _)
+                 (rexel--forget-session conn "s")
+                 "main: shell <00000a>")))
+      (rexel--show-attached conn "s" rexel-test--attach-view 'ask)
+      (rexel-test--answer-processes conn sent nil)
+      (run-timers))
+    (should (equal '("*scratch*" "*scratch*") (rexel-test--shown)))))
+
+(ert-deftest rexel-test-attach-quit-is-caught ()
+  "A quit out of the prompt ends it and shows nothing."
+  (rexel-test--with-attach rexel-test--attach-view sent
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) (signal 'quit nil))))
+      (rexel--show-attached conn "s" rexel-test--attach-view 'ask)
+      (rexel-test--answer-processes conn sent nil)
+      (run-timers))
+    (should (equal '("*scratch*" "*scratch*") (rexel-test--shown)))))
+
+(ert-deftest rexel-test-attach-tab-is-shown-as-it-is-now ()
+  "A tab chosen is looked up in a fresh view, and a tab gone is reported."
+  (rexel-test--with-attach rexel-test--attach-view sent
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) "Layout of main <1>"))
+              ((symbol-function 'rexel--apply-view) #'ignore))
+      (rexel--show-attached conn "s" rexel-test--attach-view 'ask)
+      (rexel-test--answer-processes conn sent nil)
+      (run-timers)
+      (should (equal "session.view" (alist-get 'method (car sent))))
+      (should (equal '("*scratch*" "*scratch*") (rexel-test--shown)))
+      (rexel-test--respond conn (car sent) rexel-test--attach-view)
+      (should (equal '("block:00000a" "block:00000b") (rexel-test--shown)))
+      (should (equal "block:00000b" (buffer-name (window-buffer))))
+      (delete-other-windows)
+      (split-window)
+      (rexel--show-attached conn "s" rexel-test--attach-view 'ask)
+      (rexel-test--answer-processes conn (seq-take sent 3) nil)
+      (run-timers)
+      (rexel-test--respond conn (car sent) '((windows . [])))
+      (should (= 2 (length (window-list)))))))
+
+(ert-deftest rexel-test-attach-tab-choice ()
+  "A tab of one block pops to it; a tab with a split rebuilds the windows."
+  (rexel-test--with-attach rexel-test--attach-view sent
+    (let ((tabs (alist-get 'windows rexel-test--attach-view)))
+      (rexel--show-tab conn "s" rexel-test--attach-view (aref tabs 1))
+      (should (equal '("*scratch*" "block:00000c") (rexel-test--shown)))
+      (rexel--show-tab conn "s" rexel-test--attach-view (aref tabs 0))
+      (should (equal '("block:00000a" "block:00000b") (rexel-test--shown)))
+      (should (equal "block:00000b" (buffer-name (window-buffer)))))))
+
+(ert-deftest rexel-test-attach-display-option ()
+  "nil and `focused' show the focused block, `layout' the active tab's layout."
+  (dolist (display '(nil focused))
+    (rexel-test--with-attach rexel-test--attach-view sent
+      (rexel--show-attached conn "s" rexel-test--attach-view display)
+      (should (equal "block:00000b" (buffer-name (window-buffer))))
+      (should (equal '("*scratch*" "block:00000b") (rexel-test--shown)))))
+  (rexel-test--with-attach rexel-test--attach-view sent
+    (rexel--show-attached conn "s" rexel-test--attach-view 'layout)
+    (should-not sent)
+    (should (equal '("block:00000a" "block:00000b") (rexel-test--shown)))))
+
+(ert-deftest rexel-test-attach-layout-without-tiles-shows-focused ()
+  "`layout' falls back to the focused block when the active tab has no layout."
+  (let ((view `((active_window_id . "w")
+                (windows . [,(rexel-test--tab "w" "x" nil
+                                              (rexel-test--block "block:00000a")
+                                              (rexel-test--block "block:00000b"))]))))
+    (rexel-test--with-attach view sent
+      (rexel--show-attached conn "s" view 'layout)
+      (should (equal '("*scratch*" "block:00000a") (rexel-test--shown))))))
+
 (ert-deftest rexel-test-reattach-answer-after-detach-is-dropped ()
   "A session detached before its `session.attach' answer stays detached."
   (rexel-test--with-fake-conn sent

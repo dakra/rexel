@@ -250,6 +250,12 @@ Its prompt is \"$ \"."
     (insert string)
     string))
 
+(defun rexel-elate-choices ()
+  "Return the completions the open minibuffer offers, in their order."
+  (with-selected-window (or (active-minibuffer-window)
+                            (error "No minibuffer is open"))
+    (all-completions "" minibuffer-completion-table)))
+
 (defun rexel-elate-answer-label (&optional suffix)
   "Put `rexel-elate-label' plus SUFFIX into the open minibuffer."
   (rexel-elate-answer (concat rexel-elate-label suffix)))
