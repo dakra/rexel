@@ -790,6 +790,9 @@ Nil until the answer to `data.connect'.")
 (defvar-local rexel--size-inflight nil
   "The connection a size request is in flight on, or nil.")
 
+(defvar-local rexel--theme-inflight nil
+  "The connection a theme request is in flight on, or nil.")
+
 (defvar-local rexel--out-pending nil
   "Typed bytes not yet sent to the server.")
 
@@ -1063,7 +1066,8 @@ A block whose `data.connect' went with the connection is streamed again."
             (message "rexel: %s: keys typed as the connection dropped may be lost"
                      (buffer-name)))
           (setq rexel--out-inflight nil
-                rexel--size-inflight nil)
+                rexel--size-inflight nil
+                rexel--theme-inflight nil)
           (unless rexel--data-state
             (setq rexel--data-state 'closed)))))
     (rexel--request
@@ -1085,7 +1089,9 @@ A block whose `data.connect' went with the connection is streamed again."
            (rexel--flush-out buf))
          (rexel--apply-view conn sid (alist-get 'view result))
          (dolist (buf (rexel--session-buffers sid))
-           (with-current-buffer buf (rexel--sync-size)))))))))
+           (with-current-buffer buf
+             (rexel--sync-theme)
+             (rexel--sync-size)))))))))
 
 (defun rexel--show-focused-block (conn view)
   "Pop to the buffer of VIEW's focused block on CONN.
@@ -1210,7 +1216,8 @@ A buffer whose stream ended earlier is reset and streamed again."
     (unless (eq rexel--conn conn)
       (setq rexel--out-pending nil
             rexel--out-inflight nil
-            rexel--size-inflight nil))
+            rexel--size-inflight nil
+            rexel--theme-inflight nil))
     (setq rexel--conn conn
           rexel--session-id sid
           rexel--block-id bid
@@ -1499,6 +1506,7 @@ ticket, and is tried once more with a new one."
              (setq rexel--data-state state)
              ;; Sizes asked for during the RESUME were not sent.
              (when (eq state 'live)
+               (rexel--sync-theme)
                (rexel--sync-size)))
          (setf (rexel--stream-marker s)
                (format "\e_rex1;%d;"
@@ -1590,6 +1598,7 @@ Signal an error on a record longer than `rexel--max-record-bytes'."
        (setq rexel--data-state 'live)
        (when (> (length rest) 0)
          (rexel--on-live-bytes rest))
+       (rexel--sync-theme)
        (rexel--sync-size)))))
 
 (defconst rexel--max-message-bytes 65536
@@ -2106,6 +2115,67 @@ once this client owns the block, when the server reports it in the stream."
           (error
            (setq rexel--size-inflight nil)
            (signal (car err) (cdr err))))))))
+
+
+;;; Colors
+
+(defun rexel--theme ()
+  "Return the colors of ghostel's faces as arguments for `set_theme'."
+  (let ((bg (ghostel--face-hex-color 'ghostel-default :background)))
+    `((foreground . ,(ghostel--face-hex-color 'ghostel-default :foreground))
+      (background . ,bg)
+      (scheme . ,(symbol-name (ghostel--hex-color-scheme bg)))
+      ,@(when (face-background 'cursor nil t)
+          `((cursor . ,(ghostel--face-hex-color 'cursor :background))))
+      ,@(when ghostel-color-palette
+          `((palette
+             . ,(vconcat
+                 (seq-map-indexed
+                  (lambda (face i)
+                    (format "%d=%s" i (ghostel--face-hex-color face :foreground)))
+                  ghostel-color-palette))))))))
+
+(defun rexel--sync-theme ()
+  "Send this block's colors to the server.
+They apply while this client owns the block, and the server answers the
+color queries of the block's programs with them.  One request is sent at
+a time; colors that changed meanwhile follow when it completes."
+  (when (and (rexel--ready-p rexel--conn)
+             (eq rexel--data-state 'live)
+             (not (eq rexel--theme-inflight rexel--conn))
+             (not (member rexel--session-id (rexel--conn-attaching rexel--conn))))
+    (let ((theme (rexel--theme))
+          (conn rexel--conn)
+          (buf (current-buffer)))
+      (setq rexel--theme-inflight conn)
+      (condition-case err
+          (rexel--request
+           conn "com.superlogical.terminal.set_theme"
+           `((session_id . ,rexel--session-id) (block_id . ,rexel--block-id)
+             (args . ,theme))
+           (lambda (_result err)
+             (when (buffer-live-p buf)
+               (with-current-buffer buf
+                 (when (eq rexel--theme-inflight conn)
+                   (setq rexel--theme-inflight nil)
+                   (cond
+                    (err (message "rexel: set_theme: %s"
+                                  (rexel--error-string err)))
+                    ((not (equal theme (rexel--theme)))
+                     (rexel--sync-theme))))))))
+        ;; A theme change must not fail for a connection that is going down.
+        (error
+         (setq rexel--theme-inflight nil)
+         (message "rexel: set_theme: %s" (error-message-string err)))))))
+
+(defun rexel--sync-themes (&rest _)
+  "Send the colors of every block buffer to its server."
+  (dolist (buf (buffer-list))
+    (with-current-buffer buf
+      (rexel--sync-theme))))
+
+(add-hook 'enable-theme-functions #'rexel--sync-themes)
+(add-hook 'disable-theme-functions #'rexel--sync-themes)
 
 
 ;;; Commands

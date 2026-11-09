@@ -1382,6 +1382,58 @@ of the buffer it was asked from, even when the connection opens later."
     (should (equal '((columns . 100) (rows . 30))
                    (alist-get 'args (alist-get 'payload (car sent)))))))
 
+(ert-deftest rexel-test-theme-requests-serialize ()
+  (rexel-test--with-fake-conn sent
+    (setq rexel--data-state 'live)
+    (let ((theme '((background . "#000000"))))
+      (cl-letf (((symbol-function 'rexel--theme) (lambda () theme)))
+        (rexel--sync-theme)
+        (should (equal "com.superlogical.terminal.set_theme"
+                       (alist-get 'method (car sent))))
+        (should (equal theme (alist-get 'args (alist-get 'payload (car sent)))))
+        ;; Colors that change while the request is in flight follow it.
+        (setq theme '((background . "#ffffff")))
+        (rexel--sync-theme)
+        (should (= 1 (length sent)))
+        (rexel-test--respond rexel--conn (car sent))
+        (should (equal theme (alist-get 'args (alist-get 'payload (car sent)))))
+        (rexel-test--respond rexel--conn (car sent))
+        (should (= 2 (length sent)))))))
+
+(ert-deftest rexel-test-theme-waits-for-live ()
+  (rexel-test--with-fake-conn sent
+    (setq rexel--data-state 'snapshot)
+    (rexel--sync-theme)
+    (should-not sent)))
+
+(ert-deftest rexel-test-theme-send-error-does-not-signal ()
+  (rexel-test--with-fake-conn _sent
+    (setq rexel--data-state 'live)
+    (cl-letf (((symbol-function 'rexel--send) (lambda (&rest _) (error "Boom"))))
+      (rexel--sync-theme))
+    (should-not rexel--theme-inflight)))
+
+(ert-deftest rexel-test-reattach-sends-theme-again ()
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn))
+      (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work")
+      (setq rexel--data-state 'live
+            rexel--block-id "block:123456"
+            rexel--theme-inflight conn)
+      (puthash rexel--block-id (current-buffer) (rexel--conn-blocks conn))
+      (rexel--reattach conn)
+      (rexel-test--respond conn (car sent)
+                           `((view . ,(rexel-test--view rexel--block-id))))
+      (should (rexel-test--find "com.superlogical.terminal.set_theme" sent)))))
+
+(ert-deftest rexel-test-theme-names-ghostel-colors ()
+  (let ((theme (rexel--theme)))
+    (should (string-match-p "\\`#[0-9a-f]\\{6\\}\\'" (alist-get 'background theme)))
+    (should (member (alist-get 'scheme theme) '("light" "dark")))
+    (should (= 16 (length (alist-get 'palette theme))))
+    (should (string-match-p "\\`0=#[0-9a-f]\\{6\\}\\'"
+                            (aref (alist-get 'palette theme) 0)))))
+
 (ert-deftest rexel-test-size-requests-wait-for-live ()
   (rexel-test--with-fake-conn sent
     (setq rexel--data-state 'snapshot)
@@ -3025,6 +3077,7 @@ is waiting to be read."
                 ((symbol-function 'ghostel--apply-bold-config) #'ignore)
                 ((symbol-function 'ghostel--set-size-with-cell-dims) #'ignore)
                 ((symbol-function 'ghostel--invalidate) #'ignore)
+                ((symbol-function 'rexel--sync-theme) #'ignore)
                 ((symbol-function 'rexel--sync-size) #'ignore)
                 ((symbol-function 'rexel--flush-out) #'ignore))
         (rexel--on-live-bytes "\e[c")

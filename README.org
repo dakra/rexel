@@ -19,8 +19,6 @@ same session at the same time.
 - Directory tracking and command state from the processes Rex reports.
 - Your ghostel key bindings and settings apply in every block buffer.
 
-Rexel is a prototype; see [[*Status][Status]] for what is missing.
-
 * Quick start
 
 You need a Rex server (on macOS the Rex Beta app includes one) and, from
@@ -307,13 +305,6 @@ meanwhile is sent once it is back, but keys on their way when the
 connection dropped may be lost.  A connection that stays silent is pinged
 and counts as dropped when the server does not answer, so a link left dead
 by a sleep or a network change recovers too.
-
-Not yet supported:
-
-- Keeping Emacs windows in step with the Rex layout; =rexel-sync-layout=
-  rebuilds them on request.
-- The theme set in Rex: colors follow the Emacs theme, as in any ghostel
-  buffer.
 
 * How it works
 
