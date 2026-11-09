@@ -3143,6 +3143,34 @@ is waiting to be read."
             ((symbol-function 'call-process) (lambda (&rest _) 1)))
     (should-error (rexel-start-server) :type 'user-error)))
 
+(ert-deftest rexel-test-annotation ()
+  "A block is annotated with its tab and the state of a stream not live."
+  (with-temp-buffer
+    (setq rexel--tab "main" rexel--data-state 'live)
+    (should (equal "main" (rexel--annotation)))
+    (setq rexel--data-state 'closed)
+    (should (equal "main (disconnected)" (rexel--annotation)))
+    (setq rexel--tab nil rexel--data-state nil)
+    (should (equal "connecting" (rexel--annotation)))
+    (setq rexel--data-state 'live)
+    (should-not (rexel--annotation))))
+
+(ert-deftest rexel-test-apply-view-names-the-tab ()
+  "Applying a view records the tab of each block."
+  (rexel-test--with-attach rexel-test--attach-view sent
+    (cl-letf (((symbol-function 'rexel--ensure-block-buffer) #'ignore)
+              ((symbol-function 'rexel--session-buffers)
+               (lambda (_sid) buffers)))
+      (dolist (buf buffers)
+        (with-current-buffer buf
+          (setq rexel--block-id (buffer-name))))
+      (rexel--apply-view conn "s" rexel-test--attach-view)
+      (should (equal '("main" "main" "tab 2")
+                     (mapcar (lambda (bid)
+                               (buffer-local-value
+                                'rexel--tab (gethash bid (rexel--conn-blocks conn))))
+                             '("block:00000a" "block:00000b" "block:00000c")))))))
+
 (ert-deftest rexel-test-block-shown-from-minibuffer-is-taken-after-it ()
   "A block shown from a minibuffer is taken once that exits, if still shown."
   (let ((in-minibuffer t) (taken nil) (timers nil)

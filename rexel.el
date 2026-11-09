@@ -44,6 +44,7 @@
 (require 'websocket)
 
 (declare-function ghostel--write-vt "ghostel-module")
+(defvar ghostel-annotation-function)
 (declare-function dired-get-marked-files "dired")
 
 
@@ -811,6 +812,9 @@ Nil until the answer to `data.connect'.")
 (defvar-local rexel--shell-program nil
   "Path and argv0 of the block's shell; they change when the shell execs.")
 
+(defvar-local rexel--tab nil
+  "Name of the tab holding this block.")
+
 (defvar-local rexel--stale-prompt nil
   "The newest of `ghostel--prompt-positions' when the shell last execed.
 OSC 133 marks count again once a prompt was marked after it.")
@@ -1174,10 +1178,23 @@ already applied is ignored."
         (dolist (buf (rexel--session-buffers sid))
           (with-current-buffer buf
             (if (assoc rexel--block-id blocks)
-                (let ((name (rexel--buffer-name conn sid rexel--block-id)))
+                (let ((name (rexel--buffer-name conn sid rexel--block-id))
+                      (tab (rexel--block-tab view rexel--block-id)))
+                  (setq rexel--tab (and tab (rexel--tab-name view tab)))
                   (unless (equal name (buffer-name))
                     (rename-buffer name t)))
               (kill-buffer buf))))))))
+
+(defun rexel--annotation ()
+  "Return this block's tab, and the state of a stream that is not live.
+`ghostel-annotate-buffer' shows it in buffer pickers."
+  (let ((state (pcase rexel--data-state
+                 ('live nil)
+                 ('closed "disconnected")
+                 (_ "connecting"))))
+    (cond ((and rexel--tab state) (format "%s (%s)" rexel--tab state))
+          (rexel--tab)
+          (state))))
 
 (defun rexel--buffer-name (conn sid bid)
   "Return the buffer name for block BID of session SID on CONN."
@@ -1230,6 +1247,7 @@ A buffer whose stream ended earlier is reset and streamed again."
           ghostel-pty-out-function #'rexel--pty-out
           ghostel-resize-function #'rexel--resize
           ghostel-send-files-function #'rexel--send-files)
+    (setq-local ghostel-annotation-function #'rexel--annotation)
     (rexel-block-mode 1)
     (add-hook 'window-buffer-change-functions #'rexel--window-shown nil t)
     (add-hook 'window-selection-change-functions #'rexel--window-selected nil t)
