@@ -1930,9 +1930,37 @@ With no host known, offer to start this machine's server."
 (defconst rexel--shell-flavor "com.superlogical.terminal.shell"
   "Flavor of a new shell block.")
 
-(defun rexel--new-shell-layout ()
-  "Return a layout object holding one shell block."
-  `((block . ((flavor . ,rexel--shell-flavor)))))
+(defun rexel--new-shell-layout (&optional cwd)
+  "Return a layout object holding one shell block started in CWD.
+Without CWD the shell starts in the home directory."
+  `((block . ((flavor . ,rexel--shell-flavor)
+              ,@(when cwd `((options . ((cwd . ,cwd)))))))))
+
+(defun rexel--shell-directory (conn)
+  "Return `default-directory' as a directory on CONN's server, or nil.
+Only this machine's server shares local file names."
+  (and (null (rexel--conn-host conn))
+       (not (file-remote-p default-directory))
+       (directory-file-name (expand-file-name default-directory))))
+
+(defun rexel--block-directory (callback)
+  "Call CALLBACK with the directory for a shell beside the current block.
+That is the working directory the server reports for the block's shell,
+else `rexel--shell-directory', else nil."
+  (when (member rexel--session-id (rexel--conn-attaching rexel--conn))
+    (user-error "The session is still being reattached"))
+  (let ((fallback (rexel--shell-directory rexel--conn)))
+    (rexel--request
+     rexel--conn "com.superlogical.terminal.process"
+     `((session_id . ,rexel--session-id) (block_id . ,rexel--block-id))
+     (lambda (result err)
+       (when (and err (not (equal (alist-get 'code err) "conflict")))
+         (message "rexel: terminal.process: %s" (rexel--error-string err)))
+       (funcall callback
+                (or (alist-get 'cwd (rexel--shell-process
+                                     (alist-get 'foreground result)
+                                     (alist-get 'ancestors result)))
+                    fallback))))))
 
 ;;;###autoload
 (defun rexel-attach ()
@@ -1952,17 +1980,20 @@ server choose one.  Interactively, ask for LABEL only with a prefix argument."
    (list (and current-prefix-arg (read-string "Session label: "))))
   (when rexel-session-label-function
     (setq label (funcall rexel-session-label-function (or label ""))))
-  (rexel--connect
-   (rexel--read-host)
-   (lambda (conn)
-     (rexel--request
-      conn "session.create"
-      `(,@(unless (member label '(nil "")) `((label . ,label)))
-        (initial_windows . ,(vector `((layout . ,(rexel--new-shell-layout))))))
-      (lambda (result err)
-        (if err
-            (message "rexel: session.create: %s" (rexel--error-string err))
-          (rexel--attach-session conn (alist-get 'session_id result))))))))
+  (let ((dir default-directory))
+    (rexel--connect
+     (rexel--read-host)
+     (lambda (conn)
+       (let* ((default-directory dir)
+              (layout (rexel--new-shell-layout (rexel--shell-directory conn))))
+         (rexel--request
+          conn "session.create"
+          `(,@(unless (member label '(nil "")) `((label . ,label)))
+            (initial_windows . ,(vector `((layout . ,layout)))))
+          (lambda (result err)
+            (if err
+                (message "rexel: session.create: %s" (rexel--error-string err))
+              (rexel--attach-session conn (alist-get 'session_id result))))))))))
 
 (defun rexel-rename-session (label)
   "Label the current block's session LABEL.
@@ -2014,18 +2045,21 @@ below if `window-splittable-p' allows, else right, and let
   (rexel--ensure-block-buffer-context)
   (let* ((conn rexel--conn)
          (sid rexel--session-id)
+         (bid rexel--block-id)
          (window (selected-window))
          (side (or direction
                    (if (window-splittable-p window) 'below 'right))))
-    (rexel--request
-     conn "session.new_split"
-     `((session_id . ,sid) (anchor_id . ,rexel--block-id)
-       (direction . ,(if (memq side '(right left)) "horizontal" "vertical"))
-       (side . ,(if (memq side '(right below)) "after" "before"))
-       (layout . ,(rexel--new-shell-layout)) (focus . t))
-     (lambda (result err)
-       (rexel--show-new-blocks conn sid result err "session.new_split"
-                               direction window)))))
+    (rexel--block-directory
+     (lambda (dir)
+       (rexel--request
+        conn "session.new_split"
+        `((session_id . ,sid) (anchor_id . ,bid)
+          (direction . ,(if (memq side '(right left)) "horizontal" "vertical"))
+          (side . ,(if (memq side '(right below)) "after" "before"))
+          (layout . ,(rexel--new-shell-layout dir)) (focus . t))
+        (lambda (result err)
+          (rexel--show-new-blocks conn sid result err "session.new_split"
+                                  direction window)))))))
 
 (defun rexel-split-right ()
   "Split the current block with a new shell to its right."
@@ -2054,12 +2088,14 @@ A tab is what the Rex API calls a window."
   (rexel--ensure-block-buffer-context)
   (let ((conn rexel--conn)
         (sid rexel--session-id))
-    (rexel--request
-     conn "session.new_window"
-     `((session_id . ,sid) (layout . ,(rexel--new-shell-layout))
-       ,@(unless (string-empty-p label) `((window_label . ,label))))
-     (lambda (result err)
-       (rexel--show-new-blocks conn sid result err "session.new_window")))))
+    (rexel--block-directory
+     (lambda (dir)
+       (rexel--request
+        conn "session.new_window"
+        `((session_id . ,sid) (layout . ,(rexel--new-shell-layout dir))
+          ,@(unless (string-empty-p label) `((window_label . ,label))))
+        (lambda (result err)
+          (rexel--show-new-blocks conn sid result err "session.new_window")))))))
 
 (defun rexel--read-session ()
   "Return (CONN . SID) of the current block, else of a chosen attached session."

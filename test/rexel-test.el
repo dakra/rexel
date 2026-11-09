@@ -415,6 +415,19 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
   (should (equal "ws://10.0.0.2:7297/api/data"
                  (rexel--ws-url "http://10.0.0.2:7297" "/api/data"))))
 
+(ert-deftest rexel-test-shell-starts-in-default-directory ()
+  (let ((local (rexel--make-conn :endpoints (list "none")))
+        (remote (rexel--make-conn :endpoints (list "none") :host "studio")))
+    (let ((default-directory "~/src/"))
+      (should (equal `((block . ((flavor . ,rexel--shell-flavor)
+                                 (options . ((cwd . ,(expand-file-name "~/src")))))))
+                     (rexel--new-shell-layout (rexel--shell-directory local))))
+      (should-not (rexel--shell-directory remote)))
+    (let ((default-directory "/ssh:studio:/tmp/"))
+      (should-not (rexel--shell-directory local)))
+    (should (equal `((block . ((flavor . ,rexel--shell-flavor))))
+                   (rexel--new-shell-layout)))))
+
 (ert-deftest rexel-test-buffer-name-carries-host ()
   (let ((conn (rexel--make-conn :endpoints (list "none") :host "studio")))
     (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work")
@@ -819,6 +832,88 @@ The terminal and the stream's connection are stubbed."
 (defun rexel-test--respond (conn object &optional result err)
   "Answer the request OBJECT on CONN with RESULT or the error ERR."
   (funcall (gethash (alist-get 'id object) (rexel--conn-pending conn)) result err))
+
+(defun rexel-test--new-cwd (method sent)
+  "Return the cwd option of the newest METHOD request in SENT, or `none'."
+  (let* ((request (seq-find (lambda (o) (equal method (alist-get 'method o))) sent))
+         (layout (alist-get 'layout (alist-get 'payload request))))
+    (alist-get 'cwd (alist-get 'options (alist-get 'block layout)) 'none)))
+
+(defconst rexel-test--process-answer
+  '((foreground . ((name . "vim") (pid . 3) (cwd . "/tmp")))
+    (ancestors . [((name . "zsh") (pid . 2) (cwd . "/srv/app"))
+                  ((name . "login") (pid . 1) (cwd . "/"))]))
+  "A process report of a zsh in /srv/app running vim in /tmp.")
+
+(ert-deftest rexel-test-split-starts-in-the-shell-directory ()
+  "A split asks the server where the block's shell is and starts there."
+  (dolist (host '(nil "studio"))
+    (rexel-test--with-fake-conn sent
+      (setf (rexel--conn-host rexel--conn) host)
+      (let ((default-directory "/usr/lib/"))
+        (rexel-split 'right))
+      (should (= 1 (length sent)))
+      (should (equal "com.superlogical.terminal.process"
+                     (alist-get 'method (car sent))))
+      (should (equal "b" (alist-get 'block_id (alist-get 'payload (car sent)))))
+      (rexel-test--respond rexel--conn (car sent) rexel-test--process-answer)
+      (should (equal "/srv/app" (rexel-test--new-cwd "session.new_split" sent))))))
+
+(ert-deftest rexel-test-split-without-shell-directory-falls-back ()
+  "Without an answer a split starts in `default-directory' on this machine's
+server and in the home directory elsewhere; only other errors than a
+conflict are shown."
+  (dolist (case '((nil "conflict" "/usr/lib" nil)
+                  (nil "internal" "/usr/lib" t)
+                  ("studio" "conflict" none nil)))
+    (rexel-test--with-fake-conn sent
+      (setf (rexel--conn-host rexel--conn) (nth 0 case))
+      (let ((default-directory "/usr/lib/"))
+        (rexel-split 'right))
+      (let ((shown nil))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (&rest args) (setq shown (apply #'format args)))))
+          (rexel-test--respond rexel--conn (car sent) nil
+                               `((code . ,(nth 1 case)) (message . "m"))))
+        (should (eq (nth 3 case) (and shown t))))
+      (should (equal (nth 2 case) (rexel-test--new-cwd "session.new_split" sent))))))
+
+(ert-deftest rexel-test-split-waits-for-reattach ()
+  "A split while the session is being reattached is refused."
+  (rexel-test--with-fake-conn sent
+    (setf (rexel--conn-attaching rexel--conn) (list "s"))
+    (should-error (rexel-split 'right) :type 'user-error)
+    (should-not sent)))
+
+(ert-deftest rexel-test-new-tab-starts-in-the-shell-directory ()
+  (rexel-test--with-fake-conn sent
+    (setf (rexel--conn-host rexel--conn) "studio")
+    (rexel-new-tab "logs")
+    (rexel-test--respond rexel--conn (car sent) rexel-test--process-answer)
+    (should (equal "/srv/app" (rexel-test--new-cwd "session.new_window" sent)))
+    (should (equal "logs" (alist-get 'window_label
+                                     (alist-get 'payload (car sent)))))))
+
+(ert-deftest rexel-test-new-session-starts-in-default-directory ()
+  "A new session on this machine's server starts in the `default-directory'
+of the buffer it was asked from, even when the connection opens later."
+  (rexel-test--with-fake-conn sent
+    (let ((rexel-session-label-function nil)
+          (conn rexel--conn)
+          ready)
+      (cl-letf (((symbol-function 'rexel--read-host) (lambda () '(nil "sock")))
+                ((symbol-function 'rexel--connect)
+                 (lambda (_host callback) (setq ready callback))))
+        (let ((default-directory "/usr/lib/"))
+          (rexel-new-session "work"))
+        (with-temp-buffer
+          (setq default-directory "/tmp/")
+          (funcall ready conn)))
+      (let* ((payload (alist-get 'payload (car sent)))
+             (window (aref (alist-get 'initial_windows payload) 0))
+             (block (alist-get 'block (alist-get 'layout window))))
+        (should (equal "work" (alist-get 'label payload)))
+        (should (equal "/usr/lib" (alist-get 'cwd (alist-get 'options block))))))))
 
 (ert-deftest rexel-test-pty-out-during-send-waits-for-the-answer ()
   "Bytes typed while a write is being sent follow its answer."

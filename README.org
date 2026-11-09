@@ -47,7 +47,8 @@ machine's (from =rex server status=), the hosts known to Rex (=rex hosts=)
 and =rexel-hosts=.
 
 =M-x rexel-new-session= creates a session with one shell and attaches to it,
-asking for its label with a prefix argument.  =rexel-session-label-function=
+asking for its label with a prefix argument.  On this machine's server the
+shell starts in =default-directory=, elsewhere in the home directory.  =rexel-session-label-function=
 can rewrite the label; this one names a session after the current project
 unless another label was given:
 
@@ -105,6 +106,9 @@ In a block buffer =C-c C-r= (=rexel-prefix-key=) prefixes:
 | ~u~        | ~rexel-upload-file~, see below               |
 | ~x~        | ~rexel-close-block~, ends the program        |
 | ~d~        | ~rexel-detach~, keeps the session running    |
+
+A split or tab's shell starts in the directory of the current block's
+shell.
 
 Killing a block buffer only closes the stream; the block keeps running.
 

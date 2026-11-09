@@ -78,6 +78,10 @@
     {"wait": "until", "pred": "(rexel-elate-fits-p)"},
 
     {"group": "split-right", "comment": "C-c C-r % makes a shell to the right, selected and sized to its window"},
+    {"type": "cd /usr/share && echo c0-ok"},
+    {"keys": "RET"},
+    {"wait": "until", "pred": "(rexel-elate-has \"^c0-ok$\")"},
+    {"eval": "(setq default-directory \"/usr/lib/\")", "comment": "a default-directory the shell is not in, which the split-directory group expects the split to ignore"},
     {"keys": "C-c C-r %"},
     {"wait": "until", "pred": "(and (= 2 (length (rexel-elate-blocks))) (not (eq (window-buffer) rexel-elate-first)) (rexel-elate-live-p))"},
     {"assert": {"eval": "(and (= 2 (length (window-list))) (eq (window-buffer (window-in-direction 'left)) rexel-elate-first))"}},
@@ -90,6 +94,12 @@
     {"wait": "until", "pred": "(rexel-elate-has (rexel-elate-size-line \"z3\"))"},
     {"assert": {"eval": "(< (car (rexel-elate-size)) 62)"}},
     {"wait": "until", "pred": "(rexel-elate-fits-p rexel-elate-first)", "comment": "the first block shrank with its window"},
+
+    {"group": "split-directory", "comment": "a split's shell starts in the directory of the current block's shell, also after a cd that reports nothing"},
+    {"type": "echo d1:$PWD"},
+    {"keys": "RET"},
+    {"wait": "until", "pred": "(rexel-elate-has \"^d1:/\")"},
+    {"assert": {"eval": "(rexel-elate-has \"^d1:/usr/share$\")"}},
 
     {"group": "split-below", "comment": "C-c C-r \" makes a shell below the current block"},
     {"eval": "(setq rexel-elate-anchor (window-buffer))"},

@@ -13,6 +13,7 @@
     {"group": "new-session", "comment": "C-u M-x rexel-new-session asks for a label, creates the session and shows its shell"},
     {"eval": "(advice-add 'ghostel--osc133-marker :override #'ignore '((name . rexel-elate-no-osc133)))", "comment": "OSC 133 marks from the user's shell startup files go unseen: the block's shell counts as one without integration"},
     {"eval": "(rexel-elate-use \"{{host}}\")"},
+    {"eval": "(setq default-directory \"/usr/lib/\")", "comment": "the directory the start-directory group expects the shell in"},
     {"keys": "C-u M-x rexel-new-session RET", "delivery": "events"},
     {"wait": "prompt"},
     {"assert": {"state": {"minibuffer.prompt": "Session label: "}}},
@@ -30,6 +31,12 @@
     {"type": "echo s1-$((6*7))"},
     {"keys": "RET"},
     {"wait": "until", "pred": "(rexel-elate-has \"^s1-42$\")"},
+
+    {"group": "start-directory", "comment": "on this machine's server the new session's shell starts in default-directory; on a labelled host, in the home directory"},
+    {"type": "echo d0:$PWD"},
+    {"keys": "RET"},
+    {"wait": "until", "pred": "(rexel-elate-has \"^d0:/\")"},
+    {"assert": {"eval": "(eq (rexel-elate-has \"^d0:/usr/lib$\") {{dirfollows}})"}},
 
     {"group": "directory", "comment": "default-directory follows the shell on this machine's server and stays put on a labelled host, whose paths are another machine's"},
     {"eval": "(setq rexel-elate-dir0 default-directory)"},
