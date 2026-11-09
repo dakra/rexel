@@ -2,23 +2,70 @@
 
 Rex multiplexer client for Emacs, built on [[https://github.com/dakra/ghostel][Ghostel]].
 
-[[https://www.superlogical.com/rex][Rex]] streams each terminal to its clients as a libghostty snapshot
-followed by the raw PTY bytes.  Ghostel runs libghostty, so Rexel feeds
-that stream straight into a ghostel buffer: scrollback, search, copy mode
-and key encoding work as in a local terminal, and the session keeps
-running on the Rex server when Emacs goes away.
+[[https://www.superlogical.com/rex][Rex]] is a terminal multiplexer: shells run in sessions on a Rex server and
+keep running while no client is attached, as in tmux.  Rexel is a Rex
+client for Emacs.  Each terminal of a session becomes a ghostel buffer with
+a full terminal emulator, so typing, scrollback, search and copy mode work
+as in a local terminal, and the shell keeps running on the server when
+Emacs goes away.
 
-Rex has no Linux client of its own yet; Rexel brings its sessions to Emacs
-there.
+The server can be this machine, or a remote one reached over Tailscale or
+an ssh tunnel.  Rex.app, or any other Rex client, can be attached to the
+same session at the same time.
 
-Prototype status: attaching, typing, resizing and the basic layout
-commands work.  A dropped data connection resumes its stream, and a lost
-control connection is redialled with backoff while sessions are attached;
-typing meanwhile is sent once it is back, but keys on their way when the
-connection dropped may be lost.  A connection that stays silent
-is pinged and counts as dropped when the server does not answer, so a link
-left dead by a sleep or a network change recovers too.  Colors follow the
-Emacs theme as in any ghostel buffer; the theme set in Rex is not applied.
+- Attach to running sessions, create new ones, split and open tabs from Emacs.
+- Survives dropped connections, sleep and network changes.
+- Drop or paste files onto a terminal to send them to the server's machine.
+- Directory tracking and command state from the processes Rex reports.
+- Your ghostel key bindings and settings apply in every block buffer.
+
+Rexel is a prototype; see [[*Status][Status]] for what is missing.
+
+* Quick start
+
+You need a Rex server (on macOS the Rex Beta app includes one) and, from
+MELPA, ghostel and websocket.  Rexel itself is not on MELPA yet; on Emacs
+30 and later:
+
+#+begin_src emacs-lisp
+(use-package rexel
+  :vc (:url "https://github.com/dakra/rexel")
+  ;; Session and block commands from any buffer
+  :bind-keymap ("C-c C-r" . rexel-prefix-map)
+  :custom
+  ;; Show a session's focused block instead of asking what to show
+  (rexel-attach-display 'focused)
+  ;; A remote server, over Tailscale or an ssh tunnel to its socket
+  (rexel-hosts '(("studio" "rex.tail1234.ts.net" "/tmp/studio.sock"))))
+#+end_src
+
+Only the =:vc= line is needed.  The others make the session and block
+commands available everywhere under =C-c C-r= (in a block buffer they are
+there anyway), skip the question which block of a session to show, and
+name a remote server; this machine's server is found on its own.  See
+[[*Servers][Servers]] for Tailscale and ssh.
+
+On Emacs 29, =M-x package-vc-install RET https://github.com/dakra/rexel=;
+on Emacs 28, clone the repository and add it to =load-path=.
+
+Then =M-x rexel-new-session= starts a shell in a new Rex session and
+=M-x rexel-attach= picks a running one.  With no Rex server running, rexel
+offers to start one.
+
+* A first session
+
+1. =M-x rexel-new-session= opens a shell in the buffer =*rex:SESSION:ID*=,
+   in the current directory.
+2. =C-c C-r 3= splits it to the right with a second shell in the same
+   directory; =C-c C-r c= opens a new tab.
+3. A file dropped on the buffer is sent to the server's machine and its
+   path typed into the terminal.
+4. =C-c C-r d= detaches: the buffers go, the shells keep running.
+5. Later, or from another Emacs, =M-x rexel-attach= brings the session back
+   with its scrollback, and =C-c C-r == lays out the tab's blocks in the
+   frame's windows.
+
+The rest of this document covers each part in detail.
 
 * Requirements
 
@@ -34,39 +81,18 @@ Emacs theme as in any ghostel buffer; the theme set in Rex is not applied.
   =rexel-autostart-server= to =t= to skip the question or =nil= to never start
   one.  With systemd, =systemctl --user enable --now rex.socket= starts your
   own server on demand instead.
-- A ghostel that has =ghostel-snapshot-restore=, with its native module.
+- [[https://github.com/dakra/ghostel][Ghostel]] 0.62.0 or later, with its native module.
 - [[https://github.com/ahyatt/emacs-websocket][websocket]] 1.15 or later.
-- Emacs with native JSON support (=json-serialize=): built in since Emacs 30,
-  libjansson on 28 and 29.
+- Emacs 28.1 or later with native JSON support (=json-serialize=): built in
+  since Emacs 30, libjansson on 28 and 29.
 
-* Usage
+* Servers
 
-=M-x rexel-attach= asks for a server when more than one is known, lists its
-sessions and opens one ghostel buffer per terminal block.  Servers are this
-machine's (from =rex server status=), the hosts known to Rex (=rex hosts=)
-and =rexel-hosts=.
+=M-x rexel-attach= and =M-x rexel-new-session= ask for a server when more
+than one is known.  Servers are this machine's (from =rex server status=),
+the hosts known to Rex (=rex hosts=) and =rexel-hosts=.
 
-For a session of several blocks it then asks what to show: a block, named
-after its tab and the program and directory running in it, with the
-focused one first, or a tab's layout.  A block pops up and leaves your
-windows as they are; the layout of a tab with a split rebuilds the frame's
-windows from it, as =rexel-sync-layout= does.  =rexel-attach-display= set to
-=focused= shows the focused block without asking, and =layout= the active
-tab's layout; =C-u M-x rexel-attach= asks whatever it is set to.
-
-=M-x rexel-new-session= creates a session with one shell and attaches to it,
-asking for its label with a prefix argument.  On this machine's server the
-shell starts in =default-directory=, elsewhere in the home directory.  =rexel-session-label-function=
-can rewrite the label; this one names a session after the current project
-unless another label was given:
-
-#+begin_src emacs-lisp
-(setq rexel-session-label-function
-      (lambda (label)
-        (if-let* ((p (and (string-empty-p label) (project-current))))
-            (project-name p)
-          label)))
-#+end_src
+** Tailscale
 
 A remote server is reached over Tailscale, which is built into Rex.  On
 the server, =rex server tailscale on= joins it to your tailnet as a device
@@ -79,13 +105,7 @@ Then add the host, which Rex and rexel both use:
 rex hosts add studio rex.tail1234.ts.net
 #+end_src
 
-Without =rex= on this machine, name the address in =rexel-hosts= instead:
-=(setq rexel-hosts '(("studio" . "rex.tail1234.ts.net")))=.  An address
-without a scheme is reached over https only; =http://HOST:PORT= names a
-plain listener.  A host alone, without port or path, is tried on its
-scheme's port, then on Rex's port 7297.  A host with several endpoints is
-tried at each in order; a redial starts with the one that last answered.
-Buffers of a host are named =*rex:SESSION@HOST:ID*=.
+** ssh
 
 Without Tailscale, forward the server's socket over ssh.  For a Linux
 server, with your user id on it in the path:
@@ -100,31 +120,100 @@ rex hosts add devbox unix:///tmp/devbox.sock
 shared Linux server is at =/run/rex/server.sock= and a macOS one at
 =~/Library/Application Support/rex/server.sock=.
 
+** Without =rex= on this machine
+
+Name the servers in =rexel-hosts= instead:
+
+#+begin_src emacs-lisp
+(setq rexel-hosts
+      '(("studio" . "rex.tail1234.ts.net")
+        ("devbox" . "/tmp/devbox.sock")
+        ;; Tried in order; a redial starts with the one that last answered
+        ("laptop" "rex.tail5678.ts.net" "http://192.168.1.20:7297")))
+#+end_src
+
+An address without a scheme is reached over https only; =http://HOST:PORT=
+names a plain listener.  A host alone, without port or path, is tried on
+its scheme's port, then on Rex's port 7297.  An entry replaces a host of
+the same label known to Rex.  Buffers of a host are named
+=*rex:SESSION@HOST:ID*=.
+
+* Sessions
+
+=M-x rexel-attach= lists a server's sessions and opens one ghostel buffer
+per terminal block.  For a session of several blocks it then asks what to
+show: a block, named after its tab and the program and directory running
+in it, with the focused one first, or a tab's layout.  A block pops up and
+leaves your windows as they are; the layout of a tab with a split rebuilds
+the frame's windows from it, as =rexel-sync-layout= does.
+=rexel-attach-display= set to =focused= shows the focused block without
+asking, and =layout= the active tab's layout; =C-u M-x rexel-attach= asks
+whatever it is set to.
+
+=M-x rexel-new-session= creates a session with one shell and attaches to
+it, asking for its label with a prefix argument.  On this machine's server
+the shell starts in =default-directory=, elsewhere in the home directory.
+=rexel-session-label-function= rewrites the label of every new session.
+
+A command of your own can choose both.  This one starts a session at the
+project root, labelled after the project, on =C-x p x=:
+
+#+begin_src emacs-lisp
+(defun my/rexel-project-session ()
+  "Start a Rex session in the current project's root, named after it."
+  (interactive)
+  (let* ((project (project-current t))
+         (default-directory (project-root project)))
+    (rexel-new-session (project-name project))))
+(define-key project-prefix-map "x" #'my/rexel-project-session)
+#+end_src
+
+Killing a block buffer only closes the stream; the block keeps running.
+=C-c C-r d= detaches from the whole session and =C-c C-r x= ends the
+block's program.
+
+* Key bindings
+
 In a block buffer =C-c C-r= (=rexel-prefix-key=) prefixes:
 
 | Key        | Command                                      |
 |------------+----------------------------------------------|
-| ~%~ or ~3~ | ~rexel-split-right~                          |
-| ~"~ or ~2~ | ~rexel-split-below~                          |
+| ~3~        | ~rexel-split-right~                          |
+| ~2~        | ~rexel-split-below~                          |
 | arrow keys | split to that side, e.g. ~rexel-split-left~  |
 | ~RET~      | ~rexel-split~, below or right, where it fits |
 | ~c~        | ~rexel-new-tab~                              |
-| ~=~        | ~rexel-sync-layout~, see below               |
+| ~a~        | ~rexel-attach~                               |
+| ~n~        | ~rexel-new-session~                          |
+| ~=~        | ~rexel-sync-layout~, see [[*Layout and size][Layout and size]]       |
 | ~$~        | ~rexel-rename-session~                       |
-| ~u~        | ~rexel-upload-file~, see below               |
+| ~u~        | ~rexel-upload-file~, see [[*Uploading files][Uploading files]]       |
 | ~x~        | ~rexel-close-block~, ends the program        |
 | ~d~        | ~rexel-detach~, keeps the session running    |
 
 A split or tab's shell starts in the directory of the current block's
 shell.
 
-Killing a block buffer only closes the stream; the block keeps running.
+The map is =rexel-prefix-map=.  Bound globally, as in the [[*Quick start][Quick start]],
+its ~a~, ~n~ and ~=~ work in any buffer and ~u~ in Dired, where it sends the
+marked files to a block buffer you pick; the other commands need a block
+buffer.  Modes that bind =C-c C-r= themselves, such as Org, Python and
+Magit, keep it.  To move the prefix in block buffers, customize
+=rexel-prefix-key=:
+
+#+begin_src emacs-lisp
+(setopt rexel-prefix-key "C-c b")
+#+end_src
+
+All other keys behave as in any ghostel buffer.
+
+* Layout and size
 
 Emacs windows are not kept in step with the Rex layout.  ~rexel-sync-layout~
 rebuilds the selected frame's windows from the current block's Rex tab,
 with ~C-u~ from a tab picked by label; outside a block buffer it asks for an
-attached session and uses its active tab.
-Floating blocks and zoom are ignored.
+attached session and uses its active tab.  Floating blocks and zoom are
+ignored.
 
 Emacs takes ownership of a block when a window starts showing it or its
 stream reconnects, so the terminal is sized to the smallest Emacs window
@@ -132,15 +221,18 @@ showing it, as a tmux client would.  Another client such as Rex.app can
 take the block back; the terminal then follows that client's size until
 Emacs takes it again.
 
-** Uploading files
+* Uploading files
 
 A file dropped on a block buffer, or an image pasted with =M-x yank-media=,
 goes to the program in the block: Rexel sends the file to the server's
-machine and Rex types its path into the terminal, as a paste.
-~rexel-upload-file~ does the same for a file read from the minibuffer.  In
-a Dired buffer it sends the marked files to a block buffer you pick.  Files
-on a TRAMP host are fetched first, which Emacs waits for and which cannot be
-cancelled.
+machine and Rex types its path into the terminal, as a paste.  This is how
+to hand a screenshot to a coding agent running in a remote block, for
+example.
+
+~rexel-upload-file~ (=C-c C-r u=) does the same for a file read from the
+minibuffer.  In a Dired buffer it sends the marked files to a block buffer
+you pick.  Files on a TRAMP host are fetched first, which Emacs waits for
+and which cannot be cancelled.
 
 Files sent together have their paths typed together, in order, once all
 have arrived.  The server keeps them until the block closes.  It takes
@@ -154,7 +246,7 @@ nothing and is not resumed.
 The exception is this machine's server: a local file is not copied, and
 Rexel types its own path.
 
-** Shell integration
+* Shell integration
 
 The Rex server starts the shell of a block, so ghostel cannot inject its
 shell integration.  Rexel reads the processes Rex reports instead:
@@ -187,6 +279,53 @@ end
 Nushell emits OSC 7 and 133 itself; see ghostel's README for its
 =ghostel.nu=.  Sourcing the scripts is harmless when the block is shown in
 Rex.app, which uses the directory report and ignores the rest.
+
+* Customization
+
+| Option                       | Default   | Meaning                                                |
+|------------------------------+-----------+--------------------------------------------------------|
+| =rexel-hosts=                  | =nil=       | Servers besides those =rex= knows, see [[*Servers][Servers]]           |
+| =rexel-attach-display=         | =ask=       | What =rexel-attach= shows: =ask=, =focused= or =layout=        |
+| =rexel-session-label-function= | =nil=       | Rewrites the label given to =rexel-new-session=          |
+| =rexel-prefix-key=             | ="C-c C-r"= | Prefix for =rexel-prefix-map= in block buffers           |
+| =rexel-autostart-server=       | =ask=       | Start a local server when none is found: =ask=, =t= or =nil= |
+| =rexel-program=                | ="rex"=     | The Rex command-line program                           |
+
+Block buffers run =rexel-block-mode=, whose hook =rexel-block-mode-hook= runs
+in each new one.
+
+* Status
+
+Attaching, typing, resizing, uploads and the basic layout commands work.
+
+A dropped data connection resumes its stream, and a lost control
+connection is redialled with backoff while sessions are attached; typing
+meanwhile is sent once it is back, but keys on their way when the
+connection dropped may be lost.  A connection that stays silent is pinged
+and counts as dropped when the server does not answer, so a link left dead
+by a sleep or a network change recovers too.
+
+Not yet supported:
+
+- Keeping Emacs windows in step with the Rex layout; =rexel-sync-layout=
+  rebuilds them on request.
+- Floating blocks and zoom.
+- The theme set in Rex: colors follow the Emacs theme, as in any ghostel
+  buffer.
+
+* How it works
+
+Rex streams each terminal to its clients as a libghostty snapshot followed
+by the raw PTY bytes.  Ghostel runs libghostty, so Rexel feeds that stream
+straight into a ghostel buffer's terminal engine instead of emulating a
+terminal of its own; keystrokes travel back over Rex's control API.  Both
+connections are WebSockets, on the server's Unix socket or its network
+address.
+
+* Related packages
+
+- [[https://github.com/dakra/ghostel][Ghostel]], the terminal Rexel is built on.
+- [[https://github.com/dakra/ghostel-tmux][ghostel-tmux]], the same idea for tmux, through its control mode.
 
 * Development
 
