@@ -212,8 +212,11 @@ All other keys behave as in any ghostel buffer.
 Emacs windows are not kept in step with the Rex layout.  ~rexel-sync-layout~
 rebuilds the selected frame's windows from the current block's Rex tab,
 with ~C-u~ from a tab picked by label; outside a block buffer it asks for an
-attached session and uses its active tab.  Floating blocks and zoom are
-ignored.
+attached session and uses its active tab.  Only the tab's tiled layout is
+rebuilt: a block floating above it is an ordinary buffer to switch to,
+marked floating or minimized when =rexel-attach= lists it, and a tab of
+floating blocks alone shows its focused one.  Rex's zoom is not mirrored;
+=C-x 1= on a block does the same here.
 
 Emacs takes ownership of a block when a window starts showing it or its
 stream reconnects, so the terminal is sized to the smallest Emacs window
@@ -309,7 +312,6 @@ Not yet supported:
 
 - Keeping Emacs windows in step with the Rex layout; =rexel-sync-layout=
   rebuilds them on request.
-- Floating blocks and zoom.
 - The theme set in Rex: colors follow the Emacs theme, as in any ghostel
   buffer.
 

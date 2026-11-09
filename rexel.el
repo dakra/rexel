@@ -841,7 +841,7 @@ DISPLAY is a value of `rexel-attach-display'; nil shows the focused block."
            (`(tab . ,tab)
             (rexel--tab-again conn sid (alist-get 'window_id tab)
                               (apply-partially #'rexel--show-tab conn sid)))))))
-     ((and (eq display 'layout) (rexel--tab-layout tab))
+     ((and (eq display 'layout) (rexel--tab-block tab))
       (rexel--show-tab conn sid view tab))
      (t (rexel--show-focused-block conn view)))))
 
@@ -883,18 +883,61 @@ A session detached meanwhile is left alone."
       (pop-to-buffer buf))))
 
 (defun rexel--tab-layout (tab)
-  "Return the layout of TAB's tiled blocks, or nil."
+  "Return the layout of TAB's tiled blocks, or nil.
+Floating layers hold their blocks above it and are left out."
   (alist-get 'layout (seq-first (alist-get 'layers tab))))
+
+(defun rexel--tab-terminal-blocks (tab)
+  "Return TAB's terminal blocks as (BLOCK . LAYER), the tiled layer's first."
+  (let (blocks)
+    (seq-doseq (layer (alist-get 'layers tab))
+      (seq-doseq (block (alist-get 'blocks layer))
+        (when (equal (alist-get 'creator_name block) rexel--terminal-creator)
+          (push (cons block layer) blocks))))
+    (nreverse blocks)))
+
+(defun rexel--layer-minimized-p (layer)
+  "Return non-nil when Rex hides LAYER's blocks."
+  (equal (alist-get 'state layer) "minimized"))
+
+(defun rexel--layer-note (layer)
+  "Return \" (floating)\" or \" (minimized)\" for a LAYER above the layout, else \"\"."
+  (cond ((rexel--layer-minimized-p layer) " (minimized)")
+        ((equal (alist-get 'kind layer) "tiled") "")
+        (t " (floating)")))
+
+(defun rexel--tab-block (tab)
+  "Return the ID of TAB's focused terminal block, else of its first one.
+A block in a minimized layer comes last.  Nil when TAB has no terminal."
+  (let ((blocks (rexel--tab-terminal-blocks tab))
+        (focused (alist-get 'focused_block_id tab)))
+    (when-let* ((entry (or (seq-find (lambda (b) (equal (alist-get 'block_id (car b))
+                                                       focused))
+                                     blocks)
+                           (seq-find (lambda (b) (not (rexel--layer-minimized-p (cdr b))))
+                                     blocks)
+                           (car blocks))))
+      (alist-get 'block_id (car entry)))))
+
+(defun rexel--block-tab (view bid)
+  "Return the tab of VIEW holding block BID in any of its layers, or nil."
+  (seq-find (lambda (tab)
+              (seq-some (lambda (layer)
+                          (seq-some (lambda (b) (equal (alist-get 'block_id b) bid))
+                                    (alist-get 'blocks layer)))
+                        (alist-get 'layers tab)))
+            (alist-get 'windows view)))
 
 (defun rexel--show-tab (conn sid view tab)
   "Show TAB of session SID's VIEW on CONN.
-A tab with a split gets the selected frame's windows rebuilt from its
-layout; a tab of one block pops to it."
+A tab with a split gets the selected frame's windows rebuilt from its layout;
+a tab of one block pops to it, and a tab without a layout to its focused block."
   (let ((layout (rexel--tab-layout tab)))
-    (if (and layout (not (alist-get 'split layout)))
-        (unless (rexel--pop-to-block conn (alist-get 'block_id layout))
-          (message "rexel: Rex tab %s holds no terminal" (rexel--tab-name view tab)))
-      (rexel--layout-windows conn sid view tab))))
+    (if (alist-get 'split layout)
+        (rexel--layout-windows conn sid view tab)
+      (unless (rexel--pop-to-block conn (or (alist-get 'block_id layout)
+                                            (rexel--tab-block tab)))
+        (message "rexel: Rex tab %s holds no terminal" (rexel--tab-name view tab))))))
 
 (defun rexel--tab-name (view tab)
   "Return TAB's label, or for a tab without one its number in VIEW."
@@ -931,23 +974,23 @@ named by the base name of the first of its script, argv0 and name."
   "Return VIEW's terminal blocks and tabs as (NAME . CHOICE).
 CHOICE is (block . BLOCK-ID) or (tab . TAB).  PROCESSES maps block IDs
 to their `terminal.process' reports, which describe the blocks.  The
-active tab's focused block comes first, the tabs last.  A name that
-repeats gets its block's ID or its tab's number appended."
+active tab's focused block comes first, the tabs last.  A block above its
+tab's layout is marked floating or minimized.  A name that repeats gets
+its block's ID or its tab's number appended."
   (let ((focused (alist-get 'focused_block_id (rexel--active-tab view)))
         blocks tabs)
     ;; Each entry is (NAME SUFFIX . CHOICE) until the names are unique.
     (seq-do-indexed
      (lambda (tab i)
        (let ((name (rexel--tab-name view tab)))
-         (seq-doseq (layer (alist-get 'layers tab))
-           (seq-doseq (block (alist-get 'blocks layer))
-             (when (equal (alist-get 'creator_name block) rexel--terminal-creator)
-               (let ((bid (alist-get 'block_id block)))
-                 (push `(,(format "%s: %s" name
-                                  (rexel--block-description
-                                   block (cdr (assoc bid processes))))
-                         ,(substring bid -6) block . ,bid)
-                       blocks)))))
+         (pcase-dolist (`(,block . ,layer) (rexel--tab-terminal-blocks tab))
+           (let ((bid (alist-get 'block_id block)))
+             (push `(,(format "%s: %s%s" name
+                              (rexel--block-description
+                               block (cdr (assoc bid processes)))
+                              (rexel--layer-note layer))
+                     ,(substring bid -6) block . ,bid)
+                   blocks)))
          (push `(,(format "Layout of %s" name) ,(number-to-string (1+ i))
                  tab . ,tab)
                tabs)))
@@ -1100,14 +1143,12 @@ Without a focused terminal block, pop to VIEW's first terminal block."
 
 (defun rexel--view-terminal-blocks (view)
   "Return the (BLOCK-ID . LABEL) of every terminal block in VIEW."
-  (let (blocks)
-    (seq-doseq (window (alist-get 'windows view))
-      (seq-doseq (layer (alist-get 'layers window))
-        (seq-doseq (block (alist-get 'blocks layer))
-          (when (equal (alist-get 'creator_name block) rexel--terminal-creator)
-            (push (cons (alist-get 'block_id block) (alist-get 'label block))
-                  blocks)))))
-    (nreverse blocks)))
+  (mapcan (lambda (tab)
+            (mapcar (lambda (entry)
+                      (cons (alist-get 'block_id (car entry))
+                            (alist-get 'label (car entry))))
+                    (rexel--tab-terminal-blocks tab)))
+          (alist-get 'windows view)))
 
 (defun rexel--apply-view (conn sid view)
   "Make CONN's block buffers for session SID match VIEW.
@@ -2350,8 +2391,9 @@ its window as it is.  A split that does not fit shows its before side."
 The tab is the one holding the current block or, outside a block buffer,
 the active tab of a chosen attached session.  With prefix argument
 CHOOSE, pick the tab from a list.
-Every block shown becomes Emacs-owned and sized to its window.
-Floating blocks and zoom are ignored."
+Every block shown becomes Emacs-owned and sized to its window.  Blocks
+floating above the layout are left out; a tab without a layout shows
+its focused block alone."
   (interactive "P")
   (pcase-let ((`(,conn . ,sid) (rexel--read-session))
               (bid rexel--block-id))
@@ -2366,21 +2408,19 @@ Floating blocks and zoom are ignored."
                (apply-partially #'rexel--layout-windows conn sid))))
          (rexel--layout-windows
           conn sid view
-          (or (seq-find
-               (lambda (w)
-                 (seq-find (lambda (b) (equal (alist-get 'block_id b) bid))
-                           (alist-get 'blocks (seq-first (alist-get 'layers w)))))
-               (alist-get 'windows view))
-              (rexel--active-tab view))))))))
+          (or (rexel--block-tab view bid) (rexel--active-tab view))))))))
 
 (defun rexel--layout-windows (conn sid view tab)
   "Rebuild the selected frame's windows from TAB of session SID's VIEW on CONN.
-Select the window of the tab's focused block."
-  (let ((layout (rexel--tab-layout tab))
+Select the window of the tab's focused block.  A tab whose layout is
+empty shows its focused block alone."
+  (let ((layout (or (rexel--tab-layout tab)
+                    (when-let* ((bid (rexel--tab-block tab)))
+                      `((block_id . ,bid)))))
         (window (seq-find (lambda (w) (not (window-parameter w 'window-side)))
                           (window-list nil 'no-mini))))
     (if (null layout)
-        (message "rexel: Rex tab %s has no tiled blocks" (rexel--tab-name view tab))
+        (message "rexel: Rex tab %s holds no terminal" (rexel--tab-name view tab))
       (delete-other-windows window)
       (set-window-dedicated-p window nil)
       (rexel--show-layout conn sid layout (rexel--view-terminal-blocks view) window)

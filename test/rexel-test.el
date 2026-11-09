@@ -775,9 +775,9 @@ The terminal and the stream's connection are stubbed."
     (creator_name . ,(or creator rexel--terminal-creator))))
 
 (defun rexel-test--tab (id label layout &rest blocks)
-  "Return a view tab ID labelled LABEL with LAYOUT and BLOCKS in one layer."
+  "Return a view tab ID labelled LABEL with LAYOUT and BLOCKS in its tiled layer."
   `((window_id . ,id) (label . ,label) (focused_block_id . ,(caar blocks))
-    (layers . [((layout . ,layout) (blocks . ,(vconcat blocks)))])))
+    (layers . [((kind . "tiled") (layout . ,layout) (blocks . ,(vconcat blocks)))])))
 
 (defconst rexel-test--attach-view
   `((active_window_id . "w1")
@@ -1009,6 +1009,79 @@ A block without an answer gets a conflict error."
     (rexel-test--with-attach view sent
       (rexel--show-attached conn "s" view 'layout)
       (should (equal '("*scratch*" "block:00000a") (rexel-test--shown))))))
+
+(ert-deftest rexel-test-attach-layout-of-no-terminal-shows-another ()
+  "`layout' shows the first terminal when the active tab has none."
+  (let ((view `((active_window_id . "w1")
+                (windows . [,(rexel-test--tab "w1" "x" '((block_id . "block:00000d"))
+                                              (rexel-test--block "block:00000d" "web" "browser"))
+                            ,(rexel-test--tab "w2" "y" '((block_id . "block:00000a"))
+                                              (rexel-test--block "block:00000a"))
+                            ,(rexel-test--tab "w3" "z" '((block_id . "block:00000b"))
+                                              (rexel-test--block "block:00000b"))]))))
+    (rexel-test--with-attach view sent
+      (rexel--show-attached conn "s" view 'layout)
+      (should (equal '("*scratch*" "block:00000a") (rexel-test--shown))))))
+
+(defun rexel-test--layer (id kind layout &rest blocks)
+  "Return a view layer ID of KIND with LAYOUT and BLOCKS.
+A KIND of `minimized' is a minimized floating layer."
+  `((layer_id . ,id) (kind . ,(if (eq kind 'minimized) "floating" kind))
+    ,@(when (eq kind 'minimized) '((state . "minimized")))
+    (layout . ,layout) (blocks . ,(vconcat blocks))))
+
+(defconst rexel-test--floating-view
+  `((active_window_id . "w1")
+    (windows
+     . [((window_id . "w1") (label . "main") (focused_block_id . "block:00000f")
+         (layers . [,(rexel-test--layer "l1" "tiled" '((block_id . "block:00000a"))
+                                        (rexel-test--block "block:00000a"))
+                    ,(rexel-test--layer "l2" "floating" '((block_id . "block:00000f"))
+                                        (rexel-test--block "block:00000f"))]))
+        ((window_id . "w2") (label . "float") (focused_block_id . "block:00000n")
+         (layers . [,(rexel-test--layer "l3" "tiled" nil)
+                    ,(rexel-test--layer "l4" 'minimized '((block_id . "block:00000m"))
+                                        (rexel-test--block "block:00000m"))
+                    ,(rexel-test--layer "l5" "floating" '((block_id . "block:00000n"))
+                                        (rexel-test--block "block:00000n"))]))]))
+  "A view of two tabs: one tiled block under a floating one, and only
+floating blocks over an empty layout, one of them minimized.")
+
+(ert-deftest rexel-test-floating-blocks-are-listed-and-marked ()
+  "Floating blocks count as terminal blocks, and the picker marks them."
+  (should (equal '("block:00000a" "block:00000f" "block:00000m" "block:00000n")
+                 (mapcar #'car (rexel--view-terminal-blocks rexel-test--floating-view))))
+  (should (equal '("main: shell (floating)" "main: shell" "float: shell (minimized)"
+                   "float: shell (floating)" "Layout of main" "Layout of float")
+                 (mapcar #'car (rexel--attach-choices rexel-test--floating-view nil)))))
+
+(ert-deftest rexel-test-floating-block-finds-its-tab ()
+  "A block in a floating layer belongs to its tab, and the layout leaves it out."
+  (let ((tabs (alist-get 'windows rexel-test--floating-view)))
+    (should (eq (aref tabs 0) (rexel--block-tab rexel-test--floating-view "block:00000f")))
+    (should (eq (aref tabs 1) (rexel--block-tab rexel-test--floating-view "block:00000m")))
+    (should-not (rexel--block-tab rexel-test--floating-view "block:00000x"))
+    (should (equal "block:00000f" (rexel--tab-block (aref tabs 0))))
+    (should (equal "block:00000n" (rexel--tab-block (aref tabs 1))))
+    ;; Without a focused block, a shown block comes before a minimized one.
+    (should (equal "block:00000n"
+                   (rexel--tab-block (assq-delete-all 'focused_block_id
+                                                      (copy-alist (aref tabs 1))))))
+    (should-not (rexel--tab-block (rexel-test--tab "w" "x" nil)))))
+
+(ert-deftest rexel-test-tab-of-floating-blocks-shows-focused ()
+  "A tab without a layout pops to its focused block, or shows it alone.
+A tab of one tiled block shows that block, whatever floats above it."
+  (rexel-test--with-attach rexel-test--floating-view sent
+    (let ((tabs (alist-get 'windows rexel-test--floating-view)))
+      (rexel--show-tab conn "s" rexel-test--floating-view (aref tabs 1))
+      (should (equal '("*scratch*" "block:00000n") (rexel-test--shown)))
+      (rexel--show-tab conn "s" rexel-test--floating-view (aref tabs 0))
+      (should (equal '("block:00000a" "block:00000n") (rexel-test--shown)))
+      (rexel--layout-windows conn "s" rexel-test--floating-view (aref tabs 1))
+      (should (equal '("block:00000n") (rexel-test--shown)))
+      (rexel--layout-windows conn "s" rexel-test--floating-view (aref tabs 0))
+      (should (equal '("block:00000a") (rexel-test--shown))))))
 
 (ert-deftest rexel-test-reattach-answer-after-detach-is-dropped ()
   "A session detached before its `session.attach' answer stays detached."
