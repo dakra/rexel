@@ -3143,6 +3143,76 @@ is waiting to be read."
             ((symbol-function 'call-process) (lambda (&rest _) 1)))
     (should-error (rexel-start-server) :type 'user-error)))
 
+(ert-deftest rexel-test-block-shown-from-minibuffer-is-taken-after-it ()
+  "A block shown from a minibuffer is taken once that exits, if still shown."
+  (let ((in-minibuffer t) (taken nil) (timers nil)
+        (rexel--shown-in-minibuffer nil)
+        (minibuffer-exit-hook nil))
+    (cl-letf (((symbol-function 'rexel--in-minibuffer-p) (lambda () in-minibuffer))
+              ((symbol-function 'ghostel--desired-size)
+               (lambda () (and (get-buffer-window) '(80 . 24))))
+              ((symbol-function 'rexel--resize)
+               (lambda (_rows _cols take) (when take (push (current-buffer) taken))))
+              ((symbol-function 'run-at-time)
+               (lambda (_time _repeat function &rest _) (push function timers))))
+      (with-temp-buffer
+        (let ((shown (current-buffer))
+              (previewed (generate-new-buffer "previewed"))
+              (other (split-window)))
+          (unwind-protect
+              (progn
+                ;; PREVIEWED stays in another window, where it was not
+                ;; shown from the minibuffer.
+                (set-window-buffer other previewed)
+                (set-window-buffer (selected-window) previewed)
+                (rexel--window-shown (selected-window))
+                (set-window-buffer (selected-window) shown)
+                (rexel--window-shown (selected-window))
+                (should-not taken)
+                (run-hooks 'minibuffer-exit-hook)
+                (should-not minibuffer-exit-hook)
+                ;; Back in an outer minibuffer when the timer runs.
+                (funcall (pop timers))
+                (should-not taken)
+                (setq in-minibuffer nil)
+                (run-hooks 'minibuffer-exit-hook)
+                (funcall (pop timers))
+                (should (equal (list shown) taken))
+                (should-not rexel--shown-in-minibuffer)
+                (rexel--window-shown (selected-window))
+                (should (equal (list shown shown) taken)))
+            (delete-window other)
+            (kill-buffer previewed)))))))
+
+(ert-deftest rexel-test-block-live-in-minibuffer-is-taken-after-it ()
+  "A block whose stream goes live during a preview is taken only if still shown."
+  (let ((in-minibuffer t) (taken nil)
+        (rexel--shown-in-minibuffer nil)
+        (minibuffer-exit-hook nil))
+    (cl-letf (((symbol-function 'rexel--in-minibuffer-p) (lambda () in-minibuffer))
+              ((symbol-function 'ghostel--desired-size)
+               (lambda () (and (get-buffer-window) '(80 . 24))))
+              ((symbol-function 'rexel--resize)
+               (lambda (_rows _cols take) (when take (push (current-buffer) taken)))))
+      (let ((previewed (generate-new-buffer "previewed"))
+            (kept (generate-new-buffer "kept"))
+            (original (window-buffer))
+            (other (split-window)))
+        (unwind-protect
+            (progn
+              (set-window-buffer other kept)
+              (set-window-buffer (selected-window) previewed)
+              (dolist (buf (list previewed kept))
+                (with-current-buffer buf (rexel--sync-size)))
+              (should-not taken)
+              (set-window-buffer (selected-window) original)
+              (setq in-minibuffer nil)
+              (rexel--sync-shown)
+              (should (equal (list kept) taken)))
+          (delete-window other)
+          (kill-buffer previewed)
+          (kill-buffer kept))))))
+
 (ert-deftest rexel-test-no-session-has-no-buffers ()
   "An event without a session ID matches no buffer."
   (should-not (rexel--session-buffers nil)))

@@ -2057,15 +2057,51 @@ showing the buffer; the terminal itself resizes when the server echoes it."
               rexel--size-take (or take rexel--size-take))
         (rexel--send-size (current-buffer))))))
 
-(defun rexel--sync-size ()
-  "Take this block and size it to the windows showing it, if any."
-  (when-let* ((size (ghostel--desired-size)))
-    (rexel--resize (max 1 (cdr size)) (max 1 (car size)) t)))
+(defvar rexel--shown-in-minibuffer nil
+  "The (WINDOW . BUFFER) of blocks to take once the minibuffer exits.")
+
+(defun rexel--in-minibuffer-p ()
+  "Return non-nil while the selected window is an active minibuffer."
+  (and (active-minibuffer-window)
+       (eq (selected-window) (active-minibuffer-window))))
+
+(defun rexel--sync-size (&optional window)
+  "Take this block and size it to the windows showing it, if any.
+From a minibuffer a window may only preview the block, so that waits for
+the minibuffer to exit and for WINDOW, by default any window showing the
+block now, to show it still."
+  (if (rexel--in-minibuffer-p)
+      (progn
+        (dolist (w (if window (list window) (get-buffer-window-list nil nil t)))
+          (cl-pushnew (cons w (current-buffer)) rexel--shown-in-minibuffer
+                      :test #'equal))
+        (add-hook 'minibuffer-exit-hook #'rexel--minibuffer-exited))
+    (when-let* ((size (ghostel--desired-size)))
+      (rexel--resize (max 1 (cdr size)) (max 1 (car size)) t))))
 
 (defun rexel--window-shown (window)
   "Take the block and sync its size after WINDOW started showing it."
   (with-current-buffer (window-buffer window)
-    (rexel--sync-size)))
+    (rexel--sync-size window)))
+
+(defun rexel--minibuffer-exited ()
+  "Sync the blocks of `rexel--shown-in-minibuffer' once the command is done."
+  (remove-hook 'minibuffer-exit-hook #'rexel--minibuffer-exited)
+  (run-at-time 0 nil #'rexel--sync-shown))
+
+(defun rexel--sync-shown ()
+  "Take and size the blocks of `rexel--shown-in-minibuffer' still shown there."
+  (if (rexel--in-minibuffer-p)
+      (add-hook 'minibuffer-exit-hook #'rexel--minibuffer-exited)
+    (let ((buffers nil))
+      (pcase-dolist (`(,window . ,buffer)
+                     (prog1 rexel--shown-in-minibuffer
+                       (setq rexel--shown-in-minibuffer nil)))
+        (when (and (window-live-p window) (eq (window-buffer window) buffer))
+          (cl-pushnew buffer buffers)))
+      (dolist (buffer buffers)
+        (with-current-buffer buffer
+          (rexel--sync-size))))))
 
 (defun rexel--send-size (buf)
   "Send BUF's requested size, taking the block first if asked to.

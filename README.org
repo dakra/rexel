@@ -218,7 +218,9 @@ floating blocks alone shows its focused one.  Rex's zoom is not mirrored;
 
 Emacs takes ownership of a block when a window starts showing it or its
 stream reconnects, so the terminal is sized to the smallest Emacs window
-showing it, as a tmux client would.  Another client such as Rex.app can
+showing it, as a tmux client would.  A window that starts showing a block
+while you are in the minibuffer, as the preview of a buffer picker does,
+takes it only if it still shows it once the minibuffer exits.  Another client such as Rex.app can
 take the block back; the terminal then follows that client's size until
 Emacs takes it again.
 
