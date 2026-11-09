@@ -3143,5 +3143,9 @@ is waiting to be read."
             ((symbol-function 'call-process) (lambda (&rest _) 1)))
     (should-error (rexel-start-server) :type 'user-error)))
 
+(ert-deftest rexel-test-no-session-has-no-buffers ()
+  "An event without a session ID matches no buffer."
+  (should-not (rexel--session-buffers nil)))
+
 (provide 'rexel-test)
 ;;; rexel-test.el ends here

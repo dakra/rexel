@@ -1143,9 +1143,10 @@ Without a focused terminal block, pop to VIEW's first terminal block."
 
 (defun rexel--session-buffers (sid)
   "Return the block buffers of session SID on any connection, streaming or not."
-  (seq-filter (lambda (buf)
-                (equal (buffer-local-value 'rexel--session-id buf) sid))
-              (buffer-list)))
+  (and sid
+       (seq-filter (lambda (buf)
+                     (equal (buffer-local-value 'rexel--session-id buf) sid))
+                   (buffer-list))))
 
 (defun rexel--view-terminal-blocks (view)
   "Return the (BLOCK-ID . LABEL) of every terminal block in VIEW."
