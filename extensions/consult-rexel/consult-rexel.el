@@ -147,7 +147,7 @@ The session of the current project comes first, then the sessions in
 the order their blocks were selected last."
   (let ((project (and (not (file-remote-p default-directory))
                       (when-let* ((project (project-current)))
-                        (funcall rexel-project-label-function project))))
+                        (rexel-project--label project))))
         (blocks (seq-filter #'consult-rexel--block-p (buffer-list)))
         (sessions nil))
     (dolist (conn rexel--conns)
@@ -503,31 +503,27 @@ With prefix ARG, behave like `rexel-project' called with ARG."
   (if arg
       (rexel-project arg)
     (let* ((project (project-current t))
-           (root (project-root project))
-           (label (funcall rexel-project-label-function project))
-           (default-directory root))
-      (rexel--connect-directory
-       (lambda (conn)
-         (rexel--find-session
-          conn label
-          (lambda (sid)
-            (let ((pick
-                   (lambda (&rest _)
-                     (rexel--prompt-later
-                      (lambda ()
-                        (let ((this-command 'consult-rexel-project)
-                              (consult--buffer-display #'consult-rexel--display)
-                              (default-directory root)
-                              (consult-rexel--project (list conn sid label)))
-                          (consult--multi
-                           (consult-rexel--sources consult-rexel-project-sources)
-                           :prompt "Project Rex block: "
-                           :require-match (confirm-nonexistent-file-or-buffer)
-                           :history 'consult-rexel--history
-                           :sort nil)))))))
-              (if (and sid (not (assoc sid (rexel--conn-sessions conn))))
-                  (rexel--attach conn sid pick)
-                (funcall pick))))))))))
+           (root (project-root project)))
+      (rexel-project--with-session
+       project
+       (lambda (conn sid label)
+         (let ((pick
+                (lambda (&rest _)
+                  (rexel--prompt-later
+                   (lambda ()
+                     (let ((this-command 'consult-rexel-project)
+                           (consult--buffer-display #'consult-rexel--display)
+                           (default-directory root)
+                           (consult-rexel--project (list conn sid label)))
+                       (consult--multi
+                        (consult-rexel--sources consult-rexel-project-sources)
+                        :prompt "Project Rex block: "
+                        :require-match (confirm-nonexistent-file-or-buffer)
+                        :history 'consult-rexel--history
+                        :sort nil)))))))
+           (if (and sid (not (assoc sid (rexel--conn-sessions conn))))
+               (rexel--attach conn sid pick)
+             (funcall pick))))))))
 
 
 ;;; Blocks and layouts of one session

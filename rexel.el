@@ -859,8 +859,9 @@ OSC 133 marks count again once a prompt was marked after it.")
 `rexel--kill-buffer-query' decides.")
 
 (defvar rexel--kill-declined t
-  "The block buffers whose blocks the user chose to keep, while a list.
-`rexel--kill-buffer-query' adds a buffer when its answer keeps the block.")
+  "The sessions with a block the user chose to keep, while bound to a list.
+`rexel--kill-buffer-query' adds a session's ID when its answer keeps a
+block of it.")
 
 (defconst rexel--same-window
   '(display-buffer-same-window (inhibit-same-window . nil) (category . comint))
@@ -1427,7 +1428,7 @@ buffer, as `kill-buffer-query-functions' expects."
                 (t (eq action 'close))))
     (when (and (listp rexel--kill-declined)
                (or keep-buffer (and (eq action 'ask) (not rexel--close-on-kill))))
-      (push (current-buffer) rexel--kill-declined))
+      (push rexel--session-id rexel--kill-declined))
     (not keep-buffer)))
 
 (defun rexel--close-block (conn sid bid)
@@ -2552,27 +2553,6 @@ With no host known, offer to start this machine's server."
       (user-error "No Rex server found; see `rexel-hosts'"))
     (rexel--choose "Rex host: " names)))
 
-(defun rexel--local-conn ()
-  "Return the ready connection to this machine's server, or nil."
-  (seq-find (lambda (conn)
-              (and (null (rexel--conn-host conn)) (rexel--ready-p conn)))
-            rexel--conns))
-
-(defun rexel--connect-local (callback &optional running)
-  "Call CALLBACK with a ready connection to this machine's server.
-With no server running, offer to start one, or with RUNNING do nothing."
-  (let ((conn (rexel--local-conn)))
-    (cond (conn (funcall callback conn))
-          (running (when-let* ((host (assq nil (rexel--hosts))))
-                     (condition-case nil
-                         (rexel--connect host callback)
-                       (error nil))))
-          (t (rexel--connect
-              (or (assq nil (rexel--hosts))
-                  (progn (rexel--autostart-server) (assq nil (rexel--hosts)))
-                  (user-error "No Rex server runs on this machine"))
-              callback)))))
-
 (defun rexel--prefix-host (prefix)
   "Return the name of the host in the TRAMP PREFIX, without a port."
   (when-let* ((host (file-remote-p prefix 'host)))
@@ -2622,30 +2602,39 @@ That is this machine's server, also for a TRAMP directory on this
 machine, and for one elsewhere the server `rexel--tramp-host' finds.
 Without a server, offer to start this machine's and signal an error for
 another machine, or with RUNNING do nothing."
-  (let ((prefix (file-remote-p default-directory)))
-    (if (or (null prefix) (ghostel--local-host-p (rexel--prefix-host prefix)))
-        (rexel--connect-local callback running)
-      (let* ((label (rexel--prefix-label prefix))
-             (conn (seq-find
-                    (lambda (conn)
-                      (and (rexel--ready-p conn)
-                           (if label
-                               (string= (downcase label)
-                                        (downcase (or (rexel--conn-host conn) "")))
-                             (equal prefix (rexel--conn-tramp conn)))))
-                    rexel--conns))
-             (host (and (not conn) (rexel--tramp-host prefix (rexel--hosts))))
-             (use (lambda (conn)
-                    (setf (rexel--conn-tramp conn) prefix)
-                    (funcall callback conn))))
-        (cond (conn (funcall use conn))
-              ((and host running)
-               ;; A server that cannot be dialled is one that does not run.
-               (condition-case nil (rexel--connect host use) (error nil)))
-              (host (rexel--connect host use))
-              ((not running)
-               (user-error "No Rex server known for %s; see `rexel-tramp-hosts'"
-                           prefix)))))))
+  (let* ((prefix (file-remote-p default-directory))
+         (prefix (and prefix
+                      (not (ghostel--local-host-p (rexel--prefix-host prefix)))
+                      prefix))
+         (conn (seq-find (lambda (conn)
+                           (and (rexel--ready-p conn)
+                                (if prefix
+                                    (equal prefix (rexel--conn-tramp conn))
+                                  (null (rexel--conn-host conn)))))
+                         rexel--conns))
+         (host (lambda ()
+                 (let ((hosts (rexel--hosts)))
+                   (if prefix
+                       (rexel--tramp-host prefix hosts)
+                     (assq nil hosts)))))
+         (use (lambda (conn)
+                (when prefix
+                  (setf (rexel--conn-tramp conn) prefix))
+                (funcall callback conn))))
+    (cond (conn (funcall use conn))
+          (running
+           ;; A server that cannot be dialled is one that does not run.
+           (when-let* ((host (funcall host)))
+             (condition-case nil (rexel--connect host use) (error nil))))
+          (t (rexel--connect
+              (or (funcall host)
+                  (if prefix
+                      (user-error "No Rex server known for %s; see `rexel-tramp-hosts'"
+                                  prefix)
+                    (rexel--autostart-server)
+                    (funcall host))
+                  (user-error "No Rex server runs on this machine"))
+              use)))))
 
 (defun rexel--find-session (conn label callback)
   "Call CALLBACK with the ID of the session labelled LABEL on CONN, or nil.
@@ -2712,20 +2701,23 @@ only from a connection attached to it, so CONN attaches for the time."
               (if err
                   (message "rexel: %s: %s" method (rexel--error-string err))
                 (funcall callback result)))))
-         (destroy (running)
-           (let ((yes (and (zerop running) (not confirm))))
+         (finish (destroy)
+           (cond (destroy (request "session.destroy" #'ignore))
+                 ((not attached) (request "session.detach" #'ignore))))
+         (ask (running)
+           (let ((yes nil))
              (unwind-protect
-                 (or yes
-                     (setq yes (yes-or-no-p
-                                (if (zerop running)
-                                    (format "Destroy Rex session %s? " label)
-                                  (format "Rex session %s runs %d command%s; destroy it? "
-                                          label running
-                                          (if (= running 1) "" "s"))))))
-               (cond (yes (request "session.destroy" #'ignore))
-                     ((not attached) (request "session.detach" #'ignore))))))
+                 (setq yes (yes-or-no-p
+                            (if (zerop running)
+                                (format "Destroy Rex session %s? " label)
+                              (format "Rex session %s runs %d command%s; destroy it? "
+                                      label running (if (= running 1) "" "s")))))
+               (finish yes))))
          (decide (view)
-           (let ((bids (mapcar #'car (rexel--view-terminal-blocks view))))
+           ;; A block being closed may report nothing any more.
+           (let ((bids (seq-difference
+                        (mapcar #'car (rexel--view-terminal-blocks view))
+                        (rexel--conn-closing conn))))
              (rexel--with-processes
               conn sid bids
               (lambda (reports)
@@ -2734,9 +2726,9 @@ only from a connection attached to it, so CONN attaches for the time."
                                                (not (rexel--process-running-p
                                                      (cdr report))))
                                              reports))))
-                  (if (and (zerop running) (not confirm))
-                      (destroy running)
-                    (rexel--prompt-later (lambda () (destroy running))))))))))
+                  (if (or confirm (> running 0))
+                      (rexel--prompt-later (lambda () (ask running)))
+                    (finish t))))))))
       (cond ((member sid (rexel--conn-attaching conn))
              (message "rexel: the session is still being reattached"))
             (attached (request "session.view" #'decide))

@@ -28,12 +28,8 @@
         (let ((default-directory "/tmp/proj/src/"))
           (rexel-project)
           (rexel-project 2)
-          (rexel-project-new))
-        (let ((rexel-project-label-function (lambda (project)
-                                              (concat "p:" (project-root project)))))
-          (rexel-project))))
-    (should (equal '(("p:/tmp/proj/" nil "/tmp/proj/")
-                     ("proj" t "/tmp/proj/")
+          (rexel-project-new))))
+    (should (equal '(("proj" t "/tmp/proj/")
                      ("proj" 2 "/tmp/proj/")
                      ("proj" nil "/tmp/proj/"))
                    opened))))
@@ -76,12 +72,9 @@ connection."
   "A block of the session kept while the buffers were killed keeps the session."
   (dolist (session '("sid" "other"))
     (rexel-project-test--with-session destroyed
-      (with-temp-buffer
-        (setq rexel--session-id session)
-        (let ((kept (current-buffer)))
-          (cl-letf (((symbol-function 'project-kill-buffers)
-                     (lambda () (push kept rexel--kill-declined) '(killed))))
-            (rexel-project-kill))))
+      (cl-letf (((symbol-function 'project-kill-buffers)
+                 (lambda () (push session rexel--kill-declined) '(killed))))
+        (rexel-project-kill))
       (should (eq (equal session "other") (and destroyed t))))))
 
 (ert-deftest rexel-project-test-kill-starts-no-server ()

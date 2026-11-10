@@ -3784,7 +3784,7 @@ collects the (BLOCK-ID ACTION) the buffers are popped to with."
        '((sessions . [((label . "work") (session_id . "session:aaaaaa"))
                       ((label . "work") (session_id . "session:bbbbbb"))]))))))
 
-(ert-deftest rexel-test-connect-local ()
+(ert-deftest rexel-test-connect-directory-on-this-machine ()
   "A ready connection is used; without a server one is started, or left."
   (let* ((conn (rexel--make-conn :endpoints (list "sock") :client-id t))
          (remote (rexel--make-conn :endpoints (list "x") :client-id t :host "studio"))
@@ -3796,20 +3796,25 @@ collects the (BLOCK-ID ACTION) the buffers are popped to with."
                (lambda (host callback) (setq dialled host) (funcall callback 'new)))
               ((symbol-function 'rexel--autostart-server)
                (lambda () (setq started t hosts '(("studio" "x") (nil "sock"))))))
-      (rexel--connect-local (lambda (c) (setq got c)))
-      (should (eq conn got))
+      ;; A TRAMP directory on this machine is one of this machine's server.
+      (dolist (default-directory '("/usr/lib/" "/sudo::/etc/" "/ssh:localhost:/tmp/"))
+        (setq got nil)
+        (rexel--connect-directory (lambda (c) (setq got c)))
+        (should (eq conn got))
+        (should-not (rexel--conn-tramp conn)))
       (should-not dialled)
-      (setq rexel--conns (list remote))
-      (rexel--connect-local (lambda (c) (setq got c)) t)
-      (should (eq conn got))
-      (should-not (or dialled started))
-      (rexel--connect-local (lambda (c) (setq got c)))
-      (should started)
-      (should (equal '(nil "sock") dialled))
-      (should (eq 'new got))
-      (setq hosts nil)
-      (cl-letf (((symbol-function 'rexel--autostart-server) #'ignore))
-        (should-error (rexel--connect-local #'ignore) :type 'user-error)))))
+      (let ((default-directory "/usr/lib/"))
+        (setq rexel--conns (list remote))
+        (rexel--connect-directory (lambda (c) (setq got c)) t)
+        (should (eq conn got))
+        (should-not (or dialled started))
+        (rexel--connect-directory (lambda (c) (setq got c)))
+        (should started)
+        (should (equal '(nil "sock") dialled))
+        (should (eq 'new got))
+        (setq hosts nil)
+        (cl-letf (((symbol-function 'rexel--autostart-server) #'ignore))
+          (should-error (rexel--connect-directory #'ignore) :type 'user-error))))))
 
 (defun rexel-test--destroy (attached reports answer &optional confirm)
   "Destroy session \"home\" and return what was asked and requested.
@@ -3866,7 +3871,7 @@ passed on.  Return (PROMPTS . METHODS), the methods oldest first."
     (let ((rexel-tramp-hosts '(("devbox" . "/ssh:jump|ssh:box:"))))
       (should (equal "devbox" (car (rexel--tramp-host "/ssh:box:" hosts)))))))
 
-(ert-deftest rexel-test-connect-directory ()
+(ert-deftest rexel-test-connect-directory-on-another-machine ()
   "A TRAMP directory is served by the server of its machine, or by none."
   (let* ((rexel--conns nil)
          (rexel-tramp-hosts nil)
@@ -3876,13 +3881,8 @@ passed on.  Return (PROMPTS . METHODS), the methods oldest first."
                (lambda () (cl-incf asked) '((nil "sock") ("studio" "x"))))
               ((symbol-function 'rexel--connect)
                (lambda (host callback) (setq dialled host) (funcall callback studio)))
-              ((symbol-function 'rexel--connect-local)
-               (lambda (callback &optional running)
-                 (funcall callback (list 'local running)))))
-      (dolist (default-directory '("/usr/lib/" "/sudo::/etc/" "/ssh:localhost:/tmp/"))
-        (setq got nil)
-        (rexel--connect-directory (lambda (c) (setq got c)) t)
-        (should (equal '(local t) got)))
+              ((symbol-function 'rexel--autostart-server)
+               (lambda () (error "Offered to start a server"))))
       (let ((default-directory "/ssh:studio:/srv/app/"))
         (rexel--connect-directory (lambda (c) (setq got c)))
         (should (eq studio got))
@@ -3893,15 +3893,7 @@ passed on.  Return (PROMPTS . METHODS), the methods oldest first."
         (rexel--connect-directory (lambda (c) (setq got c)))
         (should (eq studio got))
         (should-not dialled)
-        (should (= 0 asked))
-        ;; The server the option names for the prefix comes before it.
-        (let ((rexel-tramp-hosts '(("other" . "/ssh:studio:")))
-              (other (rexel--make-conn :endpoints (list "o") :client-id t
-                                       :host "Other")))
-          (setq rexel--conns (list studio other))
-          (rexel--connect-directory (lambda (c) (setq got c)))
-          (should (eq other got))
-          (should (equal "/ssh:studio:" (rexel--conn-tramp other)))))
+        (should (= 0 asked)))
       ;; A server that cannot be dialled does not run.
       (let ((default-directory "/ssh:studio:/srv/app/")
             (rexel--conns nil))
@@ -3977,6 +3969,20 @@ passed on.  Return (PROMPTS . METHODS), the methods oldest first."
                      "session.view" ,process ,process "session.destroy")
                    (rexel-test--destroy t (list idle idle) t t)))))
 
+(ert-deftest rexel-test-destroy-session-skips-blocks-being-closed ()
+  "A block whose close is unanswered is not asked for its processes."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn))
+      (setf (alist-get "home" (rexel--conn-sessions conn) nil nil #'equal) "emacs"
+            (rexel--conn-closing conn) '("block:00000b"))
+      (rexel--destroy-session conn "home" "emacs")
+      (rexel-test--respond conn (car sent) rexel-test--home-view)
+      (should (equal '((session_id . "home") (block_id . "block:00000a"))
+                     (alist-get 'payload (car sent))))
+      (should (= 1 (rexel-test--count "com.superlogical.terminal.process" sent)))
+      (rexel-test--respond conn (car sent) rexel-test--idle-report)
+      (should (equal "session.destroy" (alist-get 'method (car sent)))))))
+
 (ert-deftest rexel-test-destroy-session-attaches-for-the-time ()
   "The server answers about a session only to a connection attached to it."
   (let ((process "com.superlogical.terminal.process")
@@ -4021,14 +4027,14 @@ passed on.  Return (PROMPTS . METHODS), the methods oldest first."
         (should (eq 'unchanged got))))))
 
 (ert-deftest rexel-test-declined-kills-are-collected ()
-  "A command that binds `rexel--kill-declined' learns which kills were declined."
+  "A command that binds `rexel--kill-declined' learns which sessions keep a block."
   (rexel-test--with-block-buffer sent buf
     (ignore sent)
     (with-current-buffer buf (setq ghostel--command-running t))
     (cl-letf (((symbol-function 'yes-or-no-p) #'ignore))
       (let ((rexel--kill-declined nil))
         (kill-buffer buf)
-        (should (equal (list buf) rexel--kill-declined)))
+        (should (equal '("k") rexel--kill-declined)))
       (kill-buffer buf)
       (should (eq t rexel--kill-declined))))
   ;; Under `ask', a block kept on the server is collected too.
@@ -4038,7 +4044,8 @@ passed on.  Return (PROMPTS . METHODS), the methods oldest first."
           (rexel--kill-declined nil))
       (cl-letf (((symbol-function 'y-or-n-p) #'ignore))
         (kill-buffer buf))
-      (should (equal (list buf) rexel--kill-declined)))))
+      (should-not (buffer-live-p buf))
+      (should (equal '("k") rexel--kill-declined)))))
 
 (ert-deftest rexel-test-no-session-has-no-buffers ()
   "An event without a session ID matches no buffer."

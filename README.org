@@ -177,7 +177,8 @@ stays on the server, empty.
 =M-x rexel= is to Rex what =M-x ghostel= is to a local terminal.  It shows
 the session labelled =emacs= (=rexel-default-session=) on this machine's
 server, in the selected window, and creates it with a shell in
-=default-directory= when the server has none.  A terminal is a tab of that
+=default-directory= when the server has none.  In a TRAMP directory the
+server is another, see [[*Other machines][Other machines]].  A terminal is a tab of that
 session:
 
 | Command           | Shows                                              |
@@ -217,11 +218,13 @@ project, labelled with the project's name:
 
 The session is found by its label, so two projects of one name share a
 session, and a session renamed in another client is no longer the
-project's.  =rexel-project-label-function= returns the label for a project.
+project's.  The name is the one project.el gives the project;
+=project-vc-name=, set in =.dir-locals.el=, changes it.
 
-** Projects on other machines
+** Other machines
 
-In a TRAMP directory both commands use the Rex server of that machine:
+In a TRAMP directory =M-x rexel= and the project commands use the Rex
+server of that machine:
 a project at =/ssh:studio:/srv/app/= has its session on the server
 labelled =studio=, or whose address names the host =studio=, and its shell
 starts in =/srv/app= there.  A machine without a known server is an error,
@@ -323,9 +326,9 @@ The mode loads rexel and consult when Emacs starts.  =consult-rexel= and
 =consult-rexel-tab= are then also on =C-c C-r r= and =C-c C-r t=: in a block
 buffer, and everywhere with the =:bind-keymap= line of the [[*Quick start][Quick start]].
 
-- =M-x consult-rexel= lists the block buffers, grouped by session with the
-  current project's session first, and below them the other sessions of
-  the connected servers.  A block is previewed as its
+- =M-x consult-rexel= lists the block buffers, grouped by session, and
+  below them the other sessions of the connected servers.  In a project
+  on this machine its session comes first.  A block is previewed as its
   buffer, and a session by the end of the text in its focused block,
   without attaching to it.  Choosing a session attaches it as
   =rexel-attach= does.  A name that matches nothing opens a tab with that
@@ -338,9 +341,11 @@ buffer, and everywhere with the =:bind-keymap= line of the [[*Quick start][Quick
   a tab with that label in it, and creates the session when the server
   has none.  With a prefix argument it is =rexel-project=.
 - With =consult-ghostel= installed both list what =consult-ghostel= and
-  =consult-ghostel-project= list as well, the local terminals and their
-  /New/ candidate, so they can take the place of those commands.  The
-  narrow key =r= shows the Rex blocks alone.  =consult-rexel-sources= and
+  =consult-ghostel-project= list as well, so they can take the place of
+  those commands.  Each Rex block is listed once, under its session; in
+  =consult-rexel-project= a block of another session that is in the
+  project's directory stays with ghostel's.  The narrow key =r= shows the
+  Rex groups alone.  =consult-rexel-sources= and
   =consult-rexel-project-sources= hold the sources.
 - =M-x consult-rexel-tab= picks a tab of a session and rebuilds the
   frame's windows from it, previewing each layout in the selected window.
@@ -386,7 +391,7 @@ Rexel types its own path.
 The Rex server starts the shell of a block, so ghostel cannot inject its
 shell integration.  Rexel reads the processes Rex reports instead:
 =default-directory= follows the shell's working directory on this machine's
-server and on one with a TRAMP prefix (see [[*Projects on other machines][Projects on other machines]]),
+server and on one with a TRAMP prefix (see [[*Other machines][Other machines]]),
 and =ghostel-command-running-p= knows when a command runs.  Rex
 reports process changes with some delay, so a command that finishes within
 a moment can go unseen.
@@ -423,7 +428,6 @@ Rex.app, which uses the directory report and ignores the rest.
 | =rexel-hosts=                  | =nil=       | Servers besides those =rex= knows, see [[*Servers][Servers]]           |
 | =rexel-attach-display=         | =ask=       | What =rexel-attach= shows: =ask=, =focused= or =layout=        |
 | =rexel-default-session=        | ="emacs"=   | Label of the session =M-x rexel= shows                   |
-| =rexel-project-label-function= | name      | Returns the label of a project's session               |
 | =rexel-tramp-hosts=            | =nil=       | TRAMP prefixes of servers' machines, by server label   |
 | =rexel-session-label-function= | =nil=       | Rewrites the label given to =rexel-new-session=          |
 | =rexel-kill-buffer-action=     | =close=     | What killing a block buffer does: =close=, =keep= or =ask=   |

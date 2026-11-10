@@ -22,30 +22,37 @@
 (require 'project)
 (require 'rexel)
 
-(defcustom rexel-project-label-function #'rexel-project-name
-  "Function returning the label of a project's Rex session.
-It receives the project.  Projects with one label share a session."
-  :type 'function
-  :group 'rexel)
-
-(defun rexel-project-name (project)
-  "Return the name of PROJECT, by default the last part of its root."
+(defun rexel-project--label (project)
+  "Return the label of PROJECT's Rex session, which is the project's name."
   (if (fboundp 'project-name)
       (project-name project)
     (file-name-nondirectory (directory-file-name (project-root project)))))
 
+(defun rexel-project--with-session (project callback &optional running)
+  "Call CALLBACK with the connection, ID and label of PROJECT's Rex session.
+The ID is nil when the server has no session of that label.  The server
+is that of the project's root, and RUNNING is as for
+`rexel--connect-directory'."
+  (let ((label (rexel-project--label project))
+        (default-directory (project-root project)))
+    (rexel--connect-directory
+     (lambda (conn)
+       (rexel--find-session
+        conn label (lambda (sid) (funcall callback conn sid label))))
+     running)))
+
 ;;;###autoload
 (defun rexel-project (&optional arg)
   "Show the Rex session of the current project, creating it.
-The session is the one `rexel-project-label-function' names, on the
-server `rexel' uses in the project's root.  ARG is as for `rexel'; a new
-shell starts in the project's root.
+The session is the one labelled with the project's name, on the server
+`rexel' uses in the project's root.  ARG is as for `rexel'; a new shell
+starts in the project's root.
 To add this to `project-switch-commands':
   (add-to-list \\='project-switch-commands \\='(rexel-project \"Rexel\") t)"
   (interactive "P")
   (let* ((project (project-current t))
          (default-directory (project-root project)))
-    (rexel--open-session (funcall rexel-project-label-function project) arg)))
+    (rexel--open-session (rexel-project--label project) arg)))
 
 ;;;###autoload
 (defun rexel-project-new ()
@@ -66,31 +73,18 @@ To use this in place of `project-kill-buffers':
   (global-set-key [remap project-kill-buffers] #\\='rexel-project-kill)"
   (interactive)
   (let* ((project (project-current t))
-         (label (funcall rexel-project-label-function project))
-         (root (project-root project))
          (rexel--kill-declined nil)
          ;; Nil when the user declined, and the message when there was
          ;; no buffer to kill.
          (killed (project-kill-buffers))
-         (declined rexel--kill-declined))
+         (kept rexel--kill-declined))
     (when killed
-      ;; The buffer that was current may be among the killed.
-      (let ((default-directory root))
-        (rexel--connect-directory
-         (lambda (conn)
-           (rexel--find-session
-            conn label
-            (lambda (sid)
-              (when (and sid
-                         (not (seq-some
-                               (lambda (buf)
-                                 (and (buffer-live-p buf)
-                                      (equal (buffer-local-value
-                                              'rexel--session-id buf)
-                                             sid)))
-                               declined)))
-                (rexel--destroy-session conn sid label (stringp killed))))))
-         t)))))
+      (rexel-project--with-session
+       project
+       (lambda (conn sid label)
+         (when (and sid (not (member sid kept)))
+           (rexel--destroy-session conn sid label (stringp killed))))
+       t))))
 
 (provide 'rexel-project)
 ;;; rexel-project.el ends here
