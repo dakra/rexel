@@ -30,7 +30,8 @@ MELPA, ghostel and websocket.  Rexel itself is not on MELPA yet; on Emacs
 
 #+begin_src emacs-lisp
 (use-package rexel
-  :vc (:url "https://github.com/dakra/rexel")
+  :vc (:url "https://github.com/dakra/rexel"
+       :lisp-dir "lisp")
   ;; Session and block commands from any buffer
   :bind-keymap ("C-c C-r" . rexel-prefix-map)
   :custom
@@ -46,8 +47,9 @@ there anyway), skip the question which block of a session to show, and
 name a remote server; this machine's server is found on its own.  See
 [[*Servers][Servers]] for Tailscale and ssh.
 
-On Emacs 29, =M-x package-vc-install RET https://github.com/dakra/rexel=;
-on Emacs 28, clone the repository and add it to =load-path=.
+=:lisp-dir "lisp"= is only required on Emacs < 31.1.  On Emacs 29, evaluate
+=(package-vc-install '(rexel :url "https://github.com/dakra/rexel" :lisp-dir "lisp"))=;
+on Emacs 28, clone the repository and add its =lisp= directory to =load-path=.
 
 Then =M-x rexel= shows a shell in a Rex session of its own, =M-x
 rexel-new-session= starts a shell in a new session and =M-x rexel-attach=

@@ -9,9 +9,11 @@ COMPAT_DIR     ?= $(firstword $(wildcard $(HOME)/.emacs.d/lib/compat) $(XDG_CACH
 LINT_ELPA_DIR  ?= $(XDG_CACHE_HOME)/rexel-lint-elpa
 LINT_DEPS_STAMP := $(LINT_ELPA_DIR)/.deps-installed
 
-LOAD_PATH = -L "$(WEBSOCKET_DIR)" -L "$(GHOSTEL_DIR)/lisp" -L .
+LOAD_PATH = -L "$(WEBSOCKET_DIR)" -L "$(GHOSTEL_DIR)/lisp" -L lisp
 CONSULT_LOAD_PATH = $(LOAD_PATH) -L "$(COMPAT_DIR)" -L "$(CONSULT_DIR)" -L extensions/consult-rexel
 CONSULT_REXEL = extensions/consult-rexel/consult-rexel
+REXEL         = lisp/rexel
+REXEL_PROJECT = lisp/rexel-project
 
 .PHONY: all byte-compile test test-consult lint package-lint checkdoc clean
 
@@ -23,11 +25,11 @@ $(GHOSTEL_DIR):
 $(WEBSOCKET_DIR):
 	git clone --depth 1 https://github.com/ahyatt/emacs-websocket.git "$@"
 
-rexel.elc: rexel.el | $(GHOSTEL_DIR) $(WEBSOCKET_DIR)
+$(REXEL).elc: $(REXEL).el | $(GHOSTEL_DIR) $(WEBSOCKET_DIR)
 	$(EMACS) --batch $(EMACSFLAGS) -Q $(LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" -f batch-byte-compile $<
 
-rexel-project.elc: rexel-project.el rexel.elc
+$(REXEL_PROJECT).elc: $(REXEL_PROJECT).el $(REXEL).elc
 	$(EMACS) --batch $(EMACSFLAGS) -Q $(LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" -f batch-byte-compile $<
 
@@ -37,13 +39,13 @@ $(CONSULT_DIR):
 $(COMPAT_DIR):
 	git clone --depth 1 https://github.com/emacs-compat/compat.git "$@"
 
-$(CONSULT_REXEL).elc: $(CONSULT_REXEL).el rexel.elc rexel-project.elc | $(CONSULT_DIR) $(COMPAT_DIR)
+$(CONSULT_REXEL).elc: $(CONSULT_REXEL).el $(REXEL).elc $(REXEL_PROJECT).elc | $(CONSULT_DIR) $(COMPAT_DIR)
 	$(EMACS) --batch $(EMACSFLAGS) -Q $(CONSULT_LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" -f batch-byte-compile $<
 
-byte-compile: rexel.elc rexel-project.elc $(CONSULT_REXEL).elc
+byte-compile: $(REXEL).elc $(REXEL_PROJECT).elc $(CONSULT_REXEL).elc
 
-test: rexel.elc rexel-project.elc
+test: $(REXEL).elc $(REXEL_PROJECT).elc
 	$(EMACS) --batch $(EMACSFLAGS) -Q $(LOAD_PATH) \
 		-l ert -l test/rexel-test.el -l test/rexel-project-test.el \
 		-f ert-run-tests-batch-and-exit
@@ -63,23 +65,23 @@ $(LINT_DEPS_STAMP): Makefile | $(GHOSTEL_DIR)
 		--eval "(package-install 'websocket)" \
 		--eval "(package-install 'consult)" \
 		--eval "(package-install-file (expand-file-name \"$(GHOSTEL_DIR)/lisp/ghostel.el\"))" \
-		--eval "(package-install-file (expand-file-name \"rexel.el\"))"
+		--eval "(package-install-file (expand-file-name \"$(REXEL).el\"))"
 	@touch $@
 
-package-lint: $(LINT_DEPS_STAMP) rexel.el rexel-project.el $(CONSULT_REXEL).el
+package-lint: $(LINT_DEPS_STAMP) $(REXEL).el $(REXEL_PROJECT).el $(CONSULT_REXEL).el
 	$(EMACS) --batch $(EMACSFLAGS) -Q \
 		--eval "(setq package-user-dir \"$(LINT_ELPA_DIR)\")" \
 		--eval "(package-initialize)" \
 		--eval "(require 'package-lint)" \
-		--eval "(setq package-lint-main-file \"rexel.el\")" \
-		-f package-lint-batch-and-exit rexel.el rexel-project.el
+		--eval "(setq package-lint-main-file \"$(REXEL).el\")" \
+		-f package-lint-batch-and-exit $(REXEL).el $(REXEL_PROJECT).el
 	$(EMACS) --batch $(EMACSFLAGS) -Q \
 		--eval "(setq package-user-dir \"$(LINT_ELPA_DIR)\")" \
 		--eval "(package-initialize)" \
 		--eval "(require 'package-lint)" \
 		-f package-lint-batch-and-exit $(CONSULT_REXEL).el
 
-checkdoc: rexel.el rexel-project.el $(CONSULT_REXEL).el
+checkdoc: $(REXEL).el $(REXEL_PROJECT).el $(CONSULT_REXEL).el
 	$(EMACS) --batch $(EMACSFLAGS) -Q \
 		--eval "(require 'checkdoc)" \
 		--eval "(let ((sentence-end-double-space nil) \
@@ -87,8 +89,8 @@ checkdoc: rexel.el rexel-project.el $(CONSULT_REXEL).el
 		              (ok t)) \
 		  (ignore-errors (kill-buffer \"*Warnings*\")) \
 		  (let ((inhibit-message t)) \
-		    (checkdoc-file \"rexel.el\") \
-		    (checkdoc-file \"rexel-project.el\") \
+		    (checkdoc-file \"$(REXEL).el\") \
+		    (checkdoc-file \"$(REXEL_PROJECT).el\") \
 		    (checkdoc-file \"$(CONSULT_REXEL).el\")) \
 		  (when (get-buffer \"*Warnings*\") \
 		    (setq ok nil) \
@@ -96,4 +98,4 @@ checkdoc: rexel.el rexel-project.el $(CONSULT_REXEL).el
 		  (unless ok (kill-emacs 1)))"
 
 clean:
-	rm -f rexel.elc rexel-project.elc $(CONSULT_REXEL).elc
+	rm -f $(REXEL).elc $(REXEL_PROJECT).elc $(CONSULT_REXEL).elc

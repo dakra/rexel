@@ -35,7 +35,7 @@ when none exists."
                                             ".emacs.d/lib/websocket"
                                             ".cache/emacs-websocket"))
   (add-to-list 'load-path (expand-file-name "lisp" ghostel))
-  (add-to-list 'load-path repo)
+  (add-to-list 'load-path (expand-file-name "lisp" repo))
   (setq ghostel-module-directory ghostel))
 
 (setq load-prefer-newer t
@@ -259,12 +259,13 @@ Its prompt is \"$ \"."
 (defun rexel-elate-load-consult ()
   "Load consult-rexel from this checkout, and consult-ghostel if it is there.
 consult comes from REXEL_ELATE_CONSULT or the user's Emacs directory."
-  (let ((here (file-name-directory (locate-library "rexel"))))
+  (let ((repo (expand-file-name "../" (file-name-directory
+                                       (locate-library "rexel")))))
     (add-to-list 'load-path (rexel-elate--dir "REXEL_ELATE_CONSULT"
                                               ".emacs.d/lib/consult" ".cache/consult"))
     (add-to-list 'load-path (expand-file-name "extensions/consult-ghostel"
                                               ghostel-module-directory))
-    (add-to-list 'load-path (expand-file-name "extensions/consult-rexel" here))
+    (add-to-list 'load-path (expand-file-name "extensions/consult-rexel" repo))
     ;; No autoloads are loaded here, and consult-ghostel's project source
     ;; relies on the one of `ghostel-project-buffer-list'.
     (require 'ghostel-project)
