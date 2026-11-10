@@ -37,7 +37,7 @@ $(CONSULT_DIR):
 $(COMPAT_DIR):
 	git clone --depth 1 https://github.com/emacs-compat/compat.git "$@"
 
-$(CONSULT_REXEL).elc: $(CONSULT_REXEL).el rexel.elc | $(CONSULT_DIR) $(COMPAT_DIR)
+$(CONSULT_REXEL).elc: $(CONSULT_REXEL).el rexel.elc rexel-project.elc | $(CONSULT_DIR) $(COMPAT_DIR)
 	$(EMACS) --batch $(EMACSFLAGS) -Q $(CONSULT_LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" -f batch-byte-compile $<
 

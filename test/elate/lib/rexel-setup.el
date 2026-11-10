@@ -256,6 +256,41 @@ Its prompt is \"$ \"."
                             (error "No minibuffer is open"))
     (all-completions "" minibuffer-completion-table)))
 
+(defun rexel-elate-load-consult ()
+  "Load consult-rexel from this checkout, and consult-ghostel if it is there.
+consult comes from REXEL_ELATE_CONSULT or the user's Emacs directory."
+  (let ((here (file-name-directory (locate-library "rexel"))))
+    (add-to-list 'load-path (rexel-elate--dir "REXEL_ELATE_CONSULT"
+                                              ".emacs.d/lib/consult" ".cache/consult"))
+    (add-to-list 'load-path (expand-file-name "extensions/consult-ghostel"
+                                              ghostel-module-directory))
+    (add-to-list 'load-path (expand-file-name "extensions/consult-rexel" here))
+    ;; No autoloads are loaded here, and consult-ghostel's project source
+    ;; relies on the one of `ghostel-project-buffer-list'.
+    (require 'ghostel-project)
+    (require 'consult-rexel)))
+
+(defun rexel-elate-grouped-choices ()
+  "Return the completions of the open minibuffer as (GROUP . NAME), in order.
+NAME is without the characters `consult' appends to tell its sources apart."
+  (with-selected-window (or (active-minibuffer-window)
+                            (error "No minibuffer is open"))
+    (let ((group (completion-metadata-get
+                  (completion-metadata "" minibuffer-completion-table
+                                       minibuffer-completion-predicate)
+                  'group-function)))
+      (mapcar (lambda (choice)
+                (cons (and group (funcall group choice nil))
+                      (substring-no-properties
+                       (replace-regexp-in-string "[\x100000-\x10fffd]+\\'" ""
+                                                 choice))))
+              (all-completions "" minibuffer-completion-table
+                               minibuffer-completion-predicate)))))
+
+(defun rexel-elate-choice-p (group name)
+  "Return non-nil when the open minibuffer offers NAME in GROUP."
+  (and (member (cons group name) (rexel-elate-grouped-choices)) t))
+
 (defun rexel-elate-answer-label (&optional suffix)
   "Put `rexel-elate-label' plus SUFFIX into the open minibuffer."
   (rexel-elate-answer (concat rexel-elate-label suffix)))

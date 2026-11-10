@@ -32,6 +32,7 @@ Environment, all optional:
 | `REXEL_ELATE_GHOSTEL` | ghostel checkout, with its built module | `~/.emacs.d/lib/ghostel`, `~/.cache/ghostel` |
 | `REXEL_ELATE_WEBSOCKET` | websocket.el checkout | `~/.emacs.d/lib/websocket`, `~/.cache/emacs-websocket` |
 | `REXEL_ELATE_COMPAT` | compat checkout, if ghostel needs it | `~/.emacs.d/lib/compat` |
+| `REXEL_ELATE_CONSULT` | consult checkout, for `consult.json` | `~/.emacs.d/lib/consult`, `~/.cache/consult` |
 | `REXEL_ELATE_TAILNET` | the server's https address on the tailnet; enables the `tls` variants | unset, `tls` is skipped |
 | `REXEL_ELATE_LABEL` | prefix of the session labels | `rexel-elate`; `run.sh` adds its pid |
 
@@ -76,6 +77,7 @@ it again.
 | `session.json` | local, unix, tcp | `new-session`, `type`, `directory`, `rename`, `prefix-key`, `label-function`, `server-label`, `detach`, `attach`, `kill-buffer-keep`, `kill-buffer`, `host-prompt`, `attach-tabs`, `sync-picker`, `attach-again`, `attach-one-block-tab`, `detach-refresh`, `destroyed-elsewhere`, `no-server` |
 | `typing.json` | local, unix, tcp, fallback, tls | `echo`, `burst`, `edit`, `paste`, `unicode`, `interrupt`, `full-screen`, `keys`, `scrollback`, `copy-mode`, `flood`, `large-paste`, `bracketed-paste`, `zsh-paste` |
 | `project.json` | none, this machine's server | `rexel`, `again`, `new-tab`, `numbered`, `recent`, `attach`, `empty-session`, `project`, `project-new`, `project-kill-running`, `project-kill`, `project-kill-detached`, `project-kill-no-buffers` |
+| `consult.json` | none, this machine's server | `project-new-name`, `project-pick`, `project-new-tab`, `project-attach`, `groups`, `session` |
 | `layout.json` | local, unix | `size`, `resize`, `resize-full-screen`, `taken-unfocused`, `taken-by-focus`, `taken-by-resize`, `taken-by-select`, `preview-takes-nothing`, `taken-by-click`, `taken-by-show`, `smallest-window`, `split-right`, `split-below`, `split-left`, `split-above`, `split`, `sync-layout`, `new-tab`, `sync-tab`, `close-block`, `exit` |
 | `reconnect.json` | unix, tcp | `stream-drop`, `control-drop`, `write-in-flight`, `upload-redial`, `relay-restart`, `half-open`, `upload-stall`, `upload-cut`, `lost-connect`, `refused-hello`, `attach-hold`, `upload-while-attaching`, `detach-while-attaching` |
 | `upload.json` | unix, tcp, tls | `upload-file`, `several`, `empty`, `boundaries`, `symlink`, `names`, `compressed`, `dnd`, `drop`, `yank-media`, `dired`, `seventeen`, `remote-file`, `not-a-file`, `too-large`, `stays-usable`, `slow`, `file-changes`, `cancel`, `after-cancel`, `cancel-idle`, `two-blocks`, `kill-buffer` |

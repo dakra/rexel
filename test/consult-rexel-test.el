@@ -257,6 +257,191 @@
                                  (lambda () (interactive) (setq ran (current-buffer)))))
       (should (eq block ran)))))
 
+(defmacro consult-rexel-test--with-blocks (specs &rest body)
+  "Run BODY with a block buffer bound for each of SPECS.
+A spec is (VAR CONN SESSION-ID); the buffers are made in that order."
+  (declare (indent 1))
+  `(let ,(mapcar (lambda (spec)
+                   `(,(car spec) (generate-new-buffer
+                                  ,(format "consult-rexel-test-%s" (car spec)))))
+                 specs)
+     (unwind-protect
+         (progn
+           ,@(mapcar (lambda (spec)
+                       `(with-current-buffer ,(car spec)
+                          (setq rexel--conn ,(nth 1 spec)
+                                rexel--session-id ,(nth 2 spec)
+                                rexel--block-id ,(format "block:%s" (car spec)))))
+                     specs)
+           ,@body)
+       ,@(mapcar (lambda (spec) `(kill-buffer ,(car spec))) specs))))
+
+(ert-deftest consult-rexel-test-session-sources ()
+  "Each attached session is a source of its blocks, the project's session first."
+  (let* ((local (rexel--make-conn :client-id t
+                                  :sessions '(("s1" . "emacs") ("s2" . "proj"))))
+         (remote (rexel--make-conn :client-id t :host "studio"
+                                   :sessions '(("s3" . "blog") ("s4" . "proj"))))
+         (down (rexel--make-conn :sessions '(("s5" . "away"))))
+         (rexel--conns (list local remote down)))
+    (consult-rexel-test--with-blocks ((blog remote "s3") (home local "s1")
+                                      (one local "s2") (two local "s2")
+                                      (far remote "s4"))
+      (cl-letf (((symbol-function 'project-current)
+                 (lambda (&rest _) '(transient . "/tmp/proj/"))))
+        (let ((sources (consult-rexel-session-sources)))
+          ;; A session without a block here is last, and one of a
+          ;; connection being redialled is still listed.
+          (should (equal '("proj" "blog@studio" "emacs" "proj@studio" "away")
+                         (mapcar (lambda (s) (plist-get s :name)) sources)))
+          (should (equal (list one two)
+                         (sort (mapcar #'cdr (funcall (plist-get (car sources)
+                                                                 :items)))
+                               (lambda (a b)
+                                 (string< (buffer-name a) (buffer-name b))))))
+          (should (equal (list blog)
+                         (mapcar #'cdr (funcall (plist-get (nth 1 sources)
+                                                           :items)))))
+          (dolist (source sources)
+            (should (equal '(?r . "Rex") (plist-get source :narrow)))
+            (should (eq 'buffer (plist-get source :category)))))))))
+
+(defvar consult-rexel-test-source)
+(defvar consult-ghostel-project-sources)
+
+(ert-deftest consult-rexel-test-without-blocks ()
+  "The Rex blocks leave the items of other sources, and their own source goes."
+  (let ((conn (rexel--make-conn)))
+    (consult-rexel-test--with-blocks ((mine conn "s1") (other conn "s2"))
+      (with-temp-buffer
+        (let* ((plain (current-buffer))
+               (consult-rexel-test-source
+                `( :name "Terminals"
+                   :items ,(lambda ()
+                             (list (cons "a" mine) (buffer-name other)
+                                   (cons "c" plain) "no buffer"))))
+               (static '(:name "New" :items ("Create")))
+               (sources (list 'consult-rexel-test-source static
+                              'consult-rexel-source-hidden
+                              'consult-rexel-test-unbound)))
+          (let ((kept (consult-rexel--without-blocks sources)))
+            (should (equal '("Terminals" "New")
+                           (mapcar (lambda (s) (plist-get s :name)) kept)))
+            (should (equal (list (cons "c" plain) "no buffer")
+                           (funcall (plist-get (car kept) :items))))
+            (should (equal '("Create") (plist-get (nth 1 kept) :items))))
+          (let ((kept (consult-rexel--without-blocks
+                       sources
+                       (apply-partially #'consult-rexel--session-block-p
+                                        conn "s1"))))
+            (should (equal (list (buffer-name other) (cons "c" plain) "no buffer")
+                           (funcall (plist-get (car kept) :items))))))))))
+
+(ert-deftest consult-rexel-test-sources-expand ()
+  "A function among the sources stands for the sources it returns."
+  (cl-letf (((symbol-function 'consult-rexel-test--two)
+             (lambda () (list '(:name "a") '(:name "b")))))
+    (should (equal '(consult-rexel-source (:name "a") (:name "b")
+                                          consult-rexel-source-new)
+                   (consult-rexel--sources
+                    '(consult-rexel-source consult-rexel-test--two
+                                           consult-rexel-source-new))))))
+
+(ert-deftest consult-rexel-test-session-source-lists-what-has-no-block-here ()
+  "A session is a candidate unless a group shows its blocks."
+  (let* ((conn (rexel--make-conn :client-id t
+                                 :sessions '(("s1" . "here") ("s3" . "empty"))))
+         (consult-rexel--sessions `(("here" ,conn . "s1") ("there" ,conn . "s2")
+                                    ("empty" ,conn . "s3"))))
+    (consult-rexel-test--with-blocks ((block conn "s1"))
+      (should (equal '("there" "empty")
+                     (funcall (plist-get consult-rexel-session-source :items)))))))
+
+(ert-deftest consult-rexel-test-project-sources ()
+  "A new name goes to the project's session; its blocks leave the other sources."
+  (let* ((conn (rexel--make-conn :client-id t :sessions '(("s1" . "proj"))))
+         (consult-rexel--project (list conn "s1" "proj"))
+         (opened nil))
+    (consult-rexel-test--with-blocks ((mine conn "s1") (other conn "s2"))
+      (let* ((consult-ghostel-project-sources
+              `(( :name "Ghostel (Project)" :new ignore
+                  :items ,(lambda () (list (cons "a" mine) (cons "b" other))))))
+             (sources (consult--multi-enabled-sources
+                       (consult-rexel--sources consult-rexel-project-sources))))
+        (should (equal '("proj" "Ghostel (Project)" "New")
+                       (mapcar (lambda (s) (plist-get s :name)) sources)))
+        (should (equal (list (cons "b" other))
+                       (funcall (plist-get (aref sources 1) :items))))
+        (cl-letf (((symbol-function 'rexel--open-session)
+                   (lambda (&rest args) (setq opened args))))
+          (pcase-let ((`(,name . ,source)
+                       (consult--multi-lookup sources "logs" nil)))
+            (funcall (plist-get source :new) name)))
+        (should (equal '("proj" t "logs") opened))))))
+
+(ert-deftest consult-rexel-test-new ()
+  "A new name opens a labelled tab in the session of `rexel'."
+  (let ((rexel-default-session "home")
+        calls)
+    (cl-letf (((symbol-function 'rexel--open-session)
+               (lambda (&rest args) (push (cons 'open args) calls)))
+              ((symbol-function 'rexel)
+               (lambda (&optional arg) (push (list 'rexel arg) calls)))
+              ((symbol-function 'rexel-new-session)
+               (lambda (&rest _) (push '(session) calls))))
+      (funcall (plist-get consult-rexel-session-source :new) "logs")
+      (funcall (plist-get consult-rexel-source-new :action) "New Rex tab")
+      (funcall (plist-get consult-rexel-source-new :action) "New Rex session"))
+    (should (equal '((session) (rexel t) (open "home" t "logs")) calls))))
+
+(ert-deftest consult-rexel-test-project ()
+  "The project picker attaches the project's session before it lists it."
+  (pcase-dolist (`(,sid ,attached ,attaches)
+                 '(("s1" nil t) ("s1" t nil) (nil nil nil)))
+    (let* ((conn (rexel--make-conn :client-id t
+                                   :sessions (and attached '(("s1" . "proj")))))
+           (attached-to nil) (picked nil) (opened nil))
+      (cl-letf (((symbol-function 'project-current)
+                 (lambda (&rest _) '(transient . "/tmp/proj/")))
+                ((symbol-function 'rexel--connect-local)
+                 (lambda (callback &rest _) (funcall callback conn)))
+                ((symbol-function 'rexel--find-session)
+                 (lambda (_conn label callback)
+                   (should (equal "proj" label))
+                   (funcall callback sid)))
+                ((symbol-function 'rexel--attach)
+                 (lambda (_conn sid callback)
+                   (setq attached-to sid)
+                   (funcall callback nil)))
+                ((symbol-function 'rexel--prompt-later) #'funcall)
+                ((symbol-function 'rexel--open-session)
+                 (lambda (&rest args) (setq opened args)))
+                ((symbol-function 'consult--multi)
+                 (lambda (sources &rest _)
+                   (setq picked (list consult-rexel--project default-directory
+                                      (plist-get (car sources) :name)))
+                   (funcall (plist-get (car sources) :new) "logs"))))
+        (let ((default-directory "/tmp/proj/src/")
+              (consult-rexel-project-sources
+               '(consult-rexel-project-session-sources
+                 consult-rexel-project-source-new)))
+          (consult-rexel-project)))
+      (should (equal (and attaches sid) attached-to))
+      (should (equal (list conn sid "proj") (car picked)))
+      (should (equal "/tmp/proj/" (nth 1 picked)))
+      (should (equal "proj" (nth 2 picked)))
+      (should (equal '("proj" t "logs") opened)))))
+
+(ert-deftest consult-rexel-test-project-prefix-argument ()
+  "With a prefix argument the project picker is `rexel-project'."
+  (let (called)
+    (cl-letf (((symbol-function 'rexel-project)
+               (lambda (&optional arg) (setq called (list arg))))
+              ((symbol-function 'consult--multi)
+               (lambda (&rest _) (error "Opened the picker"))))
+      (consult-rexel-project '(4)))
+    (should (equal '((4)) called))))
+
 (ert-deftest consult-rexel-test-narrow-keys ()
   "The blocks narrow with `r', in `consult-buffer' with `x'."
   (should (eq ?r (plist-get consult-rexel-source :narrow)))

@@ -294,23 +294,37 @@ top of [[https://github.com/minad/consult][consult]]:
   :vc (:url "https://github.com/dakra/rexel"
        :lisp-dir "extensions/consult-rexel")
   :hook (after-init . consult-rexel-mode)
-  :bind (:map rexel-prefix-map
+  :bind (("C-x m" . consult-rexel)
+         :map project-prefix-map
+         ("m" . consult-rexel-project)
+         :map rexel-prefix-map
          ("r" . consult-rexel)
          ("t" . consult-rexel-tab)))
 #+end_src
 
-The mode loads rexel and consult when Emacs starts.  The pickers are then
-on =C-c C-r r= and =C-c C-r t=: in a block buffer, and everywhere with the
-=:bind-keymap= line of the [[*Quick start][Quick start]].
+The mode loads rexel and consult when Emacs starts.  =consult-rexel= and
+=consult-rexel-tab= are then also on =C-c C-r r= and =C-c C-r t=: in a block
+buffer, and everywhere with the =:bind-keymap= line of the [[*Quick start][Quick start]].
 
-- =M-x consult-rexel= lists the block buffers and, below them, every
-  session of the connected servers.  A block is previewed as its buffer.
-  A session that is not attached is previewed by the end of the text in
-  its focused block, without attaching to it.  Choosing a session
-  attaches it as =rexel-attach= does, and a name that matches nothing
-  creates a session with that label.  Without a connection, or with
-  =C-u=, it connects to a server first.  Listing the sessions subscribes
-  the connection to the session events of the whole server.
+- =M-x consult-rexel= lists the block buffers, grouped by session with the
+  current project's session first, and below them the other sessions of
+  the connected servers.  A block is previewed as its
+  buffer, and a session by the end of the text in its focused block,
+  without attaching to it.  Choosing a session attaches it as
+  =rexel-attach= does.  A name that matches nothing opens a tab with that
+  label in the session of =M-x rexel=, and the /New/ group offers such a
+  tab and a new session.  Without a connection, or with =C-u=, it connects
+  to a server first.  Listing the sessions subscribes the connection to
+  the session events of the whole server.
+- =M-x consult-rexel-project= lists the blocks of the current project's
+  session, which it attaches to first.  A name that matches nothing opens
+  a tab with that label in it, and creates the session when the server
+  has none.  With a prefix argument it is =rexel-project=.
+- With =consult-ghostel= installed both list what =consult-ghostel= and
+  =consult-ghostel-project= list as well, the local terminals and their
+  /New/ candidate, so they can take the place of those commands.  The
+  narrow key =r= shows the Rex blocks alone.  =consult-rexel-sources= and
+  =consult-rexel-project-sources= hold the sources.
 - =M-x consult-rexel-tab= picks a tab of a session and rebuilds the
   frame's windows from it, previewing each layout in the selected window.
 - =consult-rexel-mode= adds the blocks to =consult-ghostel= and

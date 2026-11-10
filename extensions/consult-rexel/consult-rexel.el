@@ -14,12 +14,16 @@
 
 ;; Pick Rex blocks and sessions through `consult'.
 ;;
-;; `consult-rexel' lists the block buffers of the attached sessions and
-;; every session of the connected servers.  A block is previewed as a
-;; buffer and a session that is not attached by the text of its focused
-;; block.  Choosing a session attaches it, and a name that matches
-;; nothing creates a session with that label.  Listing the sessions
+;; `consult-rexel' lists the block buffers, grouped by their sessions,
+;; the other sessions of the connected servers, and with consult-ghostel
+;; installed what `consult-ghostel' lists.  A block is
+;; previewed as a buffer and a session by the text of its focused block.
+;; Choosing a session attaches it, and a name that matches nothing opens
+;; a tab with that label in the session of `rexel'.  Listing the sessions
 ;; subscribes the connection to the session events of its whole server.
+;;
+;; `consult-rexel-project' does the same for the session of the current
+;; project and what `consult-ghostel-project' lists.
 ;;
 ;; `consult-rexel-tab' picks a tab of a session and rebuilds the frame's
 ;; windows from its layout, previewing each layout.
@@ -33,7 +37,9 @@
 ;;
 ;;   (use-package consult-rexel
 ;;     :hook (after-init . consult-rexel-mode)
-;;     :bind ("C-x M" . consult-rexel))
+;;     :bind (("C-x m" . consult-rexel)
+;;            :map project-prefix-map
+;;            ("m" . consult-rexel-project)))
 
 ;;; Code:
 
@@ -41,10 +47,12 @@
 (require 'seq)
 (require 'consult)
 (require 'rexel)
+(require 'rexel-project)
 (require 'consult-ghostel nil 'noerror)
 (require 'embark nil 'noerror)
 
 (defvar consult-ghostel-sources)
+(defvar consult-ghostel-project-sources)
 (defvar embark-keymap-alist)
 (defvar embark-default-action-overrides)
 (defvar embark-buffer-map)
@@ -97,6 +105,103 @@
 `consult-rexel-mode' adds it to `consult-buffer-sources', whose
 register sources narrow with `r'.")
 
+;;; Blocks by session
+
+(defun consult-rexel--session-name (conn label)
+  "Return LABEL, the label of a session on CONN, with the host of a remote one."
+  (if (rexel--conn-host conn)
+      (format "%s@%s" label (rexel--conn-host conn))
+    label))
+
+(defun consult-rexel--session-block-p (conn sid buffer)
+  "Return non-nil if BUFFER shows a block of session SID on CONN."
+  (and (eq (buffer-local-value 'rexel--conn buffer) conn)
+       (equal (buffer-local-value 'rexel--session-id buffer) sid)
+       (consult-rexel--block-p buffer)))
+
+(defun consult-rexel--session-source (conn sid name new)
+  "Return a `consult' source named NAME for the blocks of session SID on CONN.
+NEW is called with a name that matches no candidate."
+  `( :name     ,name
+     :narrow   (?r . "Rex")
+     :category buffer
+     :face     consult-buffer
+     :history  buffer-name-history
+     :annotate ,#'ghostel-annotate-buffer
+     :state    ,#'consult--buffer-state
+     :new      ,new
+     :items    ,(lambda ()
+                  (consult--buffer-query
+                   :sort 'visibility
+                   :predicate (apply-partially #'consult-rexel--session-block-p
+                                               conn sid)
+                   :as #'consult--buffer-pair))))
+
+(defun consult-rexel--new-tab (label)
+  "Open a tab labelled LABEL in the session of `rexel'."
+  (rexel--open-session rexel-default-session t label))
+
+(defun consult-rexel-session-sources ()
+  "Return a `consult' source of the blocks of each attached session.
+The session of the current project comes first, then the sessions in
+the order their blocks were selected last."
+  (let ((project (and (not (file-remote-p default-directory))
+                      (when-let* ((project (project-current)))
+                        (funcall rexel-project-label-function project))))
+        (blocks (seq-filter #'consult-rexel--block-p (buffer-list)))
+        (sessions nil))
+    (dolist (conn rexel--conns)
+      (pcase-dolist (`(,sid . ,label) (rexel--conn-sessions conn))
+        (push (list (cond ((and (equal label project)
+                                (null (rexel--conn-host conn)))
+                           -1)
+                          ((seq-position
+                            blocks nil
+                            (lambda (buffer _)
+                              (consult-rexel--session-block-p
+                               conn sid buffer))))
+                          (t (length blocks)))
+                    conn sid (consult-rexel--session-name conn label))
+              sessions)))
+    (mapcar (pcase-lambda (`(,_ ,conn ,sid ,name))
+              (consult-rexel--session-source conn sid name
+                                             #'consult-rexel--new-tab))
+            (sort (nreverse sessions) (lambda (a b) (< (car a) (car b)))))))
+
+(defun consult-rexel--item-buffer (item)
+  "Return the buffer of the `consult' candidate ITEM, or nil."
+  (let ((buffer (if (consp item) (cdr item) item)))
+    (if (stringp buffer) (get-buffer buffer) (and (bufferp buffer) buffer))))
+
+(defun consult-rexel--without-blocks (sources &optional predicate)
+  "Return the `consult' SOURCES with the Rex blocks left out of their items.
+With PREDICATE, leave out only the blocks whose buffer it accepts.  The
+sources that list the Rex blocks alone are left out."
+  (delq nil
+        (mapcar
+         (lambda (source)
+           (let* ((plist (if (symbolp source)
+                             (and (boundp source) (symbol-value source))
+                           source))
+                  (items (plist-get plist :items)))
+             (cond ((eq items #'consult-rexel--block-pairs) nil)
+                   ((functionp items)
+                    `(:items
+                      ,(lambda ()
+                         (seq-remove
+                          (lambda (item)
+                            (when-let* ((buffer (consult-rexel--item-buffer item)))
+                              (funcall (or predicate #'consult-rexel--block-p)
+                                       buffer)))
+                          (funcall items)))
+                      ,@plist))
+                   (t plist))))
+         sources)))
+
+(defun consult-rexel-ghostel-sources ()
+  "Return the sources of `consult-ghostel' without the Rex blocks."
+  (consult-rexel--without-blocks (bound-and-true-p consult-ghostel-sources)))
+
 ;;; Sessions
 
 (defun consult-rexel--session (name &optional offline)
@@ -117,9 +222,7 @@ Unless OFFLINE, its connection must be ready."
 A session of a remote host is named LABEL@HOST, and a name that repeats
 gets the end of its ID appended, as `rex ls' shows it."
   (let ((named (mapcar (pcase-lambda (`(,label ,conn . ,sid))
-                         (cons (if (rexel--conn-host conn)
-                                   (format "%s@%s" label (rexel--conn-host conn))
-                                 label)
+                         (cons (consult-rexel--session-name conn label)
                                (cons conn sid)))
                        sessions)))
     (mapcar (lambda (entry)
@@ -163,11 +266,11 @@ The sessions go to `consult-rexel--sessions'."
                     (when (zerop (cl-decf pending))
                       (finish)))))))))
 
-(defun consult-rexel--annotate-session (name)
-  "Annotate the session NAME as attached."
-  (when-let* ((session (cdr (assoc name consult-rexel--sessions)))
-              ((consult-rexel--attached-p session)))
-    " attached"))
+(defun consult-rexel--shown-p (session)
+  "Return non-nil if SESSION, a (CONN . SESSION-ID), has a block buffer."
+  (seq-some (apply-partially #'consult-rexel--session-block-p
+                             (car session) (cdr session))
+            (buffer-list)))
 
 (defun consult-rexel-attach-session (name)
   "Attach the listed session NAME and show it as `rexel-attach-display' says."
@@ -274,40 +377,67 @@ The preview is the end of the text of the session's focused block."
      :narrow   ?s
      :category rexel-session
      :face     font-lock-keyword-face
-     :annotate ,#'consult-rexel--annotate-session
      :state    ,#'consult-rexel--session-state
      :action   ,#'consult-rexel-attach-session
-     :new      ,#'rexel-new-session
-     :items    ,(lambda () (mapcar #'car consult-rexel--sessions)))
-  "`consult' source for the sessions of the connected Rex servers.")
+     :new      ,#'consult-rexel--new-tab
+     :items    ,(lambda ()
+                  (mapcar #'car (seq-remove
+                                 (lambda (entry)
+                                   (consult-rexel--shown-p (cdr entry)))
+                                 consult-rexel--sessions))))
+  "`consult' source for the sessions that have no block buffer.
+They are those of the connected servers.")
 
 (defvar consult-rexel-source-new
   `( :name     "New"
      :narrow   ?n
      :category rexel-new
      :face     font-lock-constant-face
-     :action   ,(lambda (_) (rexel-new-session))
-     :items    ("Create a new Rex session"))
-  "`consult' source offering a new session with a label the server chooses.")
+     :action   ,(lambda (candidate)
+                  (if (equal candidate "New Rex session")
+                      (rexel-new-session)
+                    (rexel t)))
+     :items    ("New Rex tab" "New Rex session"))
+  "`consult' source offering a tab in the session of `rexel', and a session.
+The server chooses the session's label.")
 
 (defcustom consult-rexel-sources
-  '(consult-rexel-source consult-rexel-session-source consult-rexel-source-new)
-  "Sources of `consult-rexel', as in `consult-buffer-sources'."
+  '(consult-rexel-session-sources consult-rexel-session-source
+    consult-rexel-ghostel-sources consult-rexel-source-new)
+  "Sources of `consult-rexel'.
+Each is a source as in `consult-buffer-sources', or a function that
+returns a list of sources."
   :type '(repeat symbol)
   :group 'rexel)
+
+(defun consult-rexel--display (buffer &optional norecord)
+  "Pop to BUFFER as `rexel' and ghostel's commands show a terminal.
+NORECORD is passed on to `pop-to-buffer'."
+  (pop-to-buffer buffer rexel--same-window norecord))
+
+(defun consult-rexel--sources (sources)
+  "Return SOURCES with each function replaced by the sources it returns."
+  (mapcan (lambda (source)
+            (if (and (symbolp source) (not (boundp source)) (fboundp source))
+                (copy-sequence (funcall source))
+              (list source)))
+          sources))
 
 ;;;###autoload
 (defun consult-rexel (&optional host)
   "Switch to a Rex block or attach a Rex session, previewing candidates.
-The sessions are those of the connected servers.  Without a connection,
-or with prefix argument HOST, connect to a server first, asking which if
-there are several.  A name that matches nothing creates a session with
-that label."
+The blocks are grouped by their sessions, and the sessions listed are
+those of the connected servers without a block buffer.  With
+consult-ghostel installed, the candidates of `consult-ghostel' follow.
+Without a connection, or with prefix argument HOST, connect to a server
+first, asking which if there are several.  A name that matches nothing
+opens a tab with that label in the session of `rexel'."
   (interactive "P")
   (let ((conns (seq-filter #'rexel--ready-p rexel--conns))
         (pick (lambda ()
-                (let ((this-command 'consult-rexel))
-                  (consult--multi consult-rexel-sources
+                (let ((this-command 'consult-rexel)
+                      (consult--buffer-display #'consult-rexel--display))
+                  (consult--multi (consult-rexel--sources consult-rexel-sources)
                                   :prompt "Rex block or session: "
                                   :require-match
                                   (confirm-nonexistent-file-or-buffer)
@@ -322,6 +452,81 @@ that label."
          (consult-rexel--list-sessions
           (seq-filter #'rexel--ready-p rexel--conns)
           (lambda () (rexel--prompt-later pick))))))))
+
+
+;;; The session of a project
+
+(defvar consult-rexel--project nil
+  "The (CONN SESSION-ID LABEL) `consult-rexel-project' picks from.
+SESSION-ID is nil when the server has no session for the project.")
+
+(defun consult-rexel-project-session-sources ()
+  "Return the `consult' source of the blocks in the current project's session."
+  (pcase-let ((`(,conn ,sid ,label) consult-rexel--project))
+    (list (consult-rexel--session-source
+           conn sid label
+           (lambda (name) (rexel--open-session label t name))))))
+
+(defun consult-rexel-ghostel-project-sources ()
+  "Return the sources of `consult-ghostel-project'.
+The blocks of the project's session are left out of them."
+  (pcase-let ((`(,conn ,sid) consult-rexel--project))
+    (consult-rexel--without-blocks
+     (bound-and-true-p consult-ghostel-project-sources)
+     (apply-partially #'consult-rexel--session-block-p conn sid))))
+
+(defvar consult-rexel-project-source-new
+  `( :name     "New"
+     :narrow   ?n
+     :category rexel-new
+     :face     font-lock-constant-face
+     :action   ,(lambda (_) (rexel-project t))
+     :items    ("New Rex tab"))
+  "`consult' source offering a tab in the session of the current project.")
+
+(defcustom consult-rexel-project-sources
+  '(consult-rexel-project-session-sources consult-rexel-ghostel-project-sources
+    consult-rexel-project-source-new)
+  "Sources of `consult-rexel-project', as in `consult-rexel-sources'."
+  :type '(repeat symbol)
+  :group 'rexel)
+
+;;;###autoload
+(defun consult-rexel-project (&optional arg)
+  "Switch to a block of the current project's Rex session, previewing candidates.
+The session is that of `rexel-project', and is attached to first.  With
+consult-ghostel installed, the candidates of `consult-ghostel-project'
+follow.  A name that matches nothing opens a tab with that label in the
+session, which is created if the server has none.
+With prefix ARG, behave like `rexel-project' called with ARG."
+  (interactive "P")
+  (if arg
+      (rexel-project arg)
+    (let* ((project (project-current t))
+           (root (project-root project))
+           (label (funcall rexel-project-label-function project)))
+      (rexel--connect-local
+       (lambda (conn)
+         (rexel--find-session
+          conn label
+          (lambda (sid)
+            (let ((pick
+                   (lambda (&rest _)
+                     (rexel--prompt-later
+                      (lambda ()
+                        (let ((this-command 'consult-rexel-project)
+                              (consult--buffer-display #'consult-rexel--display)
+                              (default-directory root)
+                              (consult-rexel--project (list conn sid label)))
+                          (consult--multi
+                           (consult-rexel--sources consult-rexel-project-sources)
+                           :prompt "Project Rex block: "
+                           :require-match (confirm-nonexistent-file-or-buffer)
+                           :history 'consult-rexel--history
+                           :sort nil)))))))
+              (if (and sid (not (assoc sid (rexel--conn-sessions conn))))
+                  (rexel--attach conn sid pick)
+                (funcall pick))))))))))
 
 
 ;;; Blocks and layouts of one session
@@ -504,7 +709,8 @@ overrides name the commands that take the target."
         (and enable '(consult-rexel-session-map)))
   (pcase-dolist (`(,key . ,command)
                  '((rexel-session . consult-rexel-attach-session)
-                   ((buffer . consult-rexel) . switch-to-buffer)))
+                   ((buffer . consult-rexel) . switch-to-buffer)
+                   ((buffer . consult-rexel-project) . switch-to-buffer)))
     (setf (alist-get key embark-default-action-overrides nil t #'equal)
           (and enable command))))
 
