@@ -4,8 +4,8 @@
 
 ;; Author: Daniel Kraus <daniel@kraus.my>
 ;; URL: https://github.com/dakra/rexel
-;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (consult "1.5") (rexel "0.1.0"))
+;; Version: 0.2.0
+;; Package-Requires: ((emacs "28.1") (consult "1.5") (rexel "0.2.0"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
@@ -139,15 +139,14 @@ NEW is called with a name that matches no candidate."
 
 (defun consult-rexel--new-tab (label)
   "Open a tab labelled LABEL in the session of `rexel'."
-  (rexel--open-session rexel-default-session t label))
+  (rexel--open-session (rexel--default-session) t label))
 
 (defun consult-rexel-session-sources ()
   "Return a `consult' source of the blocks of each attached session.
 The session of the current project comes first, then the sessions in
 the order their blocks were selected last."
   (let ((project (and (not (file-remote-p default-directory))
-                      (when-let* ((project (project-current)))
-                        (rexel-project--label project))))
+                      (rexel-project-session-label)))
         (blocks (seq-filter #'consult-rexel--block-p (buffer-list)))
         (sessions nil))
     (dolist (conn rexel--conns)
@@ -424,34 +423,41 @@ NORECORD is passed on to `pop-to-buffer'."
           sources))
 
 ;;;###autoload
-(defun consult-rexel (&optional host)
+(defun consult-rexel (&optional arg)
   "Switch to a Rex block or attach a Rex session, previewing candidates.
 The blocks are grouped by their sessions, and the sessions listed are
 those of the connected servers without a block buffer.  With
 consult-ghostel installed, the candidates of `consult-ghostel' follow.
-Without a connection, or with prefix argument HOST, connect to a server
-first, asking which if there are several.  A name that matches nothing
-opens a tab with that label in the session of `rexel'."
+Without a connection, connect to a server first, asking which if there
+are several.  A name that matches nothing opens a tab with that label in
+the session of `rexel'.
+With prefix ARG, behave like `rexel' called with ARG."
   (interactive "P")
-  (let ((conns (seq-filter #'rexel--ready-p rexel--conns))
-        (pick (lambda ()
-                (let ((this-command 'consult-rexel)
-                      (consult--buffer-display #'consult-rexel--display))
-                  (consult--multi (consult-rexel--sources consult-rexel-sources)
-                                  :prompt "Rex block or session: "
-                                  :require-match
-                                  (confirm-nonexistent-file-or-buffer)
-                                  :history 'consult-rexel--history
-                                  :sort nil)))))
-    (if (and conns (not host))
-        (consult-rexel--list-sessions
-         conns (lambda () (rexel--prompt-later pick)))
-      (rexel--connect
-       (rexel--read-host)
-       (lambda (_conn)
-         (consult-rexel--list-sessions
-          (seq-filter #'rexel--ready-p rexel--conns)
-          (lambda () (rexel--prompt-later pick))))))))
+  (if arg
+      (rexel arg)
+    (let* ((conns (seq-filter #'rexel--ready-p rexel--conns))
+           (buffer (current-buffer))
+           (pick (lambda ()
+                   (with-current-buffer (if (buffer-live-p buffer)
+                                            buffer
+                                          (current-buffer))
+                     (let ((this-command 'consult-rexel)
+                           (consult--buffer-display #'consult-rexel--display))
+                       (consult--multi
+                        (consult-rexel--sources consult-rexel-sources)
+                        :prompt "Rex block or session: "
+                        :require-match (confirm-nonexistent-file-or-buffer)
+                        :history 'consult-rexel--history
+                        :sort nil))))))
+      (if conns
+          (consult-rexel--list-sessions
+           conns (lambda () (rexel--prompt-later pick)))
+        (rexel--connect
+         (rexel--read-host)
+         (lambda (_conn)
+           (consult-rexel--list-sessions
+            (seq-filter #'rexel--ready-p rexel--conns)
+            (lambda () (rexel--prompt-later pick)))))))))
 
 
 ;;; The session of a project

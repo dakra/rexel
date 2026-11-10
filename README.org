@@ -37,15 +37,18 @@ MELPA, ghostel and websocket.  Rexel itself is not on MELPA yet; on Emacs
   :custom
   ;; Show a session's focused block instead of asking what to show
   (rexel-attach-display 'focused)
+  ;; In a project, M-x rexel uses the project's session
+  (rexel-default-session-function #'rexel-project-session-label)
   ;; A remote server, over Tailscale or an ssh tunnel to its socket
   (rexel-hosts '(("studio" "rex.tail1234.ts.net" "/tmp/studio.sock"))))
 #+end_src
 
 Only the =:vc= line is needed.  The others make the session and block
 commands available everywhere under =C-c C-r= (in a block buffer they are
-there anyway), skip the question which block of a session to show, and
-name a remote server; this machine's server is found on its own.  See
-[[*Servers][Servers]] for Tailscale and ssh.
+there anyway), skip the question which block of a session to show, make
+=M-x rexel= use the session of a [[*Projects][project]], and name a remote server;
+this machine's server is found on its own.  See [[*Servers][Servers]] for Tailscale
+and ssh.
 
 =:lisp-dir "lisp"= is only required on Emacs < 31.1.  On Emacs 29, evaluate
 =(package-vc-install '(rexel :url "https://github.com/dakra/rexel" :lisp-dir "lisp"))=;
@@ -181,8 +184,8 @@ keep running, and the server takes Emacs off them at once.
 the session labelled =emacs= (=rexel-default-session=) on this machine's
 server, in the selected window, and creates it with a shell in
 =default-directory= when the server has none.  In a TRAMP directory the
-server is another, see [[*Other machines][Other machines]].  A terminal is a tab of that
-session:
+server is another, see [[*Other machines][Other machines]], and in a project the session can
+be the project's, see [[*Projects][Projects]].  A terminal is a tab of that session:
 
 | Command           | Shows                                              |
 |-------------------+----------------------------------------------------|
@@ -222,6 +225,18 @@ The session is found by its label, so two projects of one name share a
 session, and a session renamed in another client is no longer the
 project's.  The name is the one project.el gives the project;
 =project-vc-name=, set in =.dir-locals.el=, changes it.
+
+=M-x rexel= uses the project's session as well with
+
+#+begin_src emacs-lisp
+(setq rexel-default-session-function #'rexel-project-session-label)
+#+end_src
+
+In a buffer of a project it then shows that project's session, and the
+=emacs= session elsewhere.  Its shells still start in =default-directory=,
+and =C-u C-u M-x rexel= opens a tab in the =emacs= session from a project
+too; =rexel-project= takes it as =C-u=.  In a TRAMP directory the project is
+found only while TRAMP is connected to its machine.
 
 ** Other machines
 
@@ -338,9 +353,9 @@ buffer, and everywhere with the =:bind-keymap= line of the [[*Quick start][Quick
   without attaching to it.  Choosing a session attaches it as
   =rexel-attach= does.  A name that matches nothing opens a tab with that
   label in the session of =M-x rexel=, and the /New/ group offers such a
-  tab and a new session.  Without a connection, or with =C-u=, it connects
-  to a server first.  Listing the sessions subscribes the connection to
-  the session events of the whole server.
+  tab and a new session.  Without a connection it connects to a server
+  first.  Listing the sessions subscribes the connection to the session
+  events of the whole server.  With a prefix argument it is =rexel=.
 - =M-x consult-rexel-project= lists the blocks of the current project's
   session, which it attaches to first.  A name that matches nothing opens
   a tab with that label in it, and creates the session when the server
@@ -428,17 +443,18 @@ Rex.app, which uses the directory report and ignores the rest.
 
 * Customization
 
-| Option                       | Default   | Meaning                                                |
-|------------------------------+-----------+--------------------------------------------------------|
-| =rexel-hosts=                  | =nil=       | Servers besides those =rex= knows, see [[*Servers][Servers]]           |
-| =rexel-attach-display=         | =ask=       | What =rexel-attach= shows: =ask=, =focused= or =layout=        |
-| =rexel-default-session=        | ="emacs"=   | Label of the session =M-x rexel= shows                   |
-| =rexel-tramp-hosts=            | =nil=       | TRAMP prefixes of servers' machines, by server label   |
-| =rexel-session-label-function= | =nil=       | Rewrites the label given to =rexel-new-session=          |
-| =rexel-kill-buffer-action=     | =close=     | What killing a block buffer does: =close=, =keep= or =ask=   |
-| =rexel-prefix-key=             | ="C-c C-r"= | Prefix for =rexel-prefix-map= in block buffers           |
-| =rexel-autostart-server=       | =ask=       | Start a local server when none is found: =ask=, =t= or =nil= |
-| =rexel-program=                | ="rex"=     | The Rex command-line program                           |
+| Option                         | Default   | Meaning                                                |
+|--------------------------------+-----------+--------------------------------------------------------|
+| =rexel-hosts=                    | =nil=       | Servers besides those =rex= knows, see [[*Servers][Servers]]           |
+| =rexel-attach-display=           | =ask=       | What =rexel-attach= shows: =ask=, =focused= or =layout=        |
+| =rexel-default-session=          | ="emacs"=   | Label of the session =M-x rexel= shows                   |
+| =rexel-default-session-function= | =nil=       | Names the session of =M-x rexel= for a buffer            |
+| =rexel-tramp-hosts=              | =nil=       | TRAMP prefixes of servers' machines, by server label   |
+| =rexel-session-label-function=   | =nil=       | Rewrites the label given to =rexel-new-session=          |
+| =rexel-kill-buffer-action=       | =close=     | What killing a block buffer does: =close=, =keep= or =ask=   |
+| =rexel-prefix-key=               | ="C-c C-r"= | Prefix for =rexel-prefix-map= in block buffers           |
+| =rexel-autostart-server=         | =ask=       | Start a local server when none is found: =ask=, =t= or =nil= |
+| =rexel-program=                  | ="rex"=     | The Rex command-line program                           |
 
 Block buffers run =rexel-block-mode=, whose hook =rexel-block-mode-hook= runs
 in each new one.

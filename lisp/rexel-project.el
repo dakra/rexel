@@ -11,7 +11,9 @@
 ;; `rexel-tramp-hosts'.  `rexel-project' shows the
 ;; session and creates it in the project's root, `rexel-project-new'
 ;; opens another tab, and `rexel-project-kill' destroys the session with
-;; the project's buffers.
+;; the project's buffers.  `rexel-project-session-label' is for
+;; `rexel-default-session-function', and makes `rexel' show the session
+;; of the project a buffer is in.
 ;;
 ;;   (with-eval-after-load 'project
 ;;     (add-to-list 'project-switch-commands '(rexel-project "Rexel") t))
@@ -42,11 +44,21 @@ is that of the project's root, and RUNNING is as for
      running)))
 
 ;;;###autoload
+(defun rexel-project-session-label ()
+  "Return the label of the current project's Rex session, nil outside a project.
+As `rexel-default-session-function' it makes `rexel' show the session of
+the project a buffer is in.  In a TRAMP directory the project is found
+only while TRAMP is connected to its machine."
+  (let ((project (project-current)))
+    (and project (rexel-project--label project))))
+
+;;;###autoload
 (defun rexel-project (&optional arg)
   "Show the Rex session of the current project, creating it.
 The session is the one labelled with the project's name, on the server
-`rexel' uses in the project's root.  ARG is as for `rexel'; a new shell
-starts in the project's root.
+`rexel' uses in the project's root.  ARG is as for `rexel', with two
+\\[universal-argument] the same as one; a new shell starts in the
+project's root.
 To add this to `project-switch-commands':
   (add-to-list \\='project-switch-commands \\='(rexel-project \"Rexel\") t)"
   (interactive "P")

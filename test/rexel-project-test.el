@@ -34,6 +34,13 @@
                      ("proj" nil "/tmp/proj/"))
                    opened))))
 
+(ert-deftest rexel-project-test-session-label ()
+  "The label is the project's name, and nil outside a project."
+  (rexel-project-test--with-project "/tmp/proj/"
+    (should (equal "proj" (rexel-project-session-label))))
+  (cl-letf (((symbol-function 'project-current) #'ignore))
+    (should-not (rexel-project-session-label))))
+
 (defmacro rexel-project-test--with-session (destroyed &rest body)
   "Run BODY with this machine's server holding session \"sid\" of the project.
 DESTROYED collects the arguments `rexel--destroy-session' gets after its

@@ -3741,6 +3741,23 @@ collects the (BLOCK-ID ACTION) the buffers are popped to with."
       (should (equal `(("block:00000b" ,rexel--same-window)) shown))
       (should-not (rexel-test--find "session.create" sent)))))
 
+(ert-deftest rexel-test-rexel-default-session-function ()
+  "The function names the session, except with two \\[universal-argument]."
+  (let ((rexel-default-session "main")
+        opened)
+    (cl-letf (((symbol-function 'rexel--open-session)
+               (lambda (&rest args) (push args opened))))
+      (let ((rexel-default-session-function (lambda () "proj")))
+        (rexel)
+        (rexel '(4))
+        (rexel 2)
+        (rexel '(16)))
+      (let ((rexel-default-session-function #'ignore))
+        (rexel '(4))))
+    (should (equal '(("proj" nil) ("proj" (4)) ("proj" 2) ("main" (16))
+                     ("main" (4)))
+                   (nreverse opened)))))
+
 (ert-deftest rexel-test-rexel-shows-the-block-selected-last ()
   "Of an attached session, the block a window showed last comes back."
   (rexel-test--with-local-server sent shown

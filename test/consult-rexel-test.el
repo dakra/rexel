@@ -382,6 +382,7 @@ A spec is (VAR CONN SESSION-ID); the buffers are made in that order."
 (ert-deftest consult-rexel-test-new ()
   "A new name opens a labelled tab in the session of `rexel'."
   (let ((rexel-default-session "home")
+        (rexel-default-session-function nil)
         calls)
     (cl-letf (((symbol-function 'rexel--open-session)
                (lambda (&rest args) (push (cons 'open args) calls)))
@@ -391,8 +392,12 @@ A spec is (VAR CONN SESSION-ID); the buffers are made in that order."
                (lambda (&rest _) (push '(session) calls))))
       (funcall (plist-get consult-rexel-session-source :new) "logs")
       (funcall (plist-get consult-rexel-source-new :action) "New Rex tab")
-      (funcall (plist-get consult-rexel-source-new :action) "New Rex session"))
-    (should (equal '((session) (rexel t) (open "home" t "logs")) calls))))
+      (funcall (plist-get consult-rexel-source-new :action) "New Rex session")
+      (let ((rexel-default-session-function (lambda () "proj")))
+        (funcall (plist-get consult-rexel-session-source :new) "logs")))
+    (should (equal '((open "proj" t "logs")
+                     (session) (rexel t) (open "home" t "logs"))
+                   calls))))
 
 (ert-deftest consult-rexel-test-project ()
   "The project picker attaches the project's session before it lists it."
@@ -433,6 +438,44 @@ A spec is (VAR CONN SESSION-ID); the buffers are made in that order."
       (should (equal "/tmp/proj/" (nth 1 picked)))
       (should (equal "proj" (nth 2 picked)))
       (should (equal '("proj" t "logs") opened)))))
+
+(ert-deftest consult-rexel-test-picker ()
+  "The picker connects when no server is, and opens in the caller's buffer."
+  (pcase-dolist (ready '(t nil))
+    (let* ((conn (rexel--make-conn :client-id ready))
+           (rexel--conns (list conn))
+           connected listed picked)
+      (cl-letf (((symbol-function 'rexel--read-host) (lambda () 'host))
+                ((symbol-function 'rexel--connect)
+                 (lambda (host callback)
+                   (setq connected host)
+                   (setf (rexel--conn-client-id conn) t)
+                   (funcall callback conn)))
+                ((symbol-function 'consult-rexel--list-sessions)
+                 (lambda (conns callback)
+                   (setq listed conns)
+                   (funcall callback)))
+                ((symbol-function 'rexel--prompt-later)
+                 (lambda (function) (with-temp-buffer (funcall function))))
+                ((symbol-function 'consult--multi)
+                 (lambda (&rest _) (setq picked (current-buffer)))))
+        (with-temp-buffer
+          (consult-rexel)
+          (should (eq (current-buffer) picked))))
+      (should (eq (if ready nil 'host) connected))
+      (should (equal (list conn) listed)))))
+
+(ert-deftest consult-rexel-test-prefix-argument ()
+  "With a prefix argument the picker is `rexel'."
+  (let (called)
+    (cl-letf (((symbol-function 'rexel)
+               (lambda (&optional arg) (setq called (list arg))))
+              ((symbol-function 'rexel--connect)
+               (lambda (&rest _) (error "Connected")))
+              ((symbol-function 'consult-rexel--list-sessions)
+               (lambda (&rest _) (error "Listed the sessions"))))
+      (consult-rexel '(4)))
+    (should (equal '((4)) called))))
 
 (ert-deftest consult-rexel-test-project-prefix-argument ()
   "With a prefix argument the project picker is `rexel-project'."

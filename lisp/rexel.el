@@ -4,8 +4,8 @@
 
 ;; Author: Daniel Kraus <daniel@kraus.my>
 ;; URL: https://github.com/dakra/rexel
-;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (ghostel "0.62.0") (websocket "1.15"))
+;; Version: 0.2.0
+;; Package-Requires: ((emacs "28.1") (ghostel "0.63.0") (websocket "1.15"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
@@ -88,6 +88,15 @@ command runs from.  An empty or nil result lets the server choose one."
 (defcustom rexel-default-session "emacs"
   "Label of the session `rexel' shows."
   :type 'string)
+
+(defcustom rexel-default-session-function nil
+  "Function returning the label of the session `rexel' shows.
+It is called without arguments in the buffer the command runs from.  A
+nil result, like no function, means `rexel-default-session'.
+`rexel-project-session-label' gives each project a session of its own."
+  :type '(choice (const :tag "None" nil)
+                 (function-item rexel-project-session-label)
+                 function))
 
 (defcustom rexel-tramp-hosts nil
   "TRAMP prefixes of the machines Rex servers run on.
@@ -2897,18 +2906,29 @@ TAB-LABEL."
                (lambda (sid) (rexel--show-session conn sid nil cwd))
                tab-label)))))))))
 
+(defun rexel--default-session (&optional arg)
+  "Return the label of the session `rexel' shows with prefix argument ARG."
+  (or (and (not (equal arg '(16)))
+           rexel-default-session-function
+           (funcall rexel-default-session-function))
+      rexel-default-session))
+
 ;;;###autoload
 (defun rexel (&optional arg)
   "Show the Rex session labelled `rexel-default-session', creating it.
-The session is on this machine's server, or in a TRAMP directory on the
-server of its machine, see `rexel-tramp-hosts'.  Show the block of it
-that was selected last, or after attaching to it the focused one.
+`rexel-default-session-function' can name another session for the
+current buffer.  The session is on this machine's server, or in a TRAMP
+directory on the server of its machine, see `rexel-tramp-hosts'.  Show
+the block of it that was selected last, or after attaching to it the
+focused one.
 With a non-numeric prefix ARG, open a new tab with a shell in
-`default-directory'.  With a numeric prefix ARG, show the tab of that
-number, or open a new tab when there is none.
+`default-directory'; with two \\[universal-argument], in the session
+labelled `rexel-default-session' whatever the function names.  With a
+numeric prefix ARG, show the tab of that number, or open a new tab when
+there is none.
 A session without a terminal gets a new tab."
   (interactive "P")
-  (rexel--open-session rexel-default-session arg))
+  (rexel--open-session (rexel--default-session arg) arg))
 
 (defun rexel-rename-session (label)
   "Label the current block's session LABEL.
