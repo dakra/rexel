@@ -815,6 +815,9 @@ Nil until the answer to `data.connect'.")
 (defvar-local rexel--tab nil
   "Name of the tab holding this block.")
 
+(defvar-local rexel--owner nil
+  "ID of the client that owns this block and so sizes it, nil when none does.")
+
 (defvar-local rexel--stale-prompt nil
   "The newest of `ghostel--prompt-positions' when the shell last execed.
 OSC 133 marks count again once a prompt was marked after it.")
@@ -933,6 +936,15 @@ A block in a minimized layer comes last.  Nil when TAB has no terminal."
                           (seq-some (lambda (b) (equal (alist-get 'block_id b) bid))
                                     (alist-get 'blocks layer)))
                         (alist-get 'layers tab)))
+            (alist-get 'windows view)))
+
+(defun rexel--view-block-owner (view bid)
+  "Return the ID of the client owning block BID in VIEW, or nil."
+  (seq-some (lambda (tab)
+              (seq-some (lambda (entry)
+                          (and (equal (alist-get 'block_id (car entry)) bid)
+                               (alist-get 'owner (car entry))))
+                        (rexel--tab-terminal-blocks tab)))
             (alist-get 'windows view)))
 
 (defun rexel--show-tab (conn sid view tab)
@@ -1189,7 +1201,10 @@ already applied is ignored."
             (if (assoc rexel--block-id blocks)
                 (let ((name (rexel--buffer-name conn sid rexel--block-id))
                       (tab (rexel--block-tab view rexel--block-id)))
-                  (setq rexel--tab (and tab (rexel--tab-name view tab)))
+                  (setq rexel--tab (and tab (rexel--tab-name view tab))
+                        rexel--owner (rexel--view-block-owner
+                                      view rexel--block-id))
+                  (force-mode-line-update)
                   (unless (equal name (buffer-name))
                     (rename-buffer name t)))
               (kill-buffer buf))))))))
@@ -1260,6 +1275,7 @@ A buffer whose stream ended earlier is reset and streamed again."
     (rexel-block-mode 1)
     (add-hook 'window-buffer-change-functions #'rexel--window-shown nil t)
     (add-hook 'window-selection-change-functions #'rexel--window-selected nil t)
+    (add-function :after after-focus-change-function #'rexel--focus-changed)
     (add-hook 'kill-buffer-hook #'rexel--block-buffer-killed nil t)
     (rexel--open-data-connection conn buf))
   buf)
@@ -1275,12 +1291,36 @@ The block itself keeps running on the server."
 
 (defun rexel--window-selected (window)
   "Focus the block on the server when WINDOW showing it is selected.
-This also makes the block's tab the active one in other Rex clients."
+This also makes the block's tab the active one in other Rex clients.
+With the keyboard focus, or when Emacs cannot tell as on a terminal that
+does not report it, take the block and size it too."
   (when (and (eq window (selected-window)) (rexel--ready-p rexel--conn))
     (rexel--request rexel--conn "session.focus_block"
                     `((session_id . ,rexel--session-id)
                       (block_id . ,rexel--block-id))
-                    #'ignore)))
+                    #'ignore)
+    (when (ghostel--buffer-focused-p (current-buffer))
+      (rexel--sync-size window))))
+
+(defvar rexel--focus-timer nil
+  "The timer of `rexel--focus-changed', while it waits to run.")
+
+(defun rexel--focus-changed ()
+  "Take the focused frames' selected blocks once the focus has settled.
+This runs as `after-focus-change-function', also while Emacs reads a key."
+  (unless rexel--focus-timer
+    (setq rexel--focus-timer (run-at-time 0 nil #'rexel--take-focused))))
+
+(defun rexel--take-focused ()
+  "Take and size the block in the selected window of each frame with focus.
+A frame whose focus Emacs cannot tell reports no focus change."
+  (setq rexel--focus-timer nil)
+  (dolist (frame (frame-list))
+    (when (eq (frame-focus-state frame) t)
+      (let ((window (frame-selected-window frame)))
+        (with-current-buffer (window-buffer window)
+          (when rexel--block-id
+            (rexel--sync-size window)))))))
 
 (defun rexel--pty-out (data)
   "Type DATA, bytes from ghostel's key encoder, into this block.
@@ -1699,7 +1739,8 @@ after `rexel--max-message-bytes' passes through as output."
          (when (and (natnump cols) (natnump rows) (> cols 0) (> rows 0))
            (ghostel--set-size-with-cell-dims ghostel--term rows cols)
            ;; Output after this message assumes the new size is in effect.
-           (ghostel--commit-frame (current-buffer)))))
+           (ghostel--commit-frame (current-buffer))
+           (force-mode-line-update))))
       ("child_exited"
        (message "rexel: %s: program exited with status %s"
                 (buffer-name) (alist-get 'exit_code msg))))))
@@ -2072,18 +2113,6 @@ the batch, so no path is typed."
 
 ;;; Sizing
 
-(defun rexel--resize (rows cols &optional take)
-  "Ask the server to size this block ROWS by COLS, if that changes anything.
-With TAKE, also take ownership of the block from other clients.  ghostel
-calls this as `ghostel-resize-function' with the size fitting the windows
-showing the buffer; the terminal itself resizes when the server echoes it."
-  (when (and (rexel--ready-p rexel--conn) (eq rexel--data-state 'live))
-    (let ((size (cons cols rows)))
-      (when (or take (not (equal size rexel--requested-size)))
-        (setq rexel--requested-size size
-              rexel--size-take (or take rexel--size-take))
-        (rexel--send-size (current-buffer))))))
-
 (defvar rexel--shown-in-minibuffer nil
   "The (WINDOW . BUFFER) of blocks to take once the minibuffer exits.")
 
@@ -2091,6 +2120,21 @@ showing the buffer; the terminal itself resizes when the server echoes it."
   "Return non-nil while the selected window is an active minibuffer."
   (and (active-minibuffer-window)
        (eq (selected-window) (active-minibuffer-window))))
+
+(defun rexel--resize (rows cols &optional take)
+  "Ask the server to size this block ROWS by COLS, if that changes anything.
+With TAKE, also take ownership of the block from other clients.  A new
+size takes it too while the block has the focus, as for
+`ghostel--buffer-focused-p'.  ghostel calls this as
+`ghostel-resize-function' with the size fitting the windows showing the
+buffer; the terminal itself resizes when the server echoes it."
+  (when (and (rexel--ready-p rexel--conn) (eq rexel--data-state 'live))
+    (let ((size (cons cols rows)))
+      (when (or take (not (equal size rexel--requested-size)))
+        (setq rexel--requested-size size
+              rexel--size-take (or take rexel--size-take
+                                   (ghostel--buffer-focused-p (current-buffer))))
+        (rexel--send-size (current-buffer))))))
 
 (defun rexel--sync-size (&optional window)
   "Take this block and size it to the windows showing it, if any.
@@ -2181,6 +2225,36 @@ once this client owns the block, when the server reports it in the stream."
            (signal (car err) (cdr err))))))))
 
 
+;;; Owner
+
+(defun rexel--size-tag-take (event)
+  "Take the block whose mode line the mouse EVENT clicked, and size it."
+  (interactive "e")
+  (rexel--window-shown (posn-window (event-start event))))
+
+(defvar rexel--size-tag-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mode-line mouse-1] #'rexel--size-tag-take)
+    map)
+  "Keymap of the mode line tag of a block that another client sizes.")
+
+(defun rexel--size-tag ()
+  "Return the mode line tag of a block that another client sizes, else nil.
+It names the size that client gave the terminal."
+  (when-let* (((eq rexel--data-state 'live))
+              (rexel--owner)
+              (id (rexel--conn-client-id rexel--conn))
+              ((stringp id))
+              ((not (equal rexel--owner id))))
+    (concat " "
+            (propertize (format "[Sized by another client %dx%d]"
+                                ghostel--term-cols ghostel--term-rows)
+                        'face 'warning
+                        'help-echo "mouse-1: Take the block and size it to its windows here"
+                        'mouse-face 'mode-line-highlight
+                        'local-map rexel--size-tag-map))))
+
+
 ;;; Colors
 
 (defun rexel--theme ()
@@ -2636,7 +2710,7 @@ marked files to a block buffer read from the minibuffer."
 
 (define-minor-mode rexel-block-mode
   "Minor mode of ghostel buffers showing a Rex block."
-  :lighter " Rex"
+  :lighter (" Rex" (:eval (rexel--size-tag)))
   :keymap rexel-block-mode-map)
 
 (provide 'rexel)

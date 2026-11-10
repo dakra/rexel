@@ -264,7 +264,8 @@ Its prompt is \"$ \"."
   "Return non-nil when BUFFER is named after the session with SUFFIX.
 The name is *rex:LABEL:ID* and *rex:LABEL@HOST:ID* on a labelled host."
   (let* ((buf (or buffer (rexel-elate-block)))
-         (host (rexel--conn-host (buffer-local-value 'rexel--conn buf))))
+         (conn (buffer-local-value 'rexel--conn buf))
+         (host (and conn (rexel--conn-host conn))))
     (and (string-match-p
           (format "\\`\\*rex:%s%s:[0-9a-f]\\{6\\}\\*\\'"
                   (regexp-quote (concat rexel-elate-label suffix))
@@ -403,6 +404,25 @@ defaults to `rexel-elate-block'."
     (ignore-errors (websocket-close (rexel--conn-ws rexel-elate--other)))
     (setq rexel-elate--other nil))
   t)
+
+(defun rexel-elate-mode-line (&optional buffer)
+  "Return the text of the mode line of the window showing BUFFER.
+BUFFER defaults to `rexel-elate-block'."
+  (let ((buf (or buffer (rexel-elate-block))))
+    (format-mode-line (buffer-local-value 'mode-line-format buf) nil
+                      (get-buffer-window buf) buf)))
+
+(defun rexel-elate-preview ()
+  "Show the block in the selected window while reading a string, as a picker does.
+The window shows its own buffer again afterwards."
+  (interactive)
+  (let* ((window (selected-window))
+         (shown (window-buffer window))
+         (block (rexel-elate-block)))
+    (minibuffer-with-setup-hook (lambda () (set-window-buffer window block))
+      (unwind-protect
+          (read-string "Preview: ")
+        (set-window-buffer window shown)))))
 
 (defvar rexel-elate-files-dir)
 

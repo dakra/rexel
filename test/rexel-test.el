@@ -1454,6 +1454,129 @@ of the buffer it was asked from, even when the connection opens later."
     (should (equal '((columns . 80) (rows . 24))
                    (alist-get 'args (alist-get 'payload (car sent)))))))
 
+(ert-deftest rexel-test-new-size-takes-focused-block ()
+  "A size ghostel asks for takes the block only while the block is focused."
+  (rexel-test--with-fake-conn sent
+    (setq rexel--data-state 'live)
+    (let ((focused nil))
+      (cl-letf (((symbol-function 'ghostel--buffer-focused-p)
+                 (lambda (_buffer) focused)))
+        (rexel--resize 24 80)
+        (should (equal "com.superlogical.terminal.resize"
+                       (alist-get 'method (car sent))))
+        (rexel-test--respond rexel--conn (car sent))
+        (setq focused t)
+        ;; The size asked for last takes nothing.
+        (rexel--resize 24 80)
+        (should (= 1 (length sent)))
+        (rexel--resize 30 100)
+        (should (equal "session.own_block" (alist-get 'method (car sent))))
+        (rexel-test--respond rexel--conn (car sent))
+        (should (equal '((columns . 100) (rows . 30))
+                       (alist-get 'args (alist-get 'payload (car sent)))))))))
+
+(ert-deftest rexel-test-selected-window-takes-in-focused-frame ()
+  "Selecting a block's window focuses the block, and takes it with the focus."
+  (rexel-test--with-fake-conn sent
+    (setq rexel--data-state 'live)
+    (let ((state nil)
+          (window (selected-window)))
+      (cl-letf (((symbol-function 'frame-focus-state) (lambda (&rest _) state))
+                ((symbol-function 'ghostel--desired-size) (lambda () '(80 . 24))))
+        (set-window-buffer window (current-buffer))
+        (rexel--window-selected window)
+        (should (equal '("session.focus_block")
+                       (mapcar (lambda (o) (alist-get 'method o)) sent)))
+        (dolist (focus '(t unknown))
+          (setq state focus
+                sent nil
+                rexel--size-inflight nil)
+          (rexel--window-selected window)
+          (should (equal '("session.own_block" "session.focus_block")
+                         (mapcar (lambda (o) (alist-get 'method o)) sent))))))))
+
+(ert-deftest rexel-test-focused-frame-takes-its-selected-block ()
+  "A frame that gets the focus takes the block in its selected window, once."
+  (rexel-test--with-fake-conn sent
+    (setq rexel--data-state 'live)
+    (let ((state nil)
+          (timers nil)
+          (rexel--focus-timer nil)
+          (window (selected-window)))
+      (cl-letf (((symbol-function 'frame-focus-state) (lambda (&rest _) state))
+                ((symbol-function 'ghostel--desired-size) (lambda () '(80 . 24)))
+                ((symbol-function 'run-at-time)
+                 (lambda (_time _repeat function &rest _)
+                   (push function timers) 'timer)))
+        (set-window-buffer window (current-buffer))
+        (rexel--focus-changed)
+        (rexel--focus-changed)
+        (should (= 1 (length timers)))
+        (should-not sent)
+        (funcall (pop timers))
+        (should-not sent)
+        (setq state t)
+        (rexel--focus-changed)
+        (funcall (pop timers))
+        (should (equal '("session.own_block")
+                       (mapcar (lambda (o) (alist-get 'method o)) sent)))
+        ;; No block is selected there.
+        (setq sent nil
+              rexel--size-inflight nil)
+        (with-temp-buffer
+          (set-window-buffer window (current-buffer))
+          (rexel--take-focused))
+        (should-not sent)))))
+
+(ert-deftest rexel-test-owner-follows-view ()
+  "A block's owner is the one the session's view names."
+  (rexel-test--with-fake-conn sent
+    (let* ((conn rexel--conn)
+           (view (rexel-test--view "block:123456"))
+           (block (aref (alist-get 'blocks
+                                   (aref (alist-get 'layers
+                                                    (aref (alist-get 'windows view) 0))
+                                         0))
+                        0)))
+      (rexel-test--with-attached-block conn
+        (rexel--apply-view conn "s" view)
+        (should-not rexel--owner)
+        (nconc block (list (cons 'owner "client:other")))
+        (rexel--apply-view conn "s" view)
+        (should (equal "client:other" rexel--owner))))))
+
+(ert-deftest rexel-test-size-tag-names-another-owner ()
+  "The mode line tag shows while another client owns a live block."
+  (rexel-test--with-fake-conn sent
+    (setf (rexel--conn-client-id rexel--conn) "client:me")
+    (setq rexel--data-state 'live
+          ghostel--term-cols 183
+          ghostel--term-rows 138)
+    (should-not (rexel--size-tag))
+    (setq rexel--owner "client:me")
+    (should-not (rexel--size-tag))
+    (setq rexel--owner "client:other")
+    (should (equal " [Sized by another client 183x138]"
+                   (substring-no-properties (rexel--size-tag))))
+    (setq rexel--data-state 'closed)
+    (should-not (rexel--size-tag))
+    ;; A server that names no client ID tells nothing about the owner.
+    (setq rexel--data-state 'live)
+    (setf (rexel--conn-client-id rexel--conn) t)
+    (should-not (rexel--size-tag))
+    (should-not sent)))
+
+(ert-deftest rexel-test-size-tag-click-takes-block ()
+  "Mouse-1 on the mode line tag takes the block of the clicked window."
+  (rexel-test--with-fake-conn sent
+    (setq rexel--data-state 'live)
+    (let ((window (selected-window)))
+      (cl-letf (((symbol-function 'ghostel--desired-size) (lambda () '(80 . 24))))
+        (set-window-buffer window (current-buffer))
+        (with-temp-buffer
+          (rexel--size-tag-take `(mouse-1 (,window mode-line (0 . 0) 0))))
+        (should (equal "session.own_block" (alist-get 'method (car sent))))))))
+
 (ert-deftest rexel-test-ws-filter-buffers-whole-frames ()
   (let* ((ws (websocket-inner-create :conn nil :url "u" :ready-state 'open))
          (proc (make-pipe-process :name "rexel-test" :noquery t))
