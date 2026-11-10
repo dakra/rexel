@@ -138,6 +138,23 @@
     {"type": "y"},
     {"wait": "until", "pred": "(not (rexel-elate-on-server-p \"-proj\"))"},
 
+    {"group": "remote", "comment": "in a TRAMP directory M-x rexel uses the server labelled with the directory's host; the shell starts in the directory there, and default-directory follows it under the TRAMP prefix"},
+    {"eval": "(progn (rexel-elate-use \"local\" \"unix\") (setq rexel-default-session (concat rexel-elate-label \"-far\")) (switch-to-buffer \"*scratch*\") (setq default-directory \"/usr/lib/\"))"},
+    {"eval": "(let ((default-directory \"/ssh:unix:/usr/lib/\")) (rexel))"},
+    {"wait": "until", "pred": "(and (rexel-elate-live-p) (equal \"unix\" (rexel--conn-host (buffer-local-value 'rexel--conn (rexel-elate-block)))) (rexel-elate-named-p \"1\" nil \"-far\"))"},
+    {"type": "echo r0:$PWD"},
+    {"keys": "RET"},
+    {"wait": "until", "pred": "(rexel-elate-has \"^r0:/usr/lib$\")"},
+    {"eval": "(rexel-elate-shell)", "comment": "a shell that reports no directory itself: the relay's server is this machine, whose own reports name a local directory"},
+    {"wait": "until", "pred": "(rexel-elate-prompt-p)"},
+    {"type": "cd /usr/share"},
+    {"keys": "RET"},
+    {"wait": "until", "pred": "(equal \"/ssh:unix:/usr/share/\" (buffer-local-value 'default-directory (rexel-elate-block)))", "timeout": 30},
+    {"eval": "(switch-to-buffer \"*scratch*\")"},
+
+    {"group": "remote-unknown", "comment": "a TRAMP directory on a machine without a known server is an error"},
+    {"assert": {"eval": "(string-match-p \"No Rex server known for /ssh:nowhere:\" (condition-case err (let ((default-directory \"/ssh:nowhere:/tmp/\")) (rexel) \"\") (user-error (error-message-string err))))"}},
+
     {"group": "cleanup"},
     {"eval": "(rexel-elate-cleanup)"}
   ]

@@ -89,6 +89,17 @@ command runs from.  An empty or nil result lets the server choose one."
   "Label of the session `rexel' shows."
   :type 'string)
 
+(defcustom rexel-tramp-hosts nil
+  "TRAMP prefixes of the machines Rex servers run on.
+An alist of (LABEL . PREFIX): the files of the server labelled LABEL are
+those under the TRAMP prefix PREFIX, such as \"/ssh:studio:\".  In a
+directory under PREFIX, `rexel' and `rexel-project' use that server, and
+the buffers of its blocks follow their shells' directories there.
+A server labelled with the host name of a TRAMP directory, or with that
+name in its address, is found for the directory without an entry."
+  :type '(alist :key-type (string :tag "Server label")
+                :value-type (string :tag "TRAMP prefix")))
+
 (defcustom rexel-attach-display 'ask
   "What `rexel-attach' shows of a session with several blocks.
 `ask' reads a block, or a tab whose layout to show, from a list.
@@ -164,9 +175,10 @@ token of the latest welcome.  While the connection is being redialled, TIMER is
 the pending attempt and DELAY the seconds until the one after it.
 ATTACHING are the sessions whose `session.attach' after a redial is
 unanswered: the server refuses their typing and sizing until then.
-CLOSING are the blocks whose `block.close' is unanswered."
+CLOSING are the blocks whose `block.close' is unanswered.  TRAMP is the
+prefix of the TRAMP directory the server was last connected to for."
   ws endpoints endpoint untried host client-id token timer delay attaching
-  closing
+  closing tramp
   (next-id 0)
   (pending (make-hash-table :test #'equal))
   (sessions nil)
@@ -1371,6 +1383,11 @@ buffer is named after the end of BID until a view names its tab."
           ghostel-resize-function #'rexel--resize
           ghostel-send-files-function #'rexel--send-files)
     (setq-local ghostel-annotation-function #'rexel--annotation)
+    ;; A directory the shell reports itself is put under the prefix
+    ;; `default-directory' has.
+    (when-let* ((prefix (rexel--conn-prefix conn))
+                ((not (string-prefix-p prefix default-directory))))
+      (setq default-directory (concat prefix "/")))
     (rexel-block-mode 1)
     (add-hook 'window-buffer-change-functions #'rexel--window-shown nil t)
     (add-hook 'window-selection-change-functions #'rexel--window-selected nil t)
@@ -1533,8 +1550,9 @@ Typing while a write is unanswered probes the block's connections."
   "Handle the block event PAYLOAD of a session on CONN.
 A terminal's `process_changed' event names the foreground process, in
 place of ghostel's PTY probe: a foreground other than the shell means a
-command is running, and on this machine's server the shell's cwd becomes
-`default-directory'."
+command is running, and the shell's cwd becomes `default-directory': as
+it is on this machine's server, and below the TRAMP prefix of another
+server that has one."
   (when-let* ((buf (gethash (alist-get 'block_id payload)
                             (rexel--conn-blocks conn)))
               ((buffer-live-p buf))
@@ -1551,8 +1569,11 @@ command is running, and on this machine's server the shell's cwd becomes
                              (eql (alist-get 'pid fg) rexel--shell-pid)))
           (rexel--note-shell shell))
         ;; The cwd is a path on the server's machine.
-        (unless (rexel--conn-host conn)
-          (ghostel--update-directory (alist-get 'cwd shell)))
+        (when-let* ((cwd (alist-get 'cwd shell)))
+          (if (null (rexel--conn-host conn))
+              (ghostel--update-directory cwd)
+            (when-let* ((prefix (rexel--conn-prefix conn)))
+              (ghostel--update-directory (concat prefix cwd)))))
         ;; OSC 133 marks from the shell are exact and take over once seen.
         (unless (and ghostel--prompt-positions
                      (not (eq (car ghostel--prompt-positions) rexel--stale-prompt)))
@@ -2543,12 +2564,88 @@ With no server running, offer to start one, or with RUNNING do nothing."
   (let ((conn (rexel--local-conn)))
     (cond (conn (funcall callback conn))
           (running (when-let* ((host (assq nil (rexel--hosts))))
-                     (rexel--connect host callback)))
+                     (condition-case nil
+                         (rexel--connect host callback)
+                       (error nil))))
           (t (rexel--connect
               (or (assq nil (rexel--hosts))
                   (progn (rexel--autostart-server) (assq nil (rexel--hosts)))
                   (user-error "No Rex server runs on this machine"))
               callback)))))
+
+(defun rexel--prefix-host (prefix)
+  "Return the name of the host in the TRAMP PREFIX, without a port."
+  (when-let* ((host (file-remote-p prefix 'host)))
+    (replace-regexp-in-string "#.*\\'" "" host)))
+
+(defun rexel--prefix-label (prefix)
+  "Return the label of the server `rexel-tramp-hosts' gives PREFIX, or nil.
+PREFIX is as `file-remote-p' returns it, and the option's prefixes are
+compared in that form."
+  (car (seq-find (lambda (entry)
+                   (equal prefix (or (file-remote-p (cdr entry)) (cdr entry))))
+                 rexel-tramp-hosts)))
+
+(defun rexel--tramp-host (prefix hosts)
+  "Return the one of HOSTS whose machine the TRAMP PREFIX reaches, or nil.
+HOSTS are as `rexel--hosts' returns them.  It is the host that
+`rexel-tramp-hosts' gives PREFIX, else one labelled with the host name
+in PREFIX, else one with that name in an address."
+  (let ((name (rexel--prefix-host prefix))
+        (hosts (seq-filter (lambda (host) (stringp (car host))) hosts)))
+    (or (when-let* ((label (rexel--prefix-label prefix)))
+          (assoc-string label hosts t))
+        (and name
+             (or (assoc-string name hosts t)
+                 (seq-find
+                  (lambda (host)
+                    (seq-some
+                     (lambda (endpoint)
+                       (and (rexel--network-endpoint-p endpoint)
+                            (string= (downcase name)
+                                     (downcase (url-host (url-generic-parse-url
+                                                          endpoint))))))
+                     (cdr host)))
+                  hosts))))))
+
+(defun rexel--conn-prefix (conn)
+  "Return the TRAMP prefix of the files on CONN's server, or nil.
+It is the one `rexel-tramp-hosts' gives the server, else that of the
+TRAMP directory the server was last connected to for."
+  (and (rexel--conn-host conn)
+       (or (cdr (assoc-string (rexel--conn-host conn) rexel-tramp-hosts t))
+           (rexel--conn-tramp conn))))
+
+(defun rexel--connect-directory (callback &optional running)
+  "Call CALLBACK with a ready connection to the server of `default-directory'.
+That is this machine's server, also for a TRAMP directory on this
+machine, and for one elsewhere the server `rexel--tramp-host' finds.
+Without a server, offer to start this machine's and signal an error for
+another machine, or with RUNNING do nothing."
+  (let ((prefix (file-remote-p default-directory)))
+    (if (or (null prefix) (ghostel--local-host-p (rexel--prefix-host prefix)))
+        (rexel--connect-local callback running)
+      (let* ((label (rexel--prefix-label prefix))
+             (conn (seq-find
+                    (lambda (conn)
+                      (and (rexel--ready-p conn)
+                           (if label
+                               (string= (downcase label)
+                                        (downcase (or (rexel--conn-host conn) "")))
+                             (equal prefix (rexel--conn-tramp conn)))))
+                    rexel--conns))
+             (host (and (not conn) (rexel--tramp-host prefix (rexel--hosts))))
+             (use (lambda (conn)
+                    (setf (rexel--conn-tramp conn) prefix)
+                    (funcall callback conn))))
+        (cond (conn (funcall use conn))
+              ((and host running)
+               ;; A server that cannot be dialled is one that does not run.
+               (condition-case nil (rexel--connect host use) (error nil)))
+              (host (rexel--connect host use))
+              ((not running)
+               (user-error "No Rex server known for %s; see `rexel-tramp-hosts'"
+                           prefix)))))))
 
 (defun rexel--find-session (conn label callback)
   "Call CALLBACK with the ID of the session labelled LABEL on CONN, or nil.
@@ -2662,10 +2759,20 @@ Without CWD the shell starts in the home directory."
 
 (defun rexel--shell-directory (conn)
   "Return `default-directory' as a directory on CONN's server, or nil.
-Only this machine's server shares local file names."
-  (and (null (rexel--conn-host conn))
-       (not (file-remote-p default-directory))
-       (directory-file-name (expand-file-name default-directory))))
+A local directory is one on this machine's server.  A TRAMP directory is
+one on the server it was connected to for, see `rexel--connect-directory',
+unless it is relative to a home directory."
+  (let ((prefix (file-remote-p default-directory)))
+    (cond ((null prefix)
+           (and (null (rexel--conn-host conn))
+                (directory-file-name (expand-file-name default-directory))))
+          ((if (rexel--conn-host conn)
+               (equal prefix (rexel--conn-tramp conn))
+             (ghostel--local-host-p (rexel--prefix-host prefix)))
+           (let ((dir (file-local-name default-directory)))
+             (and (file-name-absolute-p dir)
+                  (not (string-prefix-p "~" dir))
+                  (directory-file-name dir)))))))
 
 (defun rexel--block-directory (callback)
   "Call CALLBACK with the directory for a shell beside the current block.
@@ -2746,11 +2853,13 @@ opens a tab labelled TAB-LABEL with a shell in CWD."
          (rexel--open-tab conn sid cwd tab-label rexel--same-window))))))
 
 (defun rexel--open-session (label &optional arg tab-label)
-  "Show the session labelled LABEL on this machine's server, creating it.
-ARG is the prefix argument of `rexel'.  A new shell starts in
-`default-directory', and a new tab is labelled TAB-LABEL."
+  "Show the session labelled LABEL, creating it.
+It is on the server of `default-directory', see
+`rexel--connect-directory'.  ARG is the prefix argument of `rexel'.  A
+new shell starts in `default-directory', and a new tab is labelled
+TAB-LABEL."
   (let ((dir default-directory))
-    (rexel--connect-local
+    (rexel--connect-directory
      (lambda (conn)
        (let ((cwd (let ((default-directory dir))
                     (rexel--shell-directory conn))))
@@ -2767,8 +2876,9 @@ ARG is the prefix argument of `rexel'.  A new shell starts in
 ;;;###autoload
 (defun rexel (&optional arg)
   "Show the Rex session labelled `rexel-default-session', creating it.
-The session is on this machine's server.  Show the block of it that was
-selected last, or after attaching to it the focused one.
+The session is on this machine's server, or in a TRAMP directory on the
+server of its machine, see `rexel-tramp-hosts'.  Show the block of it
+that was selected last, or after attaching to it the focused one.
 With a non-numeric prefix ARG, open a new tab with a shell in
 `default-directory'.  With a numeric prefix ARG, show the tab of that
 number, or open a new tab when there is none.

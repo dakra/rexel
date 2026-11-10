@@ -99,5 +99,43 @@ connection."
         (rexel-project-kill)))
     (should killed)))
 
+(ert-deftest rexel-project-test-kill-of-a-remote-project-without-a-server ()
+  "A project on a machine without a known Rex server loses its buffers alone."
+  (let ((rexel--conns nil)
+        (rexel-tramp-hosts nil)
+        (killed nil))
+    (cl-letf (((symbol-function 'rexel--hosts) (lambda () '((nil "sock"))))
+              ((symbol-function 'rexel--connect)
+               (lambda (&rest _) (error "Dialled a server")))
+              ((symbol-function 'project-kill-buffers)
+               (lambda () (setq killed t) '(killed))))
+      (rexel-project-test--with-project "/ssh:box:/srv/app/"
+        (let ((default-directory "/ssh:box:/srv/app/src/"))
+          (rexel-project-kill))))
+    (should killed)))
+
+(ert-deftest rexel-project-test-kill-uses-the-server-of-the-project ()
+  "The session's server is the project's, also once the current buffer is killed."
+  (let ((file (generate-new-buffer "rexel-project-test-file"))
+        (other (generate-new-buffer "rexel-project-test-other"))
+        directory)
+    (unwind-protect
+        (cl-letf (((symbol-function 'rexel--connect-directory)
+                   (lambda (&rest _) (setq directory default-directory)))
+                  ((symbol-function 'project-kill-buffers)
+                   (lambda ()
+                     (kill-buffer file)
+                     (set-buffer other)
+                     '(killed))))
+          (with-current-buffer other (setq default-directory "/tmp/"))
+          (rexel-project-test--with-project "/ssh:box:/srv/app/"
+            (save-current-buffer
+              (set-buffer file)
+              (setq default-directory "/ssh:box:/srv/app/src/")
+              (rexel-project-kill)))
+          (should (equal "/ssh:box:/srv/app/" directory)))
+      (when (buffer-live-p file) (kill-buffer file))
+      (kill-buffer other))))
+
 (provide 'rexel-project-test)
 ;;; rexel-project-test.el ends here

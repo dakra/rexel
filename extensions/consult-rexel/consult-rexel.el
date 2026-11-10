@@ -504,8 +504,9 @@ With prefix ARG, behave like `rexel-project' called with ARG."
       (rexel-project arg)
     (let* ((project (project-current t))
            (root (project-root project))
-           (label (funcall rexel-project-label-function project)))
-      (rexel--connect-local
+           (label (funcall rexel-project-label-function project))
+           (default-directory root))
+      (rexel--connect-directory
        (lambda (conn)
          (rexel--find-session
           conn label

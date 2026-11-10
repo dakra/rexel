@@ -6,7 +6,9 @@
 ;;; Commentary:
 
 ;; A project has one Rex session, labelled with the project's name, and a
-;; terminal of the project is a tab of it.  `rexel-project' shows the
+;; terminal of the project is a tab of it.  The session of a project in
+;; a TRAMP directory is on the Rex server of that machine, see
+;; `rexel-tramp-hosts'.  `rexel-project' shows the
 ;; session and creates it in the project's root, `rexel-project-new'
 ;; opens another tab, and `rexel-project-kill' destroys the session with
 ;; the project's buffers.
@@ -36,8 +38,8 @@ It receives the project.  Projects with one label share a session."
 (defun rexel-project (&optional arg)
   "Show the Rex session of the current project, creating it.
 The session is the one `rexel-project-label-function' names, on the
-server `rexel' uses.  ARG is as for `rexel'; a new shell starts in the
-project's root.
+server `rexel' uses in the project's root.  ARG is as for `rexel'; a new
+shell starts in the project's root.
 To add this to `project-switch-commands':
   (add-to-list \\='project-switch-commands \\='(rexel-project \"Rexel\") t)"
   (interactive "P")
@@ -58,33 +60,37 @@ Like \\[universal-argument] `rexel-project'."
 `project-kill-buffers' kills the buffers, asking first.  The session
 goes when that was confirmed, unless a block of it was kept there.  A
 session with blocks that run a command asks, and so does a project
-without buffers to kill.  Without a running Rex server only the buffers
-are killed.
+without buffers to kill.  Without a running Rex server for the project
+only the buffers are killed.
 To use this in place of `project-kill-buffers':
   (global-set-key [remap project-kill-buffers] #\\='rexel-project-kill)"
   (interactive)
-  (let* ((label (funcall rexel-project-label-function (project-current t)))
+  (let* ((project (project-current t))
+         (label (funcall rexel-project-label-function project))
+         (root (project-root project))
          (rexel--kill-declined nil)
          ;; Nil when the user declined, and the message when there was
          ;; no buffer to kill.
          (killed (project-kill-buffers))
          (declined rexel--kill-declined))
     (when killed
-      (rexel--connect-local
-       (lambda (conn)
-         (rexel--find-session
-          conn label
-          (lambda (sid)
-            (when (and sid
-                       (not (seq-some
-                             (lambda (buf)
-                               (and (buffer-live-p buf)
-                                    (equal (buffer-local-value
-                                            'rexel--session-id buf)
-                                           sid)))
-                             declined)))
-              (rexel--destroy-session conn sid label (stringp killed))))))
-       t))))
+      ;; The buffer that was current may be among the killed.
+      (let ((default-directory root))
+        (rexel--connect-directory
+         (lambda (conn)
+           (rexel--find-session
+            conn label
+            (lambda (sid)
+              (when (and sid
+                         (not (seq-some
+                               (lambda (buf)
+                                 (and (buffer-live-p buf)
+                                      (equal (buffer-local-value
+                                              'rexel--session-id buf)
+                                             sid)))
+                               declined)))
+                (rexel--destroy-session conn sid label (stringp killed))))))
+         t)))))
 
 (provide 'rexel-project)
 ;;; rexel-project.el ends here

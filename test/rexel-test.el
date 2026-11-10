@@ -424,7 +424,20 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
                      (rexel--new-shell-layout (rexel--shell-directory local))))
       (should-not (rexel--shell-directory remote)))
     (let ((default-directory "/ssh:studio:/tmp/"))
-      (should-not (rexel--shell-directory local)))
+      (should-not (rexel--shell-directory local))
+      ;; A TRAMP directory is one on the server connected to for its prefix.
+      (should-not (rexel--shell-directory remote))
+      (setf (rexel--conn-tramp remote) "/ssh:studio:")
+      (should (equal "/tmp" (rexel--shell-directory remote))))
+    (let ((default-directory "/ssh:daniel@studio:/srv/app/"))
+      (should-not (rexel--shell-directory remote)))
+    ;; The server does not expand a home directory.
+    (let ((default-directory "/ssh:studio:~/src/"))
+      (should-not (rexel--shell-directory remote)))
+    ;; A TRAMP directory on this machine is one of this machine's server.
+    (let ((default-directory "/sudo::/etc/"))
+      (should (equal "/etc" (rexel--shell-directory local)))
+      (should-not (rexel--shell-directory remote)))
     (should (equal `((block . ((flavor . ,rexel--shell-flavor))))
                    (rexel--new-shell-layout)))))
 
@@ -3830,6 +3843,118 @@ passed on.  Return (PROMPTS . METHODS), the methods oldest first."
 (defconst rexel-test--idle-report
   '((foreground . ((name . "zsh") (pid . 2))))
   "A process report of a block whose shell is in the foreground.")
+
+(ert-deftest rexel-test-tramp-host ()
+  "A TRAMP prefix names a server by `rexel-tramp-hosts', its label or its address."
+  (let ((hosts '((nil "/tmp/rex.sock")
+                 ("Studio" "https://rex.tail1234.ts.net" "https://10.0.0.2:7297")
+                 ("devbox" "/tmp/devbox.sock")))
+        (rexel-tramp-hosts nil))
+    (should (equal "Studio" (car (rexel--tramp-host "/ssh:studio:" hosts))))
+    (should (equal "Studio" (car (rexel--tramp-host "/ssh:daniel@studio:" hosts))))
+    (should (equal "Studio" (car (rexel--tramp-host "/ssh:studio#2222:" hosts))))
+    (should (equal "Studio" (car (rexel--tramp-host "/ssh:rex.tail1234.ts.net:"
+                                                    hosts))))
+    (should (equal "Studio" (car (rexel--tramp-host "/ssh:10.0.0.2:" hosts))))
+    (should-not (rexel--tramp-host "/ssh:box:" hosts))
+    ;; This machine's server, which has no label, is never the one.
+    (should-not (rexel--tramp-host "/ssh:nil:" hosts))
+    (let ((rexel-tramp-hosts '(("devbox" . "/ssh:box:") ("gone" . "/ssh:studio:"))))
+      (should (equal "devbox" (car (rexel--tramp-host "/ssh:box:" hosts))))
+      (should (equal "Studio" (car (rexel--tramp-host "/ssh:studio:" hosts)))))
+    ;; A prefix with a hop is compared as the prefix of a file under it.
+    (let ((rexel-tramp-hosts '(("devbox" . "/ssh:jump|ssh:box:"))))
+      (should (equal "devbox" (car (rexel--tramp-host "/ssh:box:" hosts)))))))
+
+(ert-deftest rexel-test-connect-directory ()
+  "A TRAMP directory is served by the server of its machine, or by none."
+  (let* ((rexel--conns nil)
+         (rexel-tramp-hosts nil)
+         (studio (rexel--make-conn :endpoints (list "x") :client-id t :host "studio"))
+         (asked 0) dialled got)
+    (cl-letf (((symbol-function 'rexel--hosts)
+               (lambda () (cl-incf asked) '((nil "sock") ("studio" "x"))))
+              ((symbol-function 'rexel--connect)
+               (lambda (host callback) (setq dialled host) (funcall callback studio)))
+              ((symbol-function 'rexel--connect-local)
+               (lambda (callback &optional running)
+                 (funcall callback (list 'local running)))))
+      (dolist (default-directory '("/usr/lib/" "/sudo::/etc/" "/ssh:localhost:/tmp/"))
+        (setq got nil)
+        (rexel--connect-directory (lambda (c) (setq got c)) t)
+        (should (equal '(local t) got)))
+      (let ((default-directory "/ssh:studio:/srv/app/"))
+        (rexel--connect-directory (lambda (c) (setq got c)))
+        (should (eq studio got))
+        (should (equal '("studio" "x") dialled))
+        (should (equal "/ssh:studio:" (rexel--conn-prefix studio)))
+        ;; A connection that has the prefix is used without a new search.
+        (setq rexel--conns (list studio) dialled nil asked 0)
+        (rexel--connect-directory (lambda (c) (setq got c)))
+        (should (eq studio got))
+        (should-not dialled)
+        (should (= 0 asked))
+        ;; The server the option names for the prefix comes before it.
+        (let ((rexel-tramp-hosts '(("other" . "/ssh:studio:")))
+              (other (rexel--make-conn :endpoints (list "o") :client-id t
+                                       :host "Other")))
+          (setq rexel--conns (list studio other))
+          (rexel--connect-directory (lambda (c) (setq got c)))
+          (should (eq other got))
+          (should (equal "/ssh:studio:" (rexel--conn-tramp other)))))
+      ;; A server that cannot be dialled does not run.
+      (let ((default-directory "/ssh:studio:/srv/app/")
+            (rexel--conns nil))
+        (cl-letf (((symbol-function 'rexel--connect)
+                   (lambda (&rest _) (user-error "Rex server socket is gone"))))
+          (rexel--connect-directory #'ignore t)
+          (should-error (rexel--connect-directory #'ignore) :type 'user-error)))
+      (let ((default-directory "/ssh:box:/srv/app/"))
+        (setq got nil)
+        (rexel--connect-directory (lambda (c) (setq got c)) t)
+        (should-not got)
+        (should-error (rexel--connect-directory #'ignore) :type 'user-error)))))
+
+(ert-deftest rexel-test-remote-block-starts-under-the-prefix ()
+  "The buffer of a block on a server with a TRAMP prefix is in a directory there."
+  (let ((conn (rexel--make-conn :endpoints (list "x") :host "studio"
+                                :tramp "/ssh:studio:"))
+        (rexel-tramp-hosts nil))
+    (cl-letf (((symbol-function 'rexel-block-mode) #'ignore)
+              ((symbol-function 'rexel--open-data-connection) #'ignore))
+      (with-temp-buffer
+        (setq default-directory "/usr/lib/")
+        (rexel--attach-block-buffer conn "s" "block:00000a" (current-buffer))
+        (should (equal "/ssh:studio:/" default-directory))
+        (setq default-directory "/ssh:studio:/srv/app/")
+        (rexel--attach-block-buffer conn "s" "block:00000a" (current-buffer))
+        (should (equal "/ssh:studio:/srv/app/" default-directory)))
+      (setf (rexel--conn-tramp conn) nil)
+      (with-temp-buffer
+        (setq default-directory "/usr/lib/")
+        (rexel--attach-block-buffer conn "s" "block:00000b" (current-buffer))
+        (should (equal "/usr/lib/" default-directory))))))
+
+(ert-deftest rexel-test-remote-block-follows-its-shell-under-the-prefix ()
+  "A block of a server with a TRAMP prefix has its shell's directory under it."
+  (rexel-test--with-fake-conn sent
+    (ignore sent)
+    (let ((conn rexel--conn)
+          (shell '((name . "zsh") (pid . 2) (cwd . "/srv/app")))
+          (rexel-tramp-hosts nil)
+          dirs)
+      (setf (rexel--conn-host conn) "studio")
+      (puthash "b" (current-buffer) (rexel--conn-blocks conn))
+      (cl-letf (((symbol-function 'ghostel--update-directory)
+                 (lambda (dir) (push dir dirs))))
+        (rexel--on-block-event conn (rexel-test--process-event shell))
+        (should-not dirs)
+        (setf (rexel--conn-tramp conn) "/ssh:studio:")
+        (rexel--on-block-event conn (rexel-test--process-event shell))
+        (should (equal '("/ssh:studio:/srv/app") dirs))
+        (setf (rexel--conn-host conn) nil)
+        (rexel--on-block-event conn (rexel-test--process-event shell))
+        (should (equal "/srv/app" (car dirs)))))))
 
 (ert-deftest rexel-test-destroy-session-asks-for-running-commands ()
   "A session goes at once when its blocks are idle, else after a question."

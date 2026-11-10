@@ -219,6 +219,23 @@ The session is found by its label, so two projects of one name share a
 session, and a session renamed in another client is no longer the
 project's.  =rexel-project-label-function= returns the label for a project.
 
+** Projects on other machines
+
+In a TRAMP directory both commands use the Rex server of that machine:
+a project at =/ssh:studio:/srv/app/= has its session on the server
+labelled =studio=, or whose address names the host =studio=, and its shell
+starts in =/srv/app= there.  A machine without a known server is an error,
+and a TRAMP directory on this machine, as under =/sudo::=, uses this
+machine's server.  =rexel-tramp-hosts= names the server for a TRAMP prefix
+that neither matches:
+
+#+begin_src emacs-lisp
+(setq rexel-tramp-hosts '(("devbox" . "/ssh:daniel@box.example.org:")))
+#+end_src
+
+The buffers of such a server's blocks follow their shells' directories
+under the prefix, so =find-file= in one starts there.
+
 =project-kill-buffers= itself leaves the sessions alone: by default it
 kills no ghostel buffer.  Ghostel's README has the condition that makes
 it kill them, which closes the blocks of a project and leaves its
@@ -369,7 +386,8 @@ Rexel types its own path.
 The Rex server starts the shell of a block, so ghostel cannot inject its
 shell integration.  Rexel reads the processes Rex reports instead:
 =default-directory= follows the shell's working directory on this machine's
-server, and =ghostel-command-running-p= knows when a command runs.  Rex
+server and on one with a TRAMP prefix (see [[*Projects on other machines][Projects on other machines]]),
+and =ghostel-command-running-p= knows when a command runs.  Rex
 reports process changes with some delay, so a command that finishes within
 a moment can go unseen.
 
@@ -406,6 +424,7 @@ Rex.app, which uses the directory report and ignores the rest.
 | =rexel-attach-display=         | =ask=       | What =rexel-attach= shows: =ask=, =focused= or =layout=        |
 | =rexel-default-session=        | ="emacs"=   | Label of the session =M-x rexel= shows                   |
 | =rexel-project-label-function= | name      | Returns the label of a project's session               |
+| =rexel-tramp-hosts=            | =nil=       | TRAMP prefixes of servers' machines, by server label   |
 | =rexel-session-label-function= | =nil=       | Rewrites the label given to =rexel-new-session=          |
 | =rexel-kill-buffer-action=     | =close=     | What killing a block buffer does: =close=, =keep= or =ask=   |
 | =rexel-prefix-key=             | ="C-c C-r"= | Prefix for =rexel-prefix-map= in block buffers           |
