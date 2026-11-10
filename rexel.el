@@ -95,6 +95,17 @@ a block.  A session of one block is shown without asking."
                  (const :tag "The focused block" focused)
                  (const :tag "The active tab's layout" layout)))
 
+(defcustom rexel-kill-buffer-action 'close
+  "What killing a block buffer does to its block on the server.
+`close' closes the block, which ends its program, and asks first when
+the block runs a command.  `keep' leaves the block running; its buffer
+returns with the session's next change.  `ask' asks which of the two to
+do.  A buffer without a connection to its server leaves the block
+running."
+  :type '(choice (const :tag "Close the block" close)
+                 (const :tag "Keep the block running" keep)
+                 (const :tag "Ask" ask)))
+
 (defvar rexel-prefix-map)
 (defvar rexel-block-mode-map)
 
@@ -146,8 +157,10 @@ from a welcome until the connection closes, and TOKEN is the reconnect
 token of the latest welcome.  While the connection is being redialled, TIMER is
 the pending attempt and DELAY the seconds until the one after it.
 ATTACHING are the sessions whose `session.attach' after a redial is
-unanswered: the server refuses their typing and sizing until then."
+unanswered: the server refuses their typing and sizing until then.
+CLOSING are the blocks whose `block.close' is unanswered."
   ws endpoints endpoint untried host client-id token timer delay attaching
+  closing
   (next-id 0)
   (pending (make-hash-table :test #'equal))
   (sessions nil)
@@ -597,7 +610,8 @@ stay for reading until `rexel-attach' reuses them."
   (pcase-dolist (`(,_sid . ,timer) (rexel--conn-refresh-timers conn))
     (cancel-timer timer))
   (setf (rexel--conn-refresh-timers conn) nil
-        (rexel--conn-client-id conn) nil)
+        (rexel--conn-client-id conn) nil
+        (rexel--conn-closing conn) nil)
   (clrhash (rexel--conn-pending conn))
   (dolist (buf (buffer-list))
     (when (and (eq (buffer-local-value 'rexel--conn buf) conn)
@@ -632,7 +646,7 @@ response or repeat a change the view already has."
            ("block_closed"
             (when-let* ((buf (gethash (alist-get 'block_id inner-payload)
                                       (rexel--conn-blocks conn))))
-              (when (buffer-live-p buf) (kill-buffer buf))))
+              (rexel--discard-buffer buf)))
            ("session_view_changed"
             (when (assoc sid (rexel--conn-sessions conn))
               (rexel--schedule-view-refresh conn sid)))
@@ -821,6 +835,13 @@ Nil until the answer to `data.connect'.")
 (defvar-local rexel--stale-prompt nil
   "The newest of `ghostel--prompt-positions' when the shell last execed.
 OSC 133 marks count again once a prompt was marked after it.")
+
+(defvar rexel--keep-blocks nil
+  "Non-nil while rexel itself kills block buffers, which closes no block.")
+
+(defvar-local rexel--close-on-kill 'unasked
+  "Whether killing this buffer closes its block: t, nil or `unasked'.
+`rexel--kill-buffer-query' decides.")
 
 (defun rexel--attach-session (conn sid &optional display)
   "Attach CONN to session SID and show it as DISPLAY says.
@@ -1163,8 +1184,7 @@ Without a focused terminal block, pop to VIEW's first terminal block."
         (alist-get sid (rexel--conn-sessions conn) nil t #'equal) nil
         (alist-get sid (rexel--conn-revisions conn) nil t #'equal) nil
         (rexel--conn-attaching conn) (delete sid (rexel--conn-attaching conn)))
-  (dolist (buf (rexel--session-buffers sid))
-    (kill-buffer buf)))
+  (mapc #'rexel--discard-buffer (rexel--session-buffers sid)))
 
 (defun rexel--session-buffers (sid)
   "Return the block buffers of session SID on any connection, streaming or not."
@@ -1195,7 +1215,8 @@ already applied is ignored."
         (setf (alist-get sid (rexel--conn-sessions conn) nil nil #'equal)
               (alist-get 'label view))
         (pcase-dolist (`(,bid . ,_) blocks)
-          (rexel--ensure-block-buffer conn sid bid))
+          (unless (member bid (rexel--conn-closing conn))
+            (rexel--ensure-block-buffer conn sid bid)))
         (dolist (buf (rexel--session-buffers sid))
           (with-current-buffer buf
             (if (assoc rexel--block-id blocks)
@@ -1207,7 +1228,7 @@ already applied is ignored."
                   (force-mode-line-update)
                   (unless (equal name (buffer-name))
                     (rename-buffer name t)))
-              (kill-buffer buf))))))))
+              (rexel--discard-buffer buf))))))))
 
 (defun rexel--annotation ()
   "Return this block's tab, and the state of a stream that is not live.
@@ -1268,6 +1289,7 @@ A buffer whose stream ended earlier is reset and streamed again."
           rexel--data-state nil
           rexel--requested-size nil
           rexel--size-take nil
+          rexel--close-on-kill 'unasked
           ghostel-pty-out-function #'rexel--pty-out
           ghostel-resize-function #'rexel--resize
           ghostel-send-files-function #'rexel--send-files)
@@ -1276,13 +1298,75 @@ A buffer whose stream ended earlier is reset and streamed again."
     (add-hook 'window-buffer-change-functions #'rexel--window-shown nil t)
     (add-hook 'window-selection-change-functions #'rexel--window-selected nil t)
     (add-function :after after-focus-change-function #'rexel--focus-changed)
+    (add-hook 'kill-buffer-query-functions #'rexel--kill-buffer-query nil t)
     (add-hook 'kill-buffer-hook #'rexel--block-buffer-killed nil t)
     (rexel--open-data-connection conn buf))
   buf)
 
+(defun rexel--discard-buffer (buf)
+  "Kill the block buffer BUF, if live, and leave its block to the server."
+  (when (buffer-live-p buf)
+    (let ((rexel--keep-blocks t))
+      (kill-buffer buf))))
+
+(defun rexel--closable-p ()
+  "Return non-nil when killing this buffer may close its block.
+The server refuses to while the session is being reattached."
+  (and (not rexel--keep-blocks) rexel--block-id (rexel--ready-p rexel--conn)
+       (not (member rexel--session-id (rexel--conn-attaching rexel--conn)))))
+
+(defun rexel--kill-buffer-query ()
+  "Decide whether killing this buffer closes its block.
+`rexel-kill-buffer-action' says what is asked.  Return nil to keep the
+buffer, as `kill-buffer-query-functions' expects."
+  (let* ((closable (rexel--closable-p))
+         (action rexel-kill-buffer-action)
+         (keep-buffer
+          (and closable (eq action 'close) ghostel--command-running
+               (not (yes-or-no-p (format "Rex block %s runs a command; close it? "
+                                         (buffer-name)))))))
+    (setq rexel--close-on-kill
+          (cond ((or keep-buffer (not closable)) 'unasked)
+                ((eq action 'ask)
+                 (y-or-n-p (format "Close Rex block %s on the server too? "
+                                   (buffer-name))))
+                (t (eq action 'close))))
+    (not keep-buffer)))
+
+(defun rexel--close-block (conn sid bid)
+  "Close block BID of session SID on CONN, ending its program.
+Until the answer no view makes a buffer for the block, and after it none
+older than the close does."
+  (push bid (rexel--conn-closing conn))
+  (cl-flet ((answered (result err)
+              (setf (rexel--conn-closing conn)
+                    (delete bid (rexel--conn-closing conn)))
+              (when err
+                (message "rexel: block.close: %s" err))
+              (when-let* ((revision (alist-get 'revision result))
+                          ((assoc sid (rexel--conn-sessions conn))))
+                (cl-callf (lambda (applied) (max revision (or applied 0)))
+                    (alist-get sid (rexel--conn-revisions conn)
+                               nil nil #'equal)))))
+    (condition-case err
+        (rexel--request
+         conn "block.close" `((session_id . ,sid) (block_id . ,bid))
+         (lambda (result err)
+           (answered result (and err (rexel--error-string err)))))
+      (error (answered nil (error-message-string err))))))
+
 (defun rexel--block-buffer-killed ()
   "Close the connections of the block buffer being killed.
-The block itself keeps running on the server."
+Close its block too if `rexel--kill-buffer-query' decided so; a kill that
+ran no query follows `rexel-kill-buffer-action', `ask' keeping the block."
+  (when (if (eq rexel--close-on-kill 'unasked)
+            (eq rexel-kill-buffer-action 'close)
+          rexel--close-on-kill)
+    (cond ((rexel--closable-p)
+           (rexel--close-block rexel--conn rexel--session-id rexel--block-id))
+          ((and rexel--conn (not rexel--keep-blocks))
+           (message "rexel: %s: not connected, its block keeps running"
+                    (buffer-name)))))
   (when rexel--conn
     (remhash rexel--block-id (rexel--conn-blocks rexel--conn)))
   (when (or rexel--uploads rexel--upload-queue)
@@ -2648,9 +2732,7 @@ empty shows its focused block alone."
   (interactive)
   (rexel--ensure-block-buffer-context)
   (when (yes-or-no-p (format "Close Rex block %s? " (buffer-name)))
-    (rexel--request rexel--conn "block.close"
-                    `((session_id . ,rexel--session-id)
-                      (block_id . ,rexel--block-id)))))
+    (rexel--close-block rexel--conn rexel--session-id rexel--block-id)))
 
 (defun rexel-upload-file (files &optional buffer)
   "Send FILES to the program in the Rex block of BUFFER, by default this one.

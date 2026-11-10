@@ -3376,6 +3376,149 @@ is waiting to be read."
           (kill-buffer previewed)
           (kill-buffer kept))))))
 
+(defmacro rexel-test--with-block-buffer (sent buf &rest body)
+  "Run BODY with BUF a buffer of block \"block:00000k\" in session \"k\" that has no stream.
+The requests of its fake connection collect in SENT."
+  (declare (indent 2))
+  `(rexel-test--with-fake-conn ,sent
+     (let ((,buf (generate-new-buffer "rexel-test-block")))
+       (with-current-buffer ,buf
+         (setq rexel--session-id "k" rexel--block-id "block:00000k")
+         (add-hook 'kill-buffer-query-functions #'rexel--kill-buffer-query nil t)
+         (add-hook 'kill-buffer-hook #'rexel--block-buffer-killed nil t))
+       (puthash "block:00000k" ,buf (rexel--conn-blocks rexel--conn))
+       (setf (alist-get "k" (rexel--conn-sessions rexel--conn) nil nil #'equal)
+             "work")
+       (unwind-protect (progn ,@body)
+         (rexel--discard-buffer ,buf)))))
+
+(ert-deftest rexel-test-kill-buffer-closes-block ()
+  "Killing a block buffer closes its block and keeps it from coming back."
+  (rexel-test--with-block-buffer sent buf
+    (let ((conn rexel--conn))
+      (kill-buffer buf)
+      (should-not (buffer-live-p buf))
+      (should (equal '((session_id . "k") (block_id . "block:00000k"))
+                     (alist-get 'payload (rexel-test--find "block.close" sent))))
+      (should (equal '("block:00000k") (rexel--conn-closing conn)))
+      (cl-letf (((symbol-function 'rexel--ensure-block-buffer)
+                 (lambda (&rest _) (error "The closed block got a buffer"))))
+        (rexel--apply-view conn "k" `((revision . 4)
+                                      ,@(rexel-test--view "block:00000k")))
+        (rexel-test--respond conn (rexel-test--find "block.close" sent)
+                             '((revision . 6)))
+        (should-not (rexel--conn-closing conn))
+        ;; A view from before the close is too old to apply.
+        (rexel--apply-view conn "k" `((revision . 5)
+                                      ,@(rexel-test--view "block:00000k")))))))
+
+(ert-deftest rexel-test-kill-buffer-refused-close-shows-block-again ()
+  "A block the server refuses to close gets a buffer from the next view."
+  (rexel-test--with-block-buffer sent buf
+    (let ((conn rexel--conn)
+          (made nil))
+      (kill-buffer buf)
+      (rexel-test--respond conn (rexel-test--find "block.close" sent) nil
+                           '((code . "conflict") (message . "busy")))
+      (should-not (rexel--conn-closing conn))
+      (cl-letf (((symbol-function 'rexel--ensure-block-buffer)
+                 (lambda (_conn _sid bid) (push bid made))))
+        (rexel--apply-view conn "k" (rexel-test--view "block:00000k")))
+      (should (equal '("block:00000k") made)))))
+
+(ert-deftest rexel-test-kill-buffer-while-reattaching-keeps-block ()
+  "The server refuses a close until the session is attached again."
+  (rexel-test--with-block-buffer sent buf
+    (setf (rexel--conn-attaching rexel--conn) '("k"))
+    (with-current-buffer buf (setq ghostel--command-running t))
+    (cl-letf (((symbol-function 'yes-or-no-p)
+               (lambda (&rest _) (error "Asked while reattaching"))))
+      (kill-buffer buf))
+    (should-not (buffer-live-p buf))
+    (should-not sent)))
+
+(ert-deftest rexel-test-control-close-forgets-closing-blocks ()
+  (let* ((conn (rexel--make-conn :endpoints (list "none") :closing '("b")))
+         (rexel--conns (list conn)))
+    (rexel--on-control-close conn)
+    (should-not (rexel--conn-closing conn))))
+
+(ert-deftest rexel-test-kill-buffer-asks-for-running-command ()
+  "A block running a command is closed only after a confirmation."
+  (rexel-test--with-block-buffer sent buf
+    (with-current-buffer buf (setq ghostel--command-running t))
+    (cl-letf (((symbol-function 'yes-or-no-p) #'ignore))
+      (kill-buffer buf))
+    (should (buffer-live-p buf))
+    (should-not sent)
+    (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+      (kill-buffer buf))
+    (should-not (buffer-live-p buf))
+    (should (rexel-test--find "block.close" sent)))
+  ;; A kill without a query after a declined one still closes the block.
+  (rexel-test--with-block-buffer sent buf
+    (with-current-buffer buf (setq ghostel--command-running t))
+    (cl-letf (((symbol-function 'yes-or-no-p) #'ignore))
+      (kill-buffer buf))
+    (with-current-buffer buf
+      (remove-hook 'kill-buffer-query-functions #'rexel--kill-buffer-query t))
+    (kill-buffer buf)
+    (should (rexel-test--find "block.close" sent))))
+
+(ert-deftest rexel-test-kill-buffer-action ()
+  "`keep' leaves the block running, and `ask' does what the answer says."
+  (pcase-dolist (`(,action ,answer ,closes)
+                 '((keep nil nil) (ask nil nil) (ask t t)))
+    (rexel-test--with-block-buffer sent buf
+      (with-current-buffer buf (setq ghostel--command-running t))
+      (let ((rexel-kill-buffer-action action))
+        (cl-letf (((symbol-function 'yes-or-no-p)
+                   (lambda (&rest _) (error "Asked about the command")))
+                  ((symbol-function 'y-or-n-p)
+                   (lambda (&rest _)
+                     (unless (eq action 'ask) (error "Asked with `%s'" action))
+                     answer)))
+          (kill-buffer buf)))
+      (should-not (buffer-live-p buf))
+      (should (eq closes (and (rexel-test--find "block.close" sent) t))))))
+
+(ert-deftest rexel-test-kill-without-query-follows-action ()
+  "A kill that ran no query closes the block only under `close'."
+  (pcase-dolist (`(,action . ,closes) '((close . t) (ask . nil) (keep . nil)))
+    (rexel-test--with-block-buffer sent buf
+      (let ((rexel-kill-buffer-action action))
+        (with-current-buffer buf
+          (remove-hook 'kill-buffer-query-functions #'rexel--kill-buffer-query t))
+        (kill-buffer buf))
+      (should (eq closes (and (rexel-test--find "block.close" sent) t))))))
+
+(ert-deftest rexel-test-own-kills-close-no-block ()
+  "Buffers rexel kills itself, or without a connection, leave their blocks."
+  (rexel-test--with-block-buffer sent buf
+    (rexel--forget-session rexel--conn "k")
+    (should-not (buffer-live-p buf))
+    (should-not sent))
+  (rexel-test--with-block-buffer sent buf
+    (rexel--on-event
+     rexel--conn '((type . "session_event")
+                   (payload . ((session_id . "k")
+                               (event . ((type . "block_closed")
+                                         (payload . ((block_id . "block:00000k")))))))))
+    (should-not (buffer-live-p buf))
+    (should-not sent))
+  (rexel-test--with-block-buffer sent buf
+    (rexel--apply-view rexel--conn "k" '((label . "work") (windows . [])))
+    (should-not (buffer-live-p buf))
+    (should-not sent))
+  (rexel-test--with-block-buffer sent buf
+    (setf (rexel--conn-client-id rexel--conn) nil)
+    (with-current-buffer buf (setq ghostel--command-running t))
+    (cl-letf (((symbol-function 'yes-or-no-p)
+               (lambda (&rest _) (error "Asked without a connection"))))
+      (kill-buffer buf))
+    (should-not (buffer-live-p buf))
+    (should-not sent)))
+
 (ert-deftest rexel-test-no-session-has-no-buffers ()
   "An event without a session ID matches no buffer."
   (should-not (rexel--session-buffers nil)))

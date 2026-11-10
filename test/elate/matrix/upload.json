@@ -286,7 +286,7 @@
     {"wait": "until", "pred": "(rexel-elate-upload-held-p)"},
     {"eval": "(setq rexel-elate-kill-files (seq-filter (lambda (f) (string-match-p \"/kill-[ab]\\\\.txt\\\\(?:\\\\.partial\\\\)?\\\\'\" f)) (rexel-elate-uploads)))", "comment": "the file being sent is stored as NAME.partial"},
     {"assert": {"eval": "(= 2 (length rexel-elate-kill-files))"}},
-    {"eval": "(kill-buffer (rexel-elate-block))"},
+    {"eval": "(let ((rexel-kill-buffer-action 'keep)) (kill-buffer (rexel-elate-block)))", "comment": "the block stays, so that only the lost connection can drop the files"},
     {"wait": "until", "pred": "(rexel-elate-messages-p \"upload failed: buffer killed\")"},
     {"eval": "(rexel-elate-release-upload)"},
     {"wait": "until", "pred": "(not (seq-some #'file-exists-p rexel-elate-kill-files))", "timeout": 30},

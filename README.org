@@ -169,9 +169,13 @@ project root, labelled after the project, on =C-x p x=:
 (define-key project-prefix-map "x" #'my/rexel-project-session)
 #+end_src
 
-Killing a block buffer only closes the stream; the block keeps running.
-=C-c C-r d= detaches from the whole session and =C-c C-r x= ends the
-block's program.
+Killing a block buffer closes its block and ends the program in it, after
+a confirmation when the block runs a command.  With
+=rexel-kill-buffer-action= set to =keep= the block keeps running, and =ask=
+asks each time.  This holds for every kill, also one by
+=project-kill-buffers= or =clean-buffer-list=.  =C-c C-r d= detaches from the
+whole session and leaves it running.  A session whose last block closed
+stays on the server, empty.
 
 * Key bindings
 
@@ -340,6 +344,7 @@ Rex.app, which uses the directory report and ignores the rest.
 | =rexel-hosts=                  | =nil=       | Servers besides those =rex= knows, see [[*Servers][Servers]]           |
 | =rexel-attach-display=         | =ask=       | What =rexel-attach= shows: =ask=, =focused= or =layout=        |
 | =rexel-session-label-function= | =nil=       | Rewrites the label given to =rexel-new-session=          |
+| =rexel-kill-buffer-action=     | =close=     | What killing a block buffer does: =close=, =keep= or =ask=   |
 | =rexel-prefix-key=             | ="C-c C-r"= | Prefix for =rexel-prefix-map= in block buffers           |
 | =rexel-autostart-server=       | =ask=       | Start a local server when none is found: =ask=, =t= or =nil= |
 | =rexel-program=                | ="rex"=     | The Rex command-line program                           |

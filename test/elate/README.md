@@ -73,7 +73,7 @@ it again.
 
 | Scenario | Variants | Groups |
 |---|---|---|
-| `session.json` | local, unix, tcp | `new-session`, `type`, `directory`, `rename`, `prefix-key`, `label-function`, `server-label`, `detach`, `attach`, `kill-buffer`, `host-prompt`, `attach-tabs`, `sync-picker`, `attach-again`, `attach-one-block-tab`, `detach-refresh`, `destroyed-elsewhere`, `no-server` |
+| `session.json` | local, unix, tcp | `new-session`, `type`, `directory`, `rename`, `prefix-key`, `label-function`, `server-label`, `detach`, `attach`, `kill-buffer-keep`, `kill-buffer`, `host-prompt`, `attach-tabs`, `sync-picker`, `attach-again`, `attach-one-block-tab`, `detach-refresh`, `destroyed-elsewhere`, `no-server` |
 | `typing.json` | local, unix, tcp, fallback, tls | `echo`, `burst`, `edit`, `paste`, `unicode`, `interrupt`, `full-screen`, `keys`, `scrollback`, `copy-mode`, `flood`, `large-paste`, `bracketed-paste`, `zsh-paste` |
 | `layout.json` | local, unix | `size`, `resize`, `resize-full-screen`, `taken-unfocused`, `taken-by-focus`, `taken-by-resize`, `taken-by-select`, `preview-takes-nothing`, `taken-by-click`, `taken-by-show`, `smallest-window`, `split-right`, `split-below`, `split-left`, `split-above`, `split`, `sync-layout`, `new-tab`, `sync-tab`, `close-block`, `exit` |
 | `reconnect.json` | unix, tcp | `stream-drop`, `control-drop`, `write-in-flight`, `upload-redial`, `relay-restart`, `half-open`, `upload-stall`, `upload-cut`, `lost-connect`, `refused-hello`, `attach-hold`, `upload-while-attaching`, `detach-while-attaching` |
