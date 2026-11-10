@@ -172,7 +172,8 @@ a confirmation when the block runs a command.  With
 asks each time.  This holds for every kill, also one by
 =project-kill-buffers= or =clean-buffer-list=.  =C-c C-r d= detaches from the
 whole session and leaves it running.  A session whose last block closed
-stays on the server, empty.
+stays on the server, empty.  Exiting Emacs closes no block: the sessions
+keep running, and the server takes Emacs off them at once.
 
 * In place of ghostel's commands
 
@@ -200,13 +201,12 @@ project, labelled with the project's name:
 #+begin_src emacs-lisp
 (use-package rexel-project
   :bind (:map project-prefix-map
-         ("m" . rexel-project)
-         ("M" . rexel-project-new)
+         ("r" . rexel-project)
+         ("R" . rexel-project-new)
          ;; In place of project-kill-buffers
          ("k" . rexel-project-kill))
-  :init
-  (with-eval-after-load 'project
-    (add-to-list 'project-switch-commands '(rexel-project "Rexel") t)))
+  :config
+  (add-to-list 'project-switch-commands '(rexel-project "Rexel") t))
 #+end_src
 
 - =M-x rexel-project= shows the project's session and creates it with a
@@ -318,10 +318,12 @@ top of [[https://github.com/minad/consult][consult]]:
   :hook (after-init . consult-rexel-mode)
   :bind (("C-x m" . consult-rexel)
          :map project-prefix-map
-         ("m" . consult-rexel-project)
+         ("r" . consult-rexel-project)
          :map rexel-prefix-map
          ("r" . consult-rexel)
-         ("t" . consult-rexel-tab)))
+         ("t" . consult-rexel-tab))
+  :config
+  (add-to-list 'project-switch-commands '(consult-rexel-project "Rexel") t))
 #+end_src
 
 The mode loads rexel and consult when Emacs starts.  =consult-rexel= and

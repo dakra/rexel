@@ -2174,6 +2174,64 @@ The process was last read from SILENCE seconds ago, by default now."
           (should-not (process-live-p (websocket-conn ws))))
       (rexel-test--ws-delete ws))))
 
+(ert-deftest rexel-test-leave-servers-sends-close-frames ()
+  "Only an open connection that is not being written to gets the frame."
+  (let* ((open (rexel-test--ws))
+         (opening (rexel-test--ws 'connecting))
+         (busy (rexel-test--ws))
+         (all (list open opening busy))
+         (rexel--conns (mapcar (lambda (ws) (rexel--make-conn :ws ws)) all))
+         sent)
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-send-string)
+                   (lambda (process string) (push (cons process string) sent))))
+          (rexel--watched-write (websocket-conn busy) #'ignore
+                                #'rexel--leave-servers 0)
+          ;; The server takes an unmasked close frame for a drop.
+          (should (equal (list (cons (websocket-conn open)
+                                     (unibyte-string #x88 #x82 0 0 0 0 3 233)))
+                         sent)))
+      (mapc #'rexel-test--ws-delete all))))
+
+(ert-deftest rexel-test-leave-servers-does-not-redial ()
+  "Neither the server's close in answer nor a stalled frame redials."
+  (let* ((answered (rexel-test--ws))
+         (stalled (rexel-test--ws))
+         (all (list answered stalled))
+         (rexel--conns (mapcar (lambda (ws) (rexel--make-conn :ws ws)) all))
+         (rexel--exit-timeout 2)
+         closed deadline)
+    (dolist (ws all)
+      (setf (websocket-on-close ws) (lambda (ws) (push ws closed))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-send-string)
+                   (lambda (process _string)
+                     (when (eq process (websocket-conn stalled))
+                       (let ((write (car rexel--writes)))
+                         (setq deadline (- (rexel--write-deadline write)
+                                           (float-time)))
+                         (rexel-test--expire write))
+                       (error "Process not running")))))
+          (rexel--leave-servers)
+          (should (< 1 deadline 3))
+          (should-not (process-live-p (websocket-conn stalled)))
+          (dolist (ws all)
+            (websocket-try-callback 'websocket-on-close 'on-close ws))
+          (should-not closed))
+      (mapc #'rexel-test--ws-delete all))))
+
+(ert-deftest rexel-test-leave-servers-survives-a-broken-connection ()
+  (let* ((open (rexel-test--ws))
+         (rexel--conns (list (rexel--make-conn :ws nil)
+                             (rexel--make-conn :ws open)))
+         (sent 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-send-string)
+                   (lambda (&rest _) (cl-incf sent))))
+          (rexel--leave-servers)
+          (should (= 1 sent)))
+      (rexel-test--ws-delete open))))
+
 (ert-deftest rexel-test-pty-out-probes-unanswered-write ()
   (rexel-test--with-fake-conn _sent
     (let ((control (rexel-test--ws))
@@ -3867,9 +3925,12 @@ passed on.  Return (PROMPTS . METHODS), the methods oldest first."
     (let ((rexel-tramp-hosts '(("devbox" . "/ssh:box:") ("gone" . "/ssh:studio:"))))
       (should (equal "devbox" (car (rexel--tramp-host "/ssh:box:" hosts))))
       (should (equal "Studio" (car (rexel--tramp-host "/ssh:studio:" hosts)))))
-    ;; A prefix with a hop is compared as the prefix of a file under it.
+    ;; A prefix with a hop is compared as the prefix of a file under it,
+    ;; which keeps the hop before Emacs 29.
     (let ((rexel-tramp-hosts '(("devbox" . "/ssh:jump|ssh:box:"))))
-      (should (equal "devbox" (car (rexel--tramp-host "/ssh:box:" hosts)))))))
+      (should (equal "devbox" (car (rexel--tramp-host
+                                    (file-remote-p "/ssh:jump|ssh:box:/tmp/")
+                                    hosts)))))))
 
 (ert-deftest rexel-test-connect-directory-on-another-machine ()
   "A TRAMP directory is served by the server of its machine, or by none."

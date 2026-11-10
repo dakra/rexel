@@ -650,6 +650,36 @@ stay for reading until `rexel-attach' reuses them."
     (unless (rexel--fail-waiters conn)
       (message "rexel: control connection to %s closed" (rexel--conn-name conn)))))
 
+(defvar rexel--exit-timeout 1
+  "Seconds an exiting Emacs waits for a connection to take its close frame.")
+
+(defun rexel--leave-servers ()
+  "Send every control connection a close frame, for `kill-emacs-hook'.
+The server then ends this client at once; one whose connection drops
+stays attached to its sessions for a minute.  A connection being written
+to is left to drop, as the frame would wait behind that write."
+  (dolist (conn rexel--conns)
+    (ignore-errors
+      (let* ((ws (rexel--conn-ws conn))
+             (process (websocket-conn ws))
+             (rexel--connect-timeout rexel--exit-timeout))
+        (when (and (eq (websocket-ready-state ws) 'open)
+                   (not (rexel--write-earliest process)))
+          ;; The server closes the connection in answer, which must not
+          ;; redial.
+          (setf (websocket-on-close ws) #'ignore)
+          (rexel--watched-write
+           process nil
+           ;; Status 1001, going away, under a zero mask key.  websocket.el
+           ;; sends a close frame unmasked, which the server takes for a
+           ;; drop.
+           (lambda ()
+             (process-send-string
+              process (unibyte-string #x88 #x82 0 0 0 0 3 233)))
+           0))))))
+
+(add-hook 'kill-emacs-hook #'rexel--leave-servers)
+
 (defun rexel--on-event (conn event)
   "Handle EVENT received on CONN.
 Handlers must tolerate events that arrive before the `session.attach'
