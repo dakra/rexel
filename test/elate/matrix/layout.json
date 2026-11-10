@@ -112,7 +112,7 @@
     {"wait": "until", "pred": "(rexel-elate-fits-p)"},
     {"eval": "(rexel-elate-other-take 50 20)"},
     {"wait": "until", "pred": "(string-match-p \"Sized by another client 50x20\" (rexel-elate-mode-line))"},
-    {"eval": "(with-current-buffer (rexel-elate-block) (setq-local mode-line-format '(:eval (rexel--size-tag))) (force-mode-line-update))", "comment": "the tag alone, so that its column is known"},
+    {"eval": "(with-current-buffer (rexel-elate-block) (setq-local mode-line-format '(\"\" mode-line-misc-info)) (force-mode-line-update))", "comment": "the tag first, so that its column is known"},
     {"mouse": "click", "part": "mode-line", "col": 3},
     {"wait": "until", "pred": "(rexel-elate-fits-p)"},
     {"eval": "(with-current-buffer (rexel-elate-block) (kill-local-variable 'mode-line-format) (force-mode-line-update))"},

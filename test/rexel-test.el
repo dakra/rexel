@@ -1569,7 +1569,7 @@ of the buffer it was asked from, even when the connection opens later."
     (setq rexel--owner "client:me")
     (should-not (rexel--size-tag))
     (setq rexel--owner "client:other")
-    (should (equal " [Sized by another client 183x138]"
+    (should (equal "[Sized by another client 183x138] "
                    (substring-no-properties (rexel--size-tag))))
     (setq rexel--data-state 'closed)
     (should-not (rexel--size-tag))

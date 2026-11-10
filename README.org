@@ -303,7 +303,8 @@ in the selected window: when you select that window, when it changes size,
 and when the frame gets the focus.  A terminal that does not report its
 focus counts as focused.  While another client sizes the block, its mode
 line reads =[Sized by another client 183x138]= with the size that client
-gave it, and =mouse-1= on that takes the block too.
+gave it, and =mouse-1= on that takes the block too.  The notice is part of
+=mode-line-misc-info=.
 
 * Consult and Embark
 

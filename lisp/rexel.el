@@ -2462,13 +2462,15 @@ It names the size that client gave the terminal."
               (id (rexel--conn-client-id rexel--conn))
               ((stringp id))
               ((not (equal rexel--owner id))))
-    (concat " "
-            (propertize (format "[Sized by another client %dx%d]"
+    (concat (propertize (format "[Sized by another client %dx%d]"
                                 ghostel--term-cols ghostel--term-rows)
                         'face 'warning
                         'help-echo "mouse-1: Take the block and size it to its windows here"
                         'mouse-face 'mode-line-highlight
-                        'local-map rexel--size-tag-map))))
+                        'local-map rexel--size-tag-map)
+            " ")))
+
+(add-to-list 'mode-line-misc-info '(rexel-block-mode (:eval (rexel--size-tag))))
 
 
 ;;; Colors
@@ -3176,7 +3178,7 @@ marked files to a block buffer read from the minibuffer."
 
 (define-minor-mode rexel-block-mode
   "Minor mode of ghostel buffers showing a Rex block."
-  :lighter (" Rex" (:eval (rexel--size-tag)))
+  :lighter " Rex"
   :keymap rexel-block-mode-map)
 
 (provide 'rexel)
