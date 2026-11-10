@@ -273,13 +273,13 @@ The name is *rex:LABEL:TAB* and *rex:LABEL@HOST:TAB* on a labelled host."
           (buffer-name buf))
          t)))
 
-(defun rexel-elate-named-p (tab &optional buffer)
-  "Return non-nil when BUFFER is named after the scenario's session and TAB."
+(defun rexel-elate-named-p (tab &optional buffer suffix)
+  "Return non-nil when BUFFER is named after the session with SUFFIX and TAB."
   (let* ((buf (or buffer (rexel-elate-block)))
          (conn (buffer-local-value 'rexel--conn buf))
          (host (and conn (rexel--conn-host conn))))
     (equal (buffer-name buf)
-           (format "*rex:%s%s:%s*" rexel-elate-label
+           (format "*rex:%s%s%s:%s*" rexel-elate-label (or suffix "")
                    (if host (concat "@" host) "") tab))))
 
 (defun rexel-elate-call (method &optional payload conn)
@@ -350,6 +350,29 @@ Clients whose connection was lost stay listed for a while and are skipped."
         (lambda (conn)
           (rexel-elate-session-id (concat rexel-elate-label suffix) conn)))
        t))
+
+(defun rexel-elate-session-count (&optional suffix)
+  "Return how many sessions with SUFFIX the server has."
+  (rexel-elate--control
+   (lambda (conn)
+     (seq-count (lambda (s) (equal (car s) (concat rexel-elate-label suffix)))
+                (rexel-elate-sessions conn)))))
+
+(defvar rexel-elate-files-dir)
+
+(defun rexel-elate-project (suffix)
+  "Make a project named `rexel-elate-label' plus SUFFIX and return its root.
+It holds the file src/a.txt."
+  (let ((root (file-name-as-directory
+               (expand-file-name (concat rexel-elate-label suffix)
+                                 rexel-elate-files-dir))))
+    (make-directory (expand-file-name "src" root) t)
+    (write-region "" nil (expand-file-name "src/a.txt" root))
+    (add-hook 'project-find-functions
+              (lambda (dir)
+                (and (string-prefix-p root (expand-file-name dir))
+                     (cons 'transient root))))
+    root))
 
 (defun rexel-elate-delay-request (method seconds)
   "Send every later request for METHOD only after SECONDS, as a slow link would.
@@ -432,8 +455,6 @@ The window shows its own buffer again afterwards."
       (unwind-protect
           (read-string "Preview: ")
         (set-window-buffer window shown)))))
-
-(defvar rexel-elate-files-dir)
 
 (defun rexel-elate-cleanup ()
   "Destroy every session a scenario created and stop the relays."

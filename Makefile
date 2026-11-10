@@ -27,6 +27,10 @@ rexel.elc: rexel.el | $(GHOSTEL_DIR) $(WEBSOCKET_DIR)
 	$(EMACS) --batch $(EMACSFLAGS) -Q $(LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" -f batch-byte-compile $<
 
+rexel-project.elc: rexel-project.el rexel.elc
+	$(EMACS) --batch $(EMACSFLAGS) -Q $(LOAD_PATH) \
+		--eval "(setq byte-compile-error-on-warn t)" -f batch-byte-compile $<
+
 $(CONSULT_DIR):
 	git clone --depth 1 https://github.com/minad/consult.git "$@"
 
@@ -37,11 +41,12 @@ $(CONSULT_REXEL).elc: $(CONSULT_REXEL).el rexel.elc | $(CONSULT_DIR) $(COMPAT_DI
 	$(EMACS) --batch $(EMACSFLAGS) -Q $(CONSULT_LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" -f batch-byte-compile $<
 
-byte-compile: rexel.elc $(CONSULT_REXEL).elc
+byte-compile: rexel.elc rexel-project.elc $(CONSULT_REXEL).elc
 
-test: rexel.elc
+test: rexel.elc rexel-project.elc
 	$(EMACS) --batch $(EMACSFLAGS) -Q $(LOAD_PATH) \
-		-l ert -l test/rexel-test.el -f ert-run-tests-batch-and-exit
+		-l ert -l test/rexel-test.el -l test/rexel-project-test.el \
+		-f ert-run-tests-batch-and-exit
 
 test-consult: $(CONSULT_REXEL).elc
 	$(EMACS) --batch $(EMACSFLAGS) -Q $(CONSULT_LOAD_PATH) \
@@ -61,19 +66,20 @@ $(LINT_DEPS_STAMP): Makefile | $(GHOSTEL_DIR)
 		--eval "(package-install-file (expand-file-name \"rexel.el\"))"
 	@touch $@
 
-package-lint: $(LINT_DEPS_STAMP) rexel.el $(CONSULT_REXEL).el
+package-lint: $(LINT_DEPS_STAMP) rexel.el rexel-project.el $(CONSULT_REXEL).el
 	$(EMACS) --batch $(EMACSFLAGS) -Q \
 		--eval "(setq package-user-dir \"$(LINT_ELPA_DIR)\")" \
 		--eval "(package-initialize)" \
 		--eval "(require 'package-lint)" \
-		-f package-lint-batch-and-exit rexel.el
+		--eval "(setq package-lint-main-file \"rexel.el\")" \
+		-f package-lint-batch-and-exit rexel.el rexel-project.el
 	$(EMACS) --batch $(EMACSFLAGS) -Q \
 		--eval "(setq package-user-dir \"$(LINT_ELPA_DIR)\")" \
 		--eval "(package-initialize)" \
 		--eval "(require 'package-lint)" \
 		-f package-lint-batch-and-exit $(CONSULT_REXEL).el
 
-checkdoc: rexel.el $(CONSULT_REXEL).el
+checkdoc: rexel.el rexel-project.el $(CONSULT_REXEL).el
 	$(EMACS) --batch $(EMACSFLAGS) -Q \
 		--eval "(require 'checkdoc)" \
 		--eval "(let ((sentence-end-double-space nil) \
@@ -82,6 +88,7 @@ checkdoc: rexel.el $(CONSULT_REXEL).el
 		  (ignore-errors (kill-buffer \"*Warnings*\")) \
 		  (let ((inhibit-message t)) \
 		    (checkdoc-file \"rexel.el\") \
+		    (checkdoc-file \"rexel-project.el\") \
 		    (checkdoc-file \"$(CONSULT_REXEL).el\")) \
 		  (when (get-buffer \"*Warnings*\") \
 		    (setq ok nil) \
@@ -89,4 +96,4 @@ checkdoc: rexel.el $(CONSULT_REXEL).el
 		  (unless ok (kill-emacs 1)))"
 
 clean:
-	rm -f rexel.elc $(CONSULT_REXEL).elc
+	rm -f rexel.elc rexel-project.elc $(CONSULT_REXEL).elc

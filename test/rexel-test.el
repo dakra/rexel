@@ -3594,6 +3594,327 @@ The requests of its fake connection collect in SENT."
     (should-not (buffer-live-p buf))
     (should-not sent)))
 
+(defmacro rexel-test--with-local-server (sent shown &rest body)
+  "Run BODY with a fake connection to this machine's server.
+The requests collect in SENT.  A block gets a plain buffer, and SHOWN
+collects the (BLOCK-ID ACTION) the buffers are popped to with."
+  (declare (indent 2))
+  `(rexel-test--with-fake-conn ,sent
+     (let ((rexel--conns (list rexel--conn))
+           (,shown nil)
+           (made nil))
+       (cl-letf (((symbol-function 'rexel--ensure-block-buffer)
+                  (lambda (conn sid bid)
+                    (or (gethash bid (rexel--conn-blocks conn))
+                        (let ((buf (generate-new-buffer bid)))
+                          (push buf made)
+                          (with-current-buffer buf
+                            (setq rexel--conn conn rexel--session-id sid
+                                  rexel--block-id bid))
+                          (puthash bid buf (rexel--conn-blocks conn))))))
+                 ((symbol-function 'pop-to-buffer)
+                  (lambda (buf &optional action _norecord)
+                    (push (list (buffer-local-value 'rexel--block-id buf) action)
+                          ,shown)
+                    buf)))
+         (unwind-protect (progn ,@body)
+           (mapc #'kill-buffer made))))))
+
+(defconst rexel-test--home-view
+  `((label . "emacs") (active_window_id . "w2")
+    (windows . [,(rexel-test--tab "w1" "" '((block_id . "block:00000a"))
+                                  (rexel-test--block "block:00000a"))
+                ,(append
+                  '((focused_block_id . "block:00000b"))
+                  (rexel-test--tab "w2" "" '((block_id . "block:00000b"))
+                                   (rexel-test--block "block:00000b")))]))
+  "A view of two tabs with one shell each, the second active.")
+
+(defun rexel-test--new-tab-label (sent)
+  "Return the tab label of the newest `session.new_window' request in SENT."
+  (alist-get 'window_label
+             (alist-get 'payload (rexel-test--find "session.new_window" sent))))
+
+(ert-deftest rexel-test-rexel-creates-its-session ()
+  "Without a session of that label, `rexel' creates one in `default-directory'."
+  (rexel-test--with-local-server sent shown
+    (let ((conn rexel--conn)
+          (default-directory "/usr/lib/"))
+      (rexel)
+      (should (equal "session.list" (alist-get 'method (car sent))))
+      (rexel-test--respond conn (car sent)
+                           '((sessions . [((label . "other") (session_id . "o"))])))
+      (let* ((payload (alist-get 'payload (car sent)))
+             (window (aref (alist-get 'initial_windows payload) 0)))
+        (should (equal "session.create" (alist-get 'method (car sent))))
+        (should (equal "emacs" (alist-get 'label payload)))
+        (should (equal "/usr/lib"
+                       (alist-get 'cwd (alist-get 'options
+                                                  (alist-get 'block
+                                                             (alist-get 'layout window)))))))
+      (rexel-test--respond conn (car sent) '((session_id . "home")))
+      (should (equal '((session_id . "home")) (alist-get 'payload (car sent))))
+      (rexel-test--respond conn (car sent) `((view . ,rexel-test--home-view)))
+      (should (equal `(("block:00000b" ,rexel--same-window)) shown)))))
+
+(ert-deftest rexel-test-rexel-attaches-a-session-of-the-server ()
+  "A session the server has is attached, and its focused block shown."
+  (rexel-test--with-local-server sent shown
+    (let ((conn rexel--conn)
+          (rexel-default-session "main"))
+      (rexel)
+      (rexel-test--respond conn (car sent)
+                           '((sessions . [((label . "main") (session_id . "home"))])))
+      (should (equal "session.attach" (alist-get 'method (car sent))))
+      (rexel-test--respond conn (car sent) `((view . ,rexel-test--home-view)))
+      (should (equal `(("block:00000b" ,rexel--same-window)) shown))
+      (should-not (rexel-test--find "session.create" sent)))))
+
+(ert-deftest rexel-test-rexel-shows-the-block-selected-last ()
+  "Of an attached session, the block a window showed last comes back."
+  (rexel-test--with-local-server sent shown
+    (let ((conn rexel--conn))
+      (setf (alist-get "home" (rexel--conn-sessions conn) nil nil #'equal) "emacs")
+      (rexel--apply-view conn "home" rexel-test--home-view)
+      ;; Both were shown; the one earlier in the buffer list was selected last.
+      (dolist (bid '("block:00000a" "block:00000b"))
+        (with-current-buffer (gethash bid (rexel--conn-blocks conn))
+          (setq buffer-display-time (current-time))))
+      (bury-buffer (gethash "block:00000b" (rexel--conn-blocks conn)))
+      (rexel)
+      (should (equal "session.view" (alist-get 'method (car sent))))
+      (rexel-test--respond conn (car sent) rexel-test--home-view)
+      (should (equal `(("block:00000a" ,rexel--same-window)) shown)))))
+
+(ert-deftest rexel-test-rexel-prefix-argument ()
+  "A number shows that tab; another argument, or no such tab, opens one."
+  (pcase-dolist (`(,arg ,block ,opens) '((1 "block:00000a" nil)
+                                         (2 "block:00000b" nil)
+                                         (3 nil t) (0 nil t) ((4) nil t)))
+    (rexel-test--with-local-server sent shown
+      (let ((conn rexel--conn)
+            (default-directory "/usr/lib/"))
+        (setf (alist-get "home" (rexel--conn-sessions conn) nil nil #'equal)
+              "emacs")
+        (rexel arg)
+        (rexel-test--respond conn (car sent) rexel-test--home-view)
+        (should (equal block (caar shown)))
+        (should (eq opens (and (rexel-test--find "session.new_window" sent) t)))
+        (when opens
+          (should (equal "/usr/lib"
+                         (rexel-test--new-cwd "session.new_window" sent)))
+          (rexel-test--respond conn (car sent) '((block_ids . ["block:00000n"])))
+          (should (equal `(("block:00000n" ,rexel--same-window)) shown)))))))
+
+(ert-deftest rexel-test-rexel-opens-a-tab-in-an-empty-session ()
+  "A session whose blocks all closed gets a tab."
+  (rexel-test--with-local-server sent shown
+    (let ((conn rexel--conn))
+      (setf (alist-get "home" (rexel--conn-sessions conn) nil nil #'equal) "emacs")
+      (rexel)
+      (rexel-test--respond conn (car sent) '((label . "emacs")))
+      (should-not shown)
+      (should (rexel-test--find "session.new_window" sent)))))
+
+(ert-deftest rexel-test-open-session-labels-a-new-tab ()
+  "The tab label goes to a new tab, also the first of a new session."
+  (rexel-test--with-local-server sent shown
+    (ignore shown)
+    (let ((conn rexel--conn))
+      (setf (alist-get "home" (rexel--conn-sessions conn) nil nil #'equal) "emacs")
+      (rexel--open-session "emacs" t "logs")
+      (rexel-test--respond conn (car sent) rexel-test--home-view)
+      (should (equal "logs" (rexel-test--new-tab-label sent)))
+      (rexel--open-session "new" t "logs")
+      (rexel-test--respond conn (car sent) '((sessions . [])))
+      (let ((payload (alist-get 'payload (car sent))))
+        (should (equal "new" (alist-get 'label payload)))
+        (should (equal "logs" (alist-get 'window_label
+                                         (aref (alist-get 'initial_windows payload)
+                                               0))))))))
+
+(ert-deftest rexel-test-find-session-asks-among-several ()
+  "Several sessions of one label are told apart by the ends of their IDs."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn)
+          found asked)
+      (cl-letf (((symbol-function 'rexel--prompt-later) #'funcall)
+                ((symbol-function 'completing-read)
+                 (lambda (_prompt collection &rest _)
+                   (setq asked (mapcar #'car collection))
+                   (cadr asked))))
+        (rexel--find-session conn "work" (lambda (sid) (setq found sid)))
+        (rexel-test--respond
+         conn (car sent)
+         '((sessions . [((label . "work") (session_id . "session:aaaaaa"))
+                        ((label . "play") (session_id . "session:cccccc"))
+                        ((label . "work") (session_id . "session:bbbbbb"))]))))
+      (should (equal '("work <aaaaaa>" "work <bbbbbb>") asked))
+      (should (equal "session:bbbbbb" found))
+      ;; An attached session is found without asking the server.
+      (setq sent nil)
+      (setf (alist-get "session:aaaaaa" (rexel--conn-sessions conn) nil nil #'equal)
+            "work")
+      (rexel--find-session conn "work" (lambda (sid) (setq found sid)))
+      (should (equal "session:aaaaaa" found))
+      (should-not sent))))
+
+(ert-deftest rexel-test-find-session-without-a-choice-does-nothing ()
+  "An empty answer to the question which session is no session to create."
+  (rexel-test--with-fake-conn sent
+    (cl-letf (((symbol-function 'rexel--prompt-later) #'funcall)
+              ((symbol-function 'completing-read) (lambda (&rest _) "")))
+      (rexel--find-session rexel--conn "work"
+                           (lambda (_sid) (error "Called without a choice")))
+      (rexel-test--respond
+       rexel--conn (car sent)
+       '((sessions . [((label . "work") (session_id . "session:aaaaaa"))
+                      ((label . "work") (session_id . "session:bbbbbb"))]))))))
+
+(ert-deftest rexel-test-connect-local ()
+  "A ready connection is used; without a server one is started, or left."
+  (let* ((conn (rexel--make-conn :endpoints (list "sock") :client-id t))
+         (remote (rexel--make-conn :endpoints (list "x") :client-id t :host "studio"))
+         (rexel--conns (list remote conn))
+         (hosts nil)
+         got dialled started)
+    (cl-letf (((symbol-function 'rexel--hosts) (lambda () hosts))
+              ((symbol-function 'rexel--connect)
+               (lambda (host callback) (setq dialled host) (funcall callback 'new)))
+              ((symbol-function 'rexel--autostart-server)
+               (lambda () (setq started t hosts '(("studio" "x") (nil "sock"))))))
+      (rexel--connect-local (lambda (c) (setq got c)))
+      (should (eq conn got))
+      (should-not dialled)
+      (setq rexel--conns (list remote))
+      (rexel--connect-local (lambda (c) (setq got c)) t)
+      (should (eq conn got))
+      (should-not (or dialled started))
+      (rexel--connect-local (lambda (c) (setq got c)))
+      (should started)
+      (should (equal '(nil "sock") dialled))
+      (should (eq 'new got))
+      (setq hosts nil)
+      (cl-letf (((symbol-function 'rexel--autostart-server) #'ignore))
+        (should-error (rexel--connect-local #'ignore) :type 'user-error)))))
+
+(defun rexel-test--destroy (attached reports answer &optional confirm)
+  "Destroy session \"home\" and return what was asked and requested.
+ATTACHED says whether the connection is attached to it.  REPORTS are the
+process reports of its two blocks, in the order asked for; nil answers
+with an error.  ANSWER is the answer to a question, and CONFIRM is
+passed on.  Return (PROMPTS . METHODS), the methods oldest first."
+  (let (prompts result)
+    (rexel-test--with-fake-conn sent
+      (let ((conn rexel--conn))
+        (when attached
+          (setf (alist-get "home" (rexel--conn-sessions conn) nil nil #'equal)
+                "emacs"))
+        (cl-letf (((symbol-function 'rexel--prompt-later) #'funcall)
+                  ((symbol-function 'yes-or-no-p)
+                   (lambda (prompt) (push prompt prompts) answer)))
+          (rexel--destroy-session conn "home" "emacs" confirm)
+          (rexel-test--respond conn (car sent)
+                               (if attached
+                                   rexel-test--home-view
+                                 `((view . ,rexel-test--home-view))))
+          (dolist (request (seq-take sent 2))
+            (let ((report (pop reports)))
+              (rexel-test--respond conn request report
+                                   (and (null report) '((code . "x")))))))
+        (setq result (cons prompts
+                           (nreverse (mapcar (lambda (o) (alist-get 'method o))
+                                             sent))))))
+    result))
+
+(defconst rexel-test--idle-report
+  '((foreground . ((name . "zsh") (pid . 2))))
+  "A process report of a block whose shell is in the foreground.")
+
+(ert-deftest rexel-test-destroy-session-asks-for-running-commands ()
+  "A session goes at once when its blocks are idle, else after a question."
+  (let ((process "com.superlogical.terminal.process")
+        (idle rexel-test--idle-report)
+        (running rexel-test--process-answer))
+    (should (equal `(nil "session.view" ,process ,process "session.destroy")
+                   (rexel-test--destroy t (list idle idle) nil)))
+    (should (equal `(("Rex session emacs runs 1 command; destroy it? ")
+                     "session.view" ,process ,process "session.destroy")
+                   (rexel-test--destroy t (list idle running) t)))
+    (should (equal `(("Rex session emacs runs 2 commands; destroy it? ")
+                     "session.view" ,process ,process)
+                   (rexel-test--destroy t (list running running) nil)))
+    ;; A block that reports nothing may run one.
+    (should (equal `(("Rex session emacs runs 1 command; destroy it? ")
+                     "session.view" ,process ,process)
+                   (rexel-test--destroy t (list idle nil) nil)))
+    (should (equal `(("Destroy Rex session emacs? ")
+                     "session.view" ,process ,process "session.destroy")
+                   (rexel-test--destroy t (list idle idle) t t)))))
+
+(ert-deftest rexel-test-destroy-session-attaches-for-the-time ()
+  "The server answers about a session only to a connection attached to it."
+  (let ((process "com.superlogical.terminal.process")
+        (idle rexel-test--idle-report)
+        (running rexel-test--process-answer))
+    (should (equal `(nil "session.attach" ,process ,process "session.destroy")
+                   (rexel-test--destroy nil (list idle idle) nil)))
+    (should (equal `(("Rex session emacs runs 1 command; destroy it? ")
+                     "session.attach" ,process ,process "session.detach")
+                   (rexel-test--destroy nil (list running idle) nil)))))
+
+(ert-deftest rexel-test-session-being-reattached-is-left-alone ()
+  "The server refuses requests about a session until it is attached again."
+  (rexel-test--with-local-server sent shown
+    (ignore shown)
+    (let ((conn rexel--conn))
+      (setf (alist-get "home" (rexel--conn-sessions conn) nil nil #'equal) "emacs"
+            (rexel--conn-attaching conn) '("home"))
+      (rexel)
+      (rexel--destroy-session conn "home" "emacs")
+      (should-not sent))))
+
+(ert-deftest rexel-test-with-processes ()
+  "The reports that came are handed on, at the latest when the timer runs."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn)
+          (timers nil) got)
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_time _repeat function &rest _)
+                   (push function timers)
+                   (timer-create))))
+        (rexel--with-processes conn "s" nil (lambda (r) (setq got (list r))))
+        (should (equal '(nil) got))
+        (rexel--with-processes conn "s" '("a" "b") (lambda (r) (setq got r)))
+        (rexel-test--respond conn (car sent) '((home . "/h")))
+        (should (equal '(nil) got))
+        (funcall (car timers))
+        (should (equal '(("b" (home . "/h"))) got))
+        ;; A report after that changes nothing.
+        (setq got 'unchanged)
+        (rexel-test--respond conn (cadr sent) '((home . "/h")))
+        (should (eq 'unchanged got))))))
+
+(ert-deftest rexel-test-declined-kills-are-collected ()
+  "A command that binds `rexel--kill-declined' learns which kills were declined."
+  (rexel-test--with-block-buffer sent buf
+    (ignore sent)
+    (with-current-buffer buf (setq ghostel--command-running t))
+    (cl-letf (((symbol-function 'yes-or-no-p) #'ignore))
+      (let ((rexel--kill-declined nil))
+        (kill-buffer buf)
+        (should (equal (list buf) rexel--kill-declined)))
+      (kill-buffer buf)
+      (should (eq t rexel--kill-declined))))
+  ;; Under `ask', a block kept on the server is collected too.
+  (rexel-test--with-block-buffer sent buf
+    (ignore sent)
+    (let ((rexel-kill-buffer-action 'ask)
+          (rexel--kill-declined nil))
+      (cl-letf (((symbol-function 'y-or-n-p) #'ignore))
+        (kill-buffer buf))
+      (should (equal (list buf) rexel--kill-declined)))))
+
 (ert-deftest rexel-test-no-session-has-no-buffers ()
   "An event without a session ID matches no buffer."
   (should-not (rexel--session-buffers nil)))

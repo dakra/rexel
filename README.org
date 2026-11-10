@@ -14,6 +14,8 @@ an ssh tunnel.  Rex.app, or any other Rex client, can be attached to the
 same session at the same time.
 
 - Attach to running sessions, create new ones, split and open tabs from Emacs.
+- =M-x rexel= and =M-x rexel-project= in place of =M-x ghostel= and
+  =M-x ghostel-project=: a session per project, a tab per terminal.
 - Survives dropped connections, sleep and network changes.
 - Drop or paste files onto a terminal to send them to the server's machine.
 - Directory tracking and command state from the processes Rex reports.
@@ -47,9 +49,10 @@ name a remote server; this machine's server is found on its own.  See
 On Emacs 29, =M-x package-vc-install RET https://github.com/dakra/rexel=;
 on Emacs 28, clone the repository and add it to =load-path=.
 
-Then =M-x rexel-new-session= starts a shell in a new Rex session and
-=M-x rexel-attach= picks a running one.  With no Rex server running, rexel
-offers to start one.
+Then =M-x rexel= shows a shell in a Rex session of its own, =M-x
+rexel-new-session= starts a shell in a new session and =M-x rexel-attach=
+picks a running one.  With no Rex server running, rexel offers to start
+one.
 
 * A first session
 
@@ -161,19 +164,6 @@ it, asking for its label with a prefix argument.  On this machine's server
 the shell starts in =default-directory=, elsewhere in the home directory.
 =rexel-session-label-function= rewrites the label of every new session.
 
-A command of your own can choose both.  This one starts a session at the
-project root, labelled after the project, on =C-x p x=:
-
-#+begin_src emacs-lisp
-(defun my/rexel-project-session ()
-  "Start a Rex session in the current project's root, named after it."
-  (interactive)
-  (let* ((project (project-current t))
-         (default-directory (project-root project)))
-    (rexel-new-session (project-name project))))
-(define-key project-prefix-map "x" #'my/rexel-project-session)
-#+end_src
-
 Killing a block buffer closes its block and ends the program in it, after
 a confirmation when the block runs a command.  With
 =rexel-kill-buffer-action= set to =keep= the block keeps running, and =ask=
@@ -181,6 +171,58 @@ asks each time.  This holds for every kill, also one by
 =project-kill-buffers= or =clean-buffer-list=.  =C-c C-r d= detaches from the
 whole session and leaves it running.  A session whose last block closed
 stays on the server, empty.
+
+* In place of ghostel's commands
+
+=M-x rexel= is to Rex what =M-x ghostel= is to a local terminal.  It shows
+the session labelled =emacs= (=rexel-default-session=) on this machine's
+server, in the selected window, and creates it with a shell in
+=default-directory= when the server has none.  A terminal is a tab of that
+session:
+
+| Command           | Shows                                              |
+|-------------------+----------------------------------------------------|
+| =M-x rexel=         | the block you selected last, else the focused one  |
+| =C-u M-x rexel=     | a new tab, its shell in =default-directory=          |
+| =C-u 2 M-x rexel=   | tab 2, or a new tab when the session has no tab 2  |
+
+The session outlives Emacs, so after a restart =M-x rexel= is back in the
+shells you left.  A session without a block left gets a new tab.
+
+** Projects
+
+=rexel-project=, in =rexel-project.el=, does the same with one session per
+project, labelled with the project's name:
+
+#+begin_src emacs-lisp
+(use-package rexel-project
+  :bind (:map project-prefix-map
+         ("m" . rexel-project)
+         ("M" . rexel-project-new)
+         ;; In place of project-kill-buffers
+         ("k" . rexel-project-kill))
+  :init
+  (with-eval-after-load 'project
+    (add-to-list 'project-switch-commands '(rexel-project "Rexel") t)))
+#+end_src
+
+- =M-x rexel-project= shows the project's session and creates it with a
+  shell in the project's root.  It takes the prefix arguments of =M-x rexel=.
+- =M-x rexel-project-new= opens another tab at the project's root.
+- =M-x rexel-project-kill= runs =project-kill-buffers=, which asks first, and
+  then destroys the project's session with its programs, also when this
+  Emacs is not attached to it.  A session with blocks that run a command
+  asks first, and so does a project without buffers to kill.  No server
+  is started for it.
+
+The session is found by its label, so two projects of one name share a
+session, and a session renamed in another client is no longer the
+project's.  =rexel-project-label-function= returns the label for a project.
+
+=project-kill-buffers= itself leaves the sessions alone: by default it
+kills no ghostel buffer.  Ghostel's README has the condition that makes
+it kill them, which closes the blocks of a project and leaves its
+session empty.
 
 * Key bindings
 
@@ -348,6 +390,8 @@ Rex.app, which uses the directory report and ignores the rest.
 |------------------------------+-----------+--------------------------------------------------------|
 | =rexel-hosts=                  | =nil=       | Servers besides those =rex= knows, see [[*Servers][Servers]]           |
 | =rexel-attach-display=         | =ask=       | What =rexel-attach= shows: =ask=, =focused= or =layout=        |
+| =rexel-default-session=        | ="emacs"=   | Label of the session =M-x rexel= shows                   |
+| =rexel-project-label-function= | name      | Returns the label of a project's session               |
 | =rexel-session-label-function= | =nil=       | Rewrites the label given to =rexel-new-session=          |
 | =rexel-kill-buffer-action=     | =close=     | What killing a block buffer does: =close=, =keep= or =ask=   |
 | =rexel-prefix-key=             | ="C-c C-r"= | Prefix for =rexel-prefix-map= in block buffers           |
