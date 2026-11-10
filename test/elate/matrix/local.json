@@ -12,7 +12,7 @@
     {"eval": "(rexel-elate-shell)"},
     {"wait": "until", "pred": "(rexel-elate-prompt-p)"},
     {"assert": {"eval": "(null (rexel--conn-host rexel--conn))"}},
-    {"assert": {"eval": "(string-match-p \"\\\\`\\\\*rex:[^@]+:[0-9a-f]+\\\\*\\\\'\" (buffer-name))"}, "comment": "no @HOST in the buffer name"},
+    {"assert": {"eval": "(string-match-p \"\\\\`\\\\*rex:[^@:]+:[^:*]+\\\\*\\\\'\" (buffer-name))"}, "comment": "no @HOST in the buffer name"},
 
     {"group": "directory", "comment": "default-directory follows the shell's working directory"},
     {"type": "cd /usr/share"},

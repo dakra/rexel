@@ -262,16 +262,25 @@ Its prompt is \"$ \"."
 
 (defun rexel-elate-buffer-name-p (&optional suffix buffer)
   "Return non-nil when BUFFER is named after the session with SUFFIX.
-The name is *rex:LABEL:ID* and *rex:LABEL@HOST:ID* on a labelled host."
+The name is *rex:LABEL:TAB* and *rex:LABEL@HOST:TAB* on a labelled host."
   (let* ((buf (or buffer (rexel-elate-block)))
          (conn (buffer-local-value 'rexel--conn buf))
          (host (and conn (rexel--conn-host conn))))
     (and (string-match-p
-          (format "\\`\\*rex:%s%s:[0-9a-f]\\{6\\}\\*\\'"
+          (format "\\`\\*rex:%s%s:[^:*]+\\*\\'"
                   (regexp-quote (concat rexel-elate-label suffix))
                   (if host (concat "@" (regexp-quote host)) ""))
           (buffer-name buf))
          t)))
+
+(defun rexel-elate-named-p (tab &optional buffer)
+  "Return non-nil when BUFFER is named after the scenario's session and TAB."
+  (let* ((buf (or buffer (rexel-elate-block)))
+         (conn (buffer-local-value 'rexel--conn buf))
+         (host (and conn (rexel--conn-host conn))))
+    (equal (buffer-name buf)
+           (format "*rex:%s%s:%s*" rexel-elate-label
+                   (if host (concat "@" host) "") tab))))
 
 (defun rexel-elate-call (method &optional payload conn)
   "Call the control METHOD with PAYLOAD on CONN and return its result.

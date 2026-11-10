@@ -826,9 +826,6 @@ Nil until the answer to `data.connect'.")
 (defvar-local rexel--shell-program nil
   "Path and argv0 of the block's shell; they change when the shell execs.")
 
-(defvar-local rexel--tab nil
-  "Name of the tab holding this block.")
-
 (defvar-local rexel--owner nil
   "ID of the client that owns this block and so sizes it, nil when none does.")
 
@@ -979,13 +976,38 @@ a tab of one block pops to it, and a tab without a layout to its focused block."
                                             (rexel--tab-block tab)))
         (message "rexel: Rex tab %s holds no terminal" (rexel--tab-name view tab))))))
 
+(defun rexel--tab-label (tab)
+  "Return the label TAB was given, or nil.
+The server labels a tab without one \"Window\" and the end of its ID."
+  (let ((label (alist-get 'label tab))
+        (id (alist-get 'window_id tab)))
+    (unless (or (member label '(nil ""))
+                (and (>= (length id) 8)
+                     (equal label (concat "Window " (substring id -8)))))
+      label)))
+
 (defun rexel--tab-name (view tab)
   "Return TAB's label, or for a tab without one its number in VIEW."
-  (let ((label (alist-get 'label tab)))
-    (if (member label '(nil ""))
-        (format "tab %d" (1+ (or (seq-position (alist-get 'windows view) tab #'eq)
-                                 0)))
-      label)))
+  (or (rexel--tab-label tab)
+      (format "tab %d" (1+ (or (seq-position (alist-get 'windows view) tab #'eq)
+                               0)))))
+
+(defun rexel--view-block-names (view)
+  "Return the (BLOCK-ID . NAME) of every terminal block in VIEW.
+NAME is the label of the block's tab, or for a tab without one its
+number.  A tab's blocks after its first get their number too, as in 2.3."
+  (let ((names nil))
+    (seq-do-indexed
+     (lambda (tab i)
+       (let ((name (or (rexel--tab-label tab) (number-to-string (1+ i))))
+             (n 0))
+         (pcase-dolist (`(,block . ,_) (rexel--tab-terminal-blocks tab))
+           (push (cons (alist-get 'block_id block)
+                       (if (zerop n) name (format "%s.%d" name (1+ n))))
+                 names)
+           (cl-incf n))))
+     (alist-get 'windows view))
+    (nreverse names)))
 
 (defun rexel--home-relative (dir home)
   "Return DIR with a leading HOME directory written as ~."
@@ -1209,44 +1231,51 @@ already applied is ignored."
   (let ((revision (alist-get 'revision view))
         (applied (alist-get sid (rexel--conn-revisions conn) nil nil #'equal)))
     (unless (and applied revision (< revision applied))
-      (let ((blocks (rexel--view-terminal-blocks view)))
+      (let ((names (rexel--view-block-names view)))
         (setf (alist-get sid (rexel--conn-revisions conn) nil nil #'equal)
               revision)
         (setf (alist-get sid (rexel--conn-sessions conn) nil nil #'equal)
               (alist-get 'label view))
-        (pcase-dolist (`(,bid . ,_) blocks)
+        (pcase-dolist (`(,bid . ,_) names)
           (unless (member bid (rexel--conn-closing conn))
             (rexel--ensure-block-buffer conn sid bid)))
         (dolist (buf (rexel--session-buffers sid))
           (with-current-buffer buf
-            (if (assoc rexel--block-id blocks)
-                (let ((name (rexel--buffer-name conn sid rexel--block-id))
-                      (tab (rexel--block-tab view rexel--block-id)))
-                  (setq rexel--tab (and tab (rexel--tab-name view tab))
-                        rexel--owner (rexel--view-block-owner
+            (if (assoc rexel--block-id names)
+                (progn
+                  (setq rexel--owner (rexel--view-block-owner
                                       view rexel--block-id))
-                  (force-mode-line-update)
-                  (unless (equal name (buffer-name))
-                    (rename-buffer name t)))
-              (rexel--discard-buffer buf))))))))
+                  (force-mode-line-update))
+              (rexel--discard-buffer buf))))
+        ;; Tabs that moved up trade names: the first pass frees the
+        ;; names the second one gives.
+        (dotimes (_ 2)
+          (pcase-dolist (`(,bid . ,name) names)
+            (when-let* ((buf (gethash bid (rexel--conn-blocks conn)))
+                        ((buffer-live-p buf))
+                        (name (rexel--buffer-name conn sid name)))
+              (with-current-buffer buf
+                ;; A name another buffer keeps is taken as NAME<2>.
+                (unless (equal (buffer-name)
+                               (generate-new-buffer-name name (buffer-name)))
+                  (rename-buffer name t))))))))))
 
 (defun rexel--annotation ()
-  "Return this block's tab, and the state of a stream that is not live.
+  "Return the state of this block's stream unless it is live.
 `ghostel-annotate-buffer' shows it in buffer pickers."
-  (let ((state (pcase rexel--data-state
-                 ('live nil)
-                 ('closed "disconnected")
-                 (_ "connecting"))))
-    (cond ((and rexel--tab state) (format "%s (%s)" rexel--tab state))
-          (rexel--tab)
-          (state))))
+  (pcase rexel--data-state
+    ('live nil)
+    ('closed "disconnected")
+    (_ "connecting")))
 
-(defun rexel--buffer-name (conn sid bid)
-  "Return the buffer name for block BID of session SID on CONN."
+(defun rexel--buffer-name (conn sid name)
+  "Return the buffer name for the block called NAME in session SID on CONN.
+NAME is the block's name in its tab, see `rexel--view-block-names', or
+the end of its ID."
   (format "*rex:%s%s:%s*"
           (or (alist-get sid (rexel--conn-sessions conn) nil nil #'equal) "?")
           (if (rexel--conn-host conn) (concat "@" (rexel--conn-host conn)) "")
-          (substring bid -6)))
+          name))
 
 (defun rexel--stale-block-buffer (bid)
   "Return a block buffer for BID whose stream ended, on any connection."
@@ -1257,14 +1286,17 @@ already applied is ignored."
 
 (defun rexel--ensure-block-buffer (conn sid bid)
   "Return the buffer for block BID of session SID on CONN, creating it.
-A buffer whose stream ended earlier is reset and streamed again."
+A buffer whose stream ended earlier is reset and streamed again.  A new
+buffer is named after the end of BID until a view names its tab."
   (let ((buf (gethash bid (rexel--conn-blocks conn))))
     (unless (buffer-live-p buf)
       (setq buf (rexel--stale-block-buffer bid)))
     (cond
      ((null buf)
       (rexel--attach-block-buffer
-       conn sid bid (ghostel--create (rexel--buffer-name conn sid bid) nil 24 80)))
+       conn sid bid
+       (ghostel--create (rexel--buffer-name conn sid (substring bid -6))
+                        nil 24 80)))
      ((eq (buffer-local-value 'rexel--data-state buf) 'closed)
       (ghostel--init-buffer buf 24 80)
       (rexel--attach-block-buffer conn sid bid buf))

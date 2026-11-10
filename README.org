@@ -53,7 +53,7 @@ offers to start one.
 
 * A first session
 
-1. =M-x rexel-new-session= opens a shell in the buffer =*rex:SESSION:ID*=,
+1. =M-x rexel-new-session= opens a shell in the buffer =*rex:SESSION:1*=,
    in the current directory.
 2. =C-c C-r 3= splits it to the right with a second shell in the same
    directory; =C-c C-r c= opens a new tab.
@@ -137,7 +137,7 @@ An address without a scheme is reached over https only; =http://HOST:PORT=
 names a plain listener.  A host alone, without port or path, is tried on
 its scheme's port, then on Rex's port 7297.  An entry replaces a host of
 the same label known to Rex.  Buffers of a host are named
-=*rex:SESSION@HOST:ID*=.
+=*rex:SESSION@HOST:TAB*=.
 
 * Sessions
 
@@ -150,6 +150,11 @@ the frame's windows from it, as =rexel-sync-layout= does.
 =rexel-attach-display= set to =focused= shows the focused block without
 asking, and =layout= the active tab's layout; =C-u M-x rexel-attach= asks
 whatever it is set to.
+
+A block buffer is named =*rex:SESSION:TAB*=, after its session and the
+label of its tab, or the tab's number when it has no label.  The other
+blocks of a split tab are =TAB.2=, =TAB.3= and so on.  The names follow the
+tabs: closing a tab renumbers the buffers of those after it.
 
 =M-x rexel-new-session= creates a session with one shell and attaches to
 it, asking for its label with a prefix argument.  On this machine's server
@@ -238,9 +243,9 @@ gave it, and =mouse-1= on that takes the block too.
 
 * Consult and Embark
 
-Block buffers are ghostel buffers, so the buffer pickers list them,
-annotated with the block's tab.  =consult-rexel=, in
-=extensions/consult-rexel/=, adds pickers of its own on top of [[https://github.com/minad/consult][consult]]:
+Block buffers are ghostel buffers, so the buffer pickers list them.
+=consult-rexel=, in =extensions/consult-rexel/=, adds pickers of its own on
+top of [[https://github.com/minad/consult][consult]]:
 
 #+begin_src emacs-lisp
 (use-package consult-rexel

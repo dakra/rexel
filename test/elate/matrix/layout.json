@@ -147,6 +147,7 @@
     {"wait": "until", "pred": "(and (= 2 (length (rexel-elate-blocks))) (not (eq (window-buffer) rexel-elate-first)) (rexel-elate-live-p))"},
     {"assert": {"eval": "(and (= 2 (length (window-list))) (eq (window-buffer (window-in-direction 'left)) rexel-elate-first))"}},
     {"assert": {"eval": "(equal (rexel-elate-tabs) '(2))"}},
+    {"wait": "until", "pred": "(and (rexel-elate-named-p \"1.2\") (rexel-elate-named-p \"1\" rexel-elate-first))", "comment": "the buffers are named after the tab and the block's place in it"},
     {"wait": "until", "pred": "(rexel-elate-fits-p)"},
     {"eval": "(rexel-elate-shell)"},
     {"wait": "until", "pred": "(rexel-elate-prompt-p)"},
@@ -204,6 +205,7 @@
     {"keys": "RET", "delivery": "events"},
     {"wait": "until", "pred": "(and (= 7 (length (rexel-elate-blocks))) (not (eq (window-buffer) rexel-elate-first)) (rexel-elate-live-p))"},
     {"assert": {"eval": "(equal (rexel-elate-tabs) '(6 1))"}},
+    {"wait": "until", "pred": "(rexel-elate-named-p \"logs\")", "comment": "a labelled tab names its buffer"},
     {"eval": "(setq rexel-elate-tab (window-buffer))"},
 
     {"group": "sync-tab", "comment": "C-u C-c C-r = asks for a tab; outside a block buffer the command uses the active tab"},

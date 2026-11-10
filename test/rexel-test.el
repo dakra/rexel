@@ -431,8 +431,8 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
 (ert-deftest rexel-test-buffer-name-carries-host ()
   (let ((conn (rexel--make-conn :endpoints (list "none") :host "studio")))
     (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work")
-    (should (equal "*rex:work@studio:123456*"
-                   (rexel--buffer-name conn "s" "block:123456")))))
+    (should (equal "*rex:work@studio:2.3*"
+                   (rexel--buffer-name conn "s" "2.3")))))
 
 (ert-deftest rexel-test-apply-view-renames-on-label-change ()
   (let* ((conn (rexel--make-conn :endpoints (list "none")))
@@ -446,9 +446,9 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
     (unwind-protect
         (progn
           (rexel--apply-view conn "label-test" view)
-          (should (equal "*rex:work:123456*" (buffer-name buf)))
+          (should (equal "*rex:work:1*" (buffer-name buf)))
           (rexel--apply-view conn "label-test" `((label . "play") ,@(cdr view)))
-          (should (equal "*rex:play:123456*" (buffer-name buf))))
+          (should (equal "*rex:play:1*" (buffer-name buf))))
       (kill-buffer buf))))
 
 (defmacro rexel-test--with-fake-conn (sent &rest body)
@@ -3267,32 +3267,107 @@ is waiting to be read."
     (should-error (rexel-start-server) :type 'user-error)))
 
 (ert-deftest rexel-test-annotation ()
-  "A block is annotated with its tab and the state of a stream not live."
+  "A block is annotated with the state of a stream that is not live."
   (with-temp-buffer
-    (setq rexel--tab "main" rexel--data-state 'live)
-    (should (equal "main" (rexel--annotation)))
     (setq rexel--data-state 'closed)
-    (should (equal "main (disconnected)" (rexel--annotation)))
-    (setq rexel--tab nil rexel--data-state nil)
+    (should (equal "disconnected" (rexel--annotation)))
+    (setq rexel--data-state nil)
     (should (equal "connecting" (rexel--annotation)))
     (setq rexel--data-state 'live)
     (should-not (rexel--annotation))))
 
-(ert-deftest rexel-test-apply-view-names-the-tab ()
-  "Applying a view records the tab of each block."
-  (rexel-test--with-attach rexel-test--attach-view sent
-    (cl-letf (((symbol-function 'rexel--ensure-block-buffer) #'ignore)
-              ((symbol-function 'rexel--session-buffers)
-               (lambda (_sid) buffers)))
-      (dolist (buf buffers)
-        (with-current-buffer buf
-          (setq rexel--block-id (buffer-name))))
-      (rexel--apply-view conn "s" rexel-test--attach-view)
-      (should (equal '("main" "main" "tab 2")
-                     (mapcar (lambda (bid)
-                               (buffer-local-value
-                                'rexel--tab (gethash bid (rexel--conn-blocks conn))))
-                             '("block:00000a" "block:00000b" "block:00000c")))))))
+(ert-deftest rexel-test-tab-label ()
+  "A tab has a label unless it is empty or the one the server made of its ID."
+  (should (equal "main" (rexel--tab-label '((window_id . "window:01-89abcdef")
+                                            (label . "main")))))
+  (dolist (label '("Window" "Window " "Window f" "Window 9abcdef"))
+    (should (equal label (rexel--tab-label `((window_id . "window:01-89abcdef")
+                                             (label . ,label))))))
+  (should (equal "Window 1" (rexel--tab-label '((label . "Window 1")))))
+  (dolist (label '(nil "" "Window 89abcdef"))
+    (should-not (rexel--tab-label `((window_id . "window:01-89abcdef")
+                                    (label . ,label))))))
+
+(defmacro rexel-test--with-named-blocks (view names &rest body)
+  "Run BODY with NAMES bound to a function naming the buffers of blocks.
+The fake connection is attached to session \"s\" of VIEW; the function
+takes the views to apply and then the IDs of the blocks."
+  (declare (indent 2))
+  `(rexel-test--with-attach ,view sent
+     (ignore sent)
+     (cl-letf (((symbol-function 'rexel--ensure-block-buffer) #'ignore)
+               ((symbol-function 'rexel--session-buffers)
+                (lambda (_sid) (seq-filter #'buffer-live-p buffers))))
+       (dolist (buf buffers)
+         (with-current-buffer buf
+           (setq rexel--block-id (buffer-name) rexel--session-id "s")))
+       (cl-flet ((,names (views &rest bids)
+                   (dolist (view views)
+                     (rexel--apply-view conn "s" `((label . "work") ,@view)))
+                   (mapcar (lambda (bid)
+                             (buffer-name (gethash bid (rexel--conn-blocks conn))))
+                           bids)))
+         ,@body))))
+
+(ert-deftest rexel-test-apply-view-names-buffers-after-tabs ()
+  "A block buffer is named after its tab's label or number, and its place in it."
+  (rexel-test--with-named-blocks rexel-test--attach-view names
+    (should (equal '("*rex:work:main*" "*rex:work:main.2*" "*rex:work:2*")
+                   (names (list rexel-test--attach-view)
+                          "block:00000a" "block:00000b" "block:00000c")))))
+
+(ert-deftest rexel-test-apply-view-renumbers-buffers ()
+  "Buffers of tabs that moved up take the names of the tabs before them."
+  (let* ((tabs (mapcar (lambda (n)
+                         (rexel-test--tab (format "w%d" n) ""
+                                          `((block_id . ,(format "block:00000%d" n)))
+                                          (rexel-test--block
+                                           (format "block:00000%d" n))))
+                       '(1 2 3)))
+         (three `((windows . ,(vconcat tabs))))
+         (two `((windows . ,(vconcat (cdr tabs))))))
+    (rexel-test--with-named-blocks three names
+      (should (equal '("*rex:work:1*" "*rex:work:2*" "*rex:work:3*")
+                     (names (list three)
+                            "block:000001" "block:000002" "block:000003")))
+      (should (equal '("*rex:work:1*" "*rex:work:2*")
+                     (names (list two) "block:000002" "block:000003")))
+      ;; Tabs that change places trade names.
+      (should (equal '("*rex:work:2*" "*rex:work:1*")
+                     (names (list `((windows . ,(vconcat (reverse (cdr tabs))))))
+                            "block:000002" "block:000003"))))))
+
+(ert-deftest rexel-test-apply-view-shares-a-name-in-tab-order ()
+  "Of two tabs with one label the first names its buffer; the other is <2>."
+  (let* ((a (rexel-test--tab "w1" "main" '((block_id . "block:00000a"))
+                             (rexel-test--block "block:00000a")))
+         (b (rexel-test--tab "w2" "main" '((block_id . "block:00000b"))
+                             (rexel-test--block "block:00000b")))
+         (view `((windows . [,a ,b]))))
+    (rexel-test--with-named-blocks view names
+      (should (equal '("*rex:work:main*" "*rex:work:main*<2>")
+                     (names (list view) "block:00000a" "block:00000b")))
+      (cl-letf (((symbol-function 'rename-buffer)
+                 (lambda (&rest _) (error "Renamed again"))))
+        (names (list view)))
+      ;; The name is the second tab's once the first gives it up.
+      (should (equal '("*rex:work:x*" "*rex:work:main*")
+                     (names (list `((windows . [((label . "x") ,@a) ,b])))
+                            "block:00000a" "block:00000b")))
+      (names (list view))
+      (should (equal '("*rex:work:main*")
+                     (names (list `((windows . [,b]))) "block:00000b"))))))
+
+(ert-deftest rexel-test-new-buffer-is-named-after-its-block ()
+  "A buffer made before a view names its tab carries the end of its block ID."
+  (let ((conn (rexel--make-conn :endpoints (list "none")))
+        (named nil))
+    (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work")
+    (cl-letf (((symbol-function 'ghostel--create)
+               (lambda (name &rest _) (setq named name) nil))
+              ((symbol-function 'rexel--attach-block-buffer) #'ignore))
+      (rexel--ensure-block-buffer conn "s" "block:01-123456"))
+    (should (equal "*rex:work:123456*" named))))
 
 (ert-deftest rexel-test-read-tab-uses-the-choice-function ()
   "The tab prompt goes through `rexel-read-choice-function'."
