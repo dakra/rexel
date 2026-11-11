@@ -4,8 +4,8 @@
 
 ;; Author: Daniel Kraus <daniel@kraus.my>
 ;; URL: https://github.com/dakra/rexel
-;; Version: 0.2.0
-;; Package-Requires: ((emacs "28.1") (consult "1.5") (rexel "0.2.0"))
+;; Version: 0.3.0
+;; Package-Requires: ((emacs "28.1") (consult "1.5") (rexel "0.3.0"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.

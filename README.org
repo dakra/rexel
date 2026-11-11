@@ -88,7 +88,7 @@ The rest of this document covers each part in detail.
   =rexel-autostart-server= to =t= to skip the question or =nil= to never start
   one.  With systemd, =systemctl --user enable --now rex.socket= starts your
   own server on demand instead.
-- [[https://github.com/dakra/ghostel][Ghostel]] 0.62.0 or later, with its native module.
+- [[https://github.com/dakra/ghostel][Ghostel]] 0.64.0 or later, with its native module.
 - [[https://github.com/ahyatt/emacs-websocket][websocket]] 1.15 or later.
 - Emacs 28.1 or later with native JSON support (=json-serialize=): built in
   since Emacs 30, libjansson on 28 and 29.
