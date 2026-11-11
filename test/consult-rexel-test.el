@@ -333,13 +333,7 @@ A spec is (VAR CONN SESSION-ID); the buffers are made in that order."
                            (mapcar (lambda (s) (plist-get s :name)) kept)))
             (should (equal (list (cons "c" plain) "no buffer")
                            (funcall (plist-get (car kept) :items))))
-            (should (equal '("Create") (plist-get (nth 1 kept) :items))))
-          (let ((kept (consult-rexel--without-blocks
-                       sources
-                       (apply-partially #'consult-rexel--session-block-p
-                                        conn "s1"))))
-            (should (equal (list (buffer-name other) (cons "c" plain) "no buffer")
-                           (funcall (plist-get (car kept) :items))))))))))
+            (should (equal '("Create") (plist-get (nth 1 kept) :items)))))))))
 
 (ert-deftest consult-rexel-test-sources-expand ()
   "A function among the sources stands for the sources it returns."
@@ -362,19 +356,20 @@ A spec is (VAR CONN SESSION-ID); the buffers are made in that order."
                      (funcall (plist-get consult-rexel-session-source :items)))))))
 
 (ert-deftest consult-rexel-test-project-sources ()
-  "A new name goes to the project's session; its blocks leave the other sources."
+  "A new name goes to the project's session; the blocks leave the other sources."
   (let* ((conn (rexel--make-conn :client-id t :sessions '(("s1" . "proj"))))
          (consult-rexel--project (list conn "s1" "proj"))
          (opened nil))
     (consult-rexel-test--with-blocks ((mine conn "s1") (other conn "s2"))
       (let* ((consult-ghostel-project-sources
               `(( :name "Ghostel (Project)" :new ignore
-                  :items ,(lambda () (list (cons "a" mine) (cons "b" other))))))
+                  :items ,(lambda () (list (cons "a" mine) (cons "b" other)
+                                           "plain")))))
              (sources (consult--multi-enabled-sources
                        (consult-rexel--sources consult-rexel-project-sources))))
         (should (equal '("proj" "Ghostel (Project)" "New")
                        (mapcar (lambda (s) (plist-get s :name)) sources)))
-        (should (equal (list (cons "b" other))
+        (should (equal '("plain")
                        (funcall (plist-get (aref sources 1) :items))))
         (cl-letf (((symbol-function 'rexel--open-session)
                    (lambda (&rest args) (setq opened args))))

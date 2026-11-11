@@ -366,10 +366,9 @@ buffer, and everywhere with the =:bind-keymap= line of the [[*Quick start][Quick
   has none.  With a prefix argument it is =rexel-project=.
 - With =consult-ghostel= installed both list what =consult-ghostel= and
   =consult-ghostel-project= list as well, so they can take the place of
-  those commands.  Each Rex block is listed once, under its session; in
-  =consult-rexel-project= a block of another session that is in the
-  project's directory stays with ghostel's.  The narrow key =r= shows the
-  Rex groups alone.  =consult-rexel-sources= and
+  those commands.  Each Rex block is listed once, under its session, and
+  =consult-rexel-project= lists the blocks of no other session.  The
+  narrow key =r= shows the Rex groups alone.  =consult-rexel-sources= and
   =consult-rexel-project-sources= hold the sources.
 - =M-x consult-rexel-tab= picks a tab of a session and rebuilds the
   frame's windows from it, previewing each layout in the selected window.

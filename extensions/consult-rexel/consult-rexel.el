@@ -172,10 +172,9 @@ the order their blocks were selected last."
   (let ((buffer (if (consp item) (cdr item) item)))
     (if (stringp buffer) (get-buffer buffer) (and (bufferp buffer) buffer))))
 
-(defun consult-rexel--without-blocks (sources &optional predicate)
+(defun consult-rexel--without-blocks (sources)
   "Return the `consult' SOURCES with the Rex blocks left out of their items.
-With PREDICATE, leave out only the blocks whose buffer it accepts.  The
-sources that list the Rex blocks alone are left out."
+The sources that list the Rex blocks alone are left out."
   (delq nil
         (mapcar
          (lambda (source)
@@ -190,8 +189,7 @@ sources that list the Rex blocks alone are left out."
                          (seq-remove
                           (lambda (item)
                             (when-let* ((buffer (consult-rexel--item-buffer item)))
-                              (funcall (or predicate #'consult-rexel--block-p)
-                                       buffer)))
+                              (consult-rexel--block-p buffer)))
                           (funcall items)))
                       ,@plist))
                    (t plist))))
@@ -476,12 +474,9 @@ SESSION-ID is nil when the server has no session for the project.")
            (lambda (name) (rexel--open-session label t name))))))
 
 (defun consult-rexel-ghostel-project-sources ()
-  "Return the sources of `consult-ghostel-project'.
-The blocks of the project's session are left out of them."
-  (pcase-let ((`(,conn ,sid) consult-rexel--project))
-    (consult-rexel--without-blocks
-     (bound-and-true-p consult-ghostel-project-sources)
-     (apply-partially #'consult-rexel--session-block-p conn sid))))
+  "Return the sources of `consult-ghostel-project' without the Rex blocks."
+  (consult-rexel--without-blocks
+   (bound-and-true-p consult-ghostel-project-sources)))
 
 (defvar consult-rexel-project-source-new
   `( :name     "New"
@@ -520,16 +515,19 @@ With prefix ARG, behave like `rexel-project' called with ARG."
                 (lambda (&rest _)
                   (rexel--prompt-later
                    (lambda ()
-                     (let ((this-command 'consult-rexel-project)
-                           (consult--buffer-display #'consult-rexel--display)
-                           (default-directory root)
-                           (consult-rexel--project (list conn sid label)))
-                       (consult--multi
-                        (consult-rexel--sources consult-rexel-project-sources)
-                        :prompt "Project Rex block: "
-                        :require-match (confirm-nonexistent-file-or-buffer)
-                        :history 'consult-rexel--history
-                        :sort nil)))))))
+                     ;; Binding `default-directory' in a buffer the
+                     ;; sources list would put that buffer in the project.
+                     (with-temp-buffer
+                       (setq default-directory root)
+                       (let ((this-command 'consult-rexel-project)
+                             (consult--buffer-display #'consult-rexel--display)
+                             (consult-rexel--project (list conn sid label)))
+                         (consult--multi
+                          (consult-rexel--sources consult-rexel-project-sources)
+                          :prompt "Project Rex block: "
+                          :require-match (confirm-nonexistent-file-or-buffer)
+                          :history 'consult-rexel--history
+                          :sort nil))))))))
            (if (and sid (not (assoc sid (rexel--conn-sessions conn))))
                (rexel--attach conn sid pick)
              (funcall pick))))))))
