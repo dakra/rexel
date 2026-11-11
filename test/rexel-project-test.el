@@ -11,6 +11,10 @@
 (require 'ert)
 (require 'rexel-project)
 
+;; The commands check for ghostel's native module, which these tests run
+;; without.
+(fset 'ghostel-ensure-module #'ignore)
+
 (defmacro rexel-project-test--with-project (root &rest body)
   "Run BODY with ROOT the root of the current project."
   (declare (indent 1))

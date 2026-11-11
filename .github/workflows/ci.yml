@@ -39,5 +39,5 @@ jobs:
         with:
           version: '29.4'
 
-      - name: Run package-lint and checkdoc
-        run: make package-lint checkdoc
+      - name: Run package-lint, checkdoc and the check for ghostel internals
+        run: make package-lint checkdoc ghostel-internals

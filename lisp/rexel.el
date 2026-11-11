@@ -45,7 +45,6 @@
 (require 'ghostel)
 (require 'websocket)
 
-(declare-function ghostel--write-vt "ghostel-module")
 (defvar ghostel-annotation-function)
 (declare-function dired-get-marked-files "dired")
 
@@ -1465,11 +1464,11 @@ buffer is named after the end of BID until a view names its tab."
      ((null buf)
       (rexel--attach-block-buffer
        conn sid bid
-       (ghostel--create (rexel--buffer-name conn sid (substring bid -6))
-                        nil 24 80)))
+       (ghostel-make-terminal (rexel--buffer-name conn sid (substring bid -6))
+                              24 80)))
      ((eq (buffer-local-value 'rexel--data-state buf) 'closed)
-      (ghostel--init-buffer buf 24 80)
-      (rexel--attach-block-buffer conn sid bid buf))
+      (rexel--attach-block-buffer conn sid bid
+                                  (ghostel-make-terminal buf 24 80)))
      (t buf))))
 
 (defun rexel--attach-block-buffer (conn sid bid buf)
@@ -1529,7 +1528,7 @@ buffer, as `kill-buffer-query-functions' expects."
   (let* ((closable (rexel--closable-p))
          (action rexel-kill-buffer-action)
          (keep-buffer
-          (and closable (eq action 'close) ghostel--command-running
+          (and closable (eq action 'close) (ghostel-command-running-p)
                (not (yes-or-no-p (format "Rex block %s runs a command; close it? "
                                          (buffer-name)))))))
     (setq rexel--close-on-kill
@@ -1593,7 +1592,7 @@ does not report it, take the block and size it too."
                     `((session_id . ,rexel--session-id)
                       (block_id . ,rexel--block-id))
                     #'ignore)
-    (when (ghostel--buffer-focused-p (current-buffer))
+    (when (ghostel-buffer-focused-p (current-buffer))
       (rexel--sync-size window))))
 
 (defvar rexel--focus-timer nil
@@ -1684,13 +1683,13 @@ server that has one."
         ;; The cwd is a path on the server's machine.
         (when-let* ((cwd (alist-get 'cwd shell)))
           (if (null (rexel--conn-host conn))
-              (ghostel--update-directory cwd)
+              (ghostel-set-directory cwd)
             (when-let* ((prefix (rexel--conn-prefix conn)))
-              (ghostel--update-directory (concat prefix cwd)))))
+              (ghostel-set-directory (concat prefix cwd)))))
         ;; OSC 133 marks from the shell are exact and take over once seen.
         (unless (and ghostel--prompt-positions
                      (not (eq (car ghostel--prompt-positions) rexel--stale-prompt)))
-          (rexel--set-command-running
+          (ghostel-set-command-running
            (and fg rexel--shell-pid
                 (not (eql (alist-get 'pid fg) rexel--shell-pid)))))))))
 
@@ -1718,16 +1717,6 @@ Return nil while the wrapper itself is in the foreground; before it execs
       (setq chain (butlast chain)))
     (cond (chain (car (last chain)))
           ((not (member (alist-get 'name fg) '("login" "rex"))) fg))))
-
-(defun rexel--set-command-running (running)
-  "Set `ghostel--command-running' to RUNNING; run ghostel's hooks on a change."
-  (unless (eq running ghostel--command-running)
-    (setq ghostel--command-running running)
-    (if running
-        (ghostel--run-hook-safely 'ghostel-command-start-functions
-                                  (current-buffer))
-      (ghostel--run-hook-safely 'ghostel-command-finish-functions
-                                (current-buffer) nil))))
 
 
 ;;; Data connection
@@ -1820,9 +1809,7 @@ The stream is forgotten before the close, so that
              (not (eq (buffer-local-value 'rexel--data-state buf) 'closed)))
     (with-current-buffer buf
       (rexel--close-stream)
-      (when ghostel--term
-        (ghostel--write-vt ghostel--term (format "\r\n[rexel: %s]\r\n" reason))
-        (ghostel--invalidate)))))
+      (ghostel-write-output (format "\r\n[rexel: %s]\r\n" reason)))))
 
 (defun rexel--restart-stream (buf reason)
   "End BUF's stream for REASON and have its block streamed afresh.
@@ -2020,12 +2007,8 @@ after `rexel--max-message-bytes' passes through as output."
     (dolist (item items)
       (if (consp item)
           (rexel--handle-message (cdr item))
-        ;; Callbacks run while parsing may select another buffer.  The
-        ;; server answers the program's terminal queries.
-        (save-current-buffer
-          (let ((ghostel-pty-out-function #'ignore))
-            (ghostel--write-vt ghostel--term item)))))
-    (ghostel--invalidate)))
+        ;; The server answers the program's terminal queries.
+        (ghostel-write-output item t)))))
 
 (defun rexel--handle-message (json)
   "Apply the stream control message JSON."
@@ -2035,9 +2018,7 @@ after `rexel--max-message-bytes' passes through as output."
        (let ((cols (alist-get 'cols msg))
              (rows (alist-get 'rows msg)))
          (when (and (natnump cols) (natnump rows) (> cols 0) (> rows 0))
-           (ghostel--set-size-with-cell-dims ghostel--term rows cols)
-           ;; Output after this message assumes the new size is in effect.
-           (ghostel--commit-frame (current-buffer))
+           (ghostel-set-size rows cols)
            (force-mode-line-update))))
       ("child_exited"
        (message "rexel: %s: program exited with status %s"
@@ -2419,34 +2400,36 @@ the batch, so no path is typed."
   (and (active-minibuffer-window)
        (eq (selected-window) (active-minibuffer-window))))
 
-(defun rexel--resize (rows cols &optional take)
+(defun rexel--resize (rows cols)
   "Ask the server to size this block ROWS by COLS, if that changes anything.
-With TAKE, also take ownership of the block from other clients.  A new
-size takes it too while the block has the focus, as for
-`ghostel--buffer-focused-p'.  ghostel calls this as
+With `rexel--size-take', also take ownership of the block from other
+clients.  A new size takes it too while the block has the focus, as for
+`ghostel-buffer-focused-p'.  ghostel calls this as
 `ghostel-resize-function' with the size fitting the windows showing the
 buffer; the terminal itself resizes when the server echoes it."
   (when (and (rexel--ready-p rexel--conn) (eq rexel--data-state 'live))
     (let ((size (cons cols rows)))
-      (when (or take (not (equal size rexel--requested-size)))
+      (when (or rexel--size-take (not (equal size rexel--requested-size)))
         (setq rexel--requested-size size
-              rexel--size-take (or take rexel--size-take
-                                   (ghostel--buffer-focused-p (current-buffer))))
+              rexel--size-take (or rexel--size-take
+                                   (ghostel-buffer-focused-p (current-buffer))))
         (rexel--send-size (current-buffer))))))
 
 (defun rexel--sync-size (&optional window)
   "Take this block and size it to the windows showing it, if any.
 From a minibuffer a window may only preview the block, so that waits for
 the minibuffer to exit and for WINDOW, by default any window showing the
-block now, to show it still."
+block now, to show it still.  ghostel asks for no size in copy mode, so
+there the block is taken and sized when the mode is left."
   (if (rexel--in-minibuffer-p)
       (progn
         (dolist (w (if window (list window) (get-buffer-window-list nil nil t)))
           (cl-pushnew (cons w (current-buffer)) rexel--shown-in-minibuffer
                       :test #'equal))
         (add-hook 'minibuffer-exit-hook #'rexel--minibuffer-exited))
-    (when-let* ((size (ghostel--desired-size)))
-      (rexel--resize (max 1 (cdr size)) (max 1 (car size)) t))))
+    (when-let* ((shown (get-buffer-window (current-buffer) t)))
+      (setq rexel--size-take t)
+      (ghostel-fit-window shown))))
 
 (defun rexel--window-shown (window)
   "Take the block and sync its size after WINDOW started showing it."
@@ -2543,9 +2526,10 @@ It names the size that client gave the terminal."
               (rexel--owner)
               (id (rexel--conn-client-id rexel--conn))
               ((stringp id))
-              ((not (equal rexel--owner id))))
+              ((not (equal rexel--owner id)))
+              (size (ghostel-terminal-size)))
     (concat (propertize (format "[Sized by another client %dx%d]"
-                                ghostel--term-cols ghostel--term-rows)
+                                (car size) (cdr size))
                         'face 'warning
                         'help-echo "mouse-1: Take the block and size it to its windows here"
                         'mouse-face 'mode-line-highlight
@@ -2559,19 +2543,17 @@ It names the size that client gave the terminal."
 
 (defun rexel--theme ()
   "Return the colors of ghostel's faces as arguments for `set_theme'."
-  (let ((bg (ghostel--face-hex-color 'ghostel-default :background)))
-    `((foreground . ,(ghostel--face-hex-color 'ghostel-default :foreground))
-      (background . ,bg)
-      (scheme . ,(symbol-name (ghostel--hex-color-scheme bg)))
-      ,@(when (face-background 'cursor nil t)
-          `((cursor . ,(ghostel--face-hex-color 'cursor :background))))
-      ,@(when ghostel-color-palette
+  (let-alist (ghostel-theme-colors)
+    `((foreground . ,.foreground)
+      (background . ,.background)
+      (scheme . ,(symbol-name .scheme))
+      ,@(when .cursor
+          `((cursor . ,.cursor)))
+      ,@(when (> (length .palette) 0)
           `((palette
              . ,(vconcat
-                 (seq-map-indexed
-                  (lambda (face i)
-                    (format "%d=%s" i (ghostel--face-hex-color face :foreground)))
-                  ghostel-color-palette))))))))
+                 (seq-map-indexed (lambda (color i) (format "%d=%s" i color))
+                                  .palette))))))))
 
 (defun rexel--sync-theme ()
   "Send this block's colors to the server.
@@ -2718,7 +2700,7 @@ Without a server, offer to start this machine's and signal an error for
 another machine, or with RUNNING do nothing."
   (let* ((prefix (file-remote-p default-directory))
          (prefix (and prefix
-                      (not (ghostel--local-host-p (rexel--prefix-host prefix)))
+                      (not (ghostel-local-host-p (rexel--prefix-host prefix)))
                       prefix))
          (conn (seq-find (lambda (conn)
                            (and (rexel--ready-p conn)
@@ -2869,7 +2851,7 @@ unless it is relative to a home directory."
                 (directory-file-name (expand-file-name default-directory))))
           ((if (rexel--conn-host conn)
                (equal prefix (rexel--conn-tramp conn))
-             (ghostel--local-host-p (rexel--prefix-host prefix)))
+             (ghostel-local-host-p (rexel--prefix-host prefix)))
            (let ((dir (file-local-name default-directory)))
              (and (file-name-absolute-p dir)
                   (not (string-prefix-p "~" dir))
@@ -2900,6 +2882,7 @@ else `rexel--shell-directory', else nil."
 `rexel-attach-display' says what is shown; with prefix argument ASK,
 ask for a block or a tab to show."
   (interactive "P")
+  (ghostel-ensure-module)
   (rexel--connect
    (rexel--read-host)
    (lambda (conn)
@@ -2914,6 +2897,7 @@ ask for a block or a tab to show."
 server choose one.  Interactively, ask for LABEL only with a prefix argument."
   (interactive
    (list (and current-prefix-arg (read-string "Session label: "))))
+  (ghostel-ensure-module)
   (when rexel-session-label-function
     (setq label (funcall rexel-session-label-function (or label ""))))
   (let ((dir default-directory))
@@ -2959,6 +2943,7 @@ It is on the server of `default-directory', see
 `rexel--connect-directory'.  ARG is the prefix argument of `rexel'.  A
 new shell starts in `default-directory', and a new tab is labelled
 TAB-LABEL."
+  (ghostel-ensure-module)
   (let ((dir default-directory))
     (rexel--connect-directory
      (lambda (conn)

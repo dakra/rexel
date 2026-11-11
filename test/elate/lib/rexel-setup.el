@@ -548,7 +548,7 @@ BUFFER defaults to `rexel-elate-block'."
 (defun rexel-elate-size (&optional buffer)
   "Return the (COLS . ROWS) of the terminal in BUFFER."
   (with-current-buffer (or buffer (rexel-elate-block))
-    (cons ghostel--term-cols ghostel--term-rows)))
+    (ghostel-terminal-size)))
 
 (defun rexel-elate-size-line (tag &optional buffer)
   "Return the regexp of the line \"TAG ROWS COLS\" for BUFFER's terminal size.

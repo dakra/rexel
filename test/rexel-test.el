@@ -12,6 +12,10 @@
 (require 'ert)
 (require 'rexel)
 
+;; The commands check for ghostel's native module, which these tests run
+;; without.
+(fset 'ghostel-ensure-module #'ignore)
+
 (defun rexel-test--record (tag payload)
   "Return a snapshot record with TAG and PAYLOAD, CRC left zero."
   (concat (unibyte-string (logand tag #xff) (ash tag -8)
@@ -478,6 +482,14 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
          (setq rexel--session-id "s" rexel--block-id "b")
          ,@body))))
 
+(defun rexel-test--fit (size)
+  "Return a stand-in for `ghostel-fit-window' asking for SIZE, a (COLS . ROWS).
+Like ghostel, it asks in the buffer of its window, and nothing without SIZE."
+  (lambda (window)
+    (when size
+      (with-current-buffer (window-buffer window)
+        (rexel--resize (cdr size) (car size))))))
+
 (defun rexel-test--sent-data (object)
   "Return the typed text in the write request OBJECT."
   (alist-get 'data (alist-get 'args (alist-get 'payload object))))
@@ -559,7 +571,8 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
   "Run BODY with this buffer as block \"block:123456\" of session \"s\" on CONN.
 The terminal and the stream's connection are stubbed."
   (declare (indent 1))
-  `(cl-letf (((symbol-function 'ghostel--init-buffer) #'ignore)
+  `(cl-letf (((symbol-function 'ghostel-make-terminal)
+              (lambda (buffer &rest _) buffer))
              ((symbol-function 'rexel-block-mode) #'ignore)
              ((symbol-function 'rexel--open-stream) #'ignore)
              ((symbol-function 'rexel--sync-size) #'ignore))
@@ -640,7 +653,8 @@ The terminal and the stream's connection are stubbed."
       (setq rexel--data-state 'live
             rexel--block-id "block:123456")
       (puthash rexel--block-id (current-buffer) (rexel--conn-blocks conn))
-      (cl-letf (((symbol-function 'ghostel--desired-size) (lambda () '(100 . 30))))
+      (set-window-buffer (selected-window) (current-buffer))
+      (cl-letf (((symbol-function 'ghostel-fit-window) (rexel-test--fit '(100 . 30))))
         (rexel--reattach conn)
         (rexel--resize 30 100)
         (should (equal '("session.attach")
@@ -711,8 +725,6 @@ The terminal and the stream's connection are stubbed."
       (rexel-test--with-attached-block conn
         (cl-letf (((symbol-function 'rexel--schedule-view-refresh)
                    (lambda (&rest _) (cl-incf refreshed)))
-                  ((symbol-function 'ghostel--write-vt) #'ignore)
-                  ((symbol-function 'ghostel--invalidate) #'ignore)
                   ((symbol-function 'message) #'ignore))
           (funcall hello-refused)
           (should (= 1 refreshed))
@@ -1291,7 +1303,8 @@ of the buffer it was asked from, even when the connection opens later."
 (ert-deftest rexel-test-size-requests-serialize-and-take ()
   (rexel-test--with-fake-conn sent
     (setq rexel--data-state 'live)
-    (rexel--resize 24 80 t)
+    (setq rexel--size-take t)
+    (rexel--resize 24 80)
     (should (equal '("session.own_block")
                    (mapcar (lambda (o) (alist-get 'method o)) sent)))
     ;; Sizes requested meanwhile wait; the latest one follows the take.
@@ -1374,7 +1387,8 @@ of the buffer it was asked from, even when the connection opens later."
     (let ((conn rexel--conn))
       (rexel-test--with-attached-block conn
         (setq rexel--data-state 'live)
-        (rexel--resize 24 80 t)
+        (setq rexel--size-take t)
+        (rexel--resize 24 80)
         (let ((take (car sent)))
           (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
           (setq sent nil)
@@ -1387,7 +1401,8 @@ of the buffer it was asked from, even when the connection opens later."
   (rexel-test--with-fake-conn sent
     (setq rexel--data-state 'welcome
           rexel--stream (rexel--make-stream :resume 'live))
-    (cl-letf (((symbol-function 'ghostel--desired-size) (lambda () '(100 . 30))))
+    (set-window-buffer (selected-window) (current-buffer))
+    (cl-letf (((symbol-function 'ghostel-fit-window) (rexel-test--fit '(100 . 30))))
       (rexel--on-welcome (rexel-test--welcome (make-string 16 ?t))))
     (should (eq 'live rexel--data-state))
     (should (equal "session.own_block" (alist-get 'method (car sent))))
@@ -1447,21 +1462,82 @@ of the buffer it was asked from, even when the connection opens later."
     (should (string-match-p "\\`0=#[0-9a-f]\\{6\\}\\'"
                             (aref (alist-get 'palette theme) 0)))))
 
+(ert-deftest rexel-test-theme-follows-ghostel-theme-colors ()
+  "The palette is indexed and a cursor without a color is left out."
+  (cl-letf (((symbol-function 'ghostel-theme-colors)
+             (lambda () `((foreground . "#eeeeee") (background . "#111111")
+                          (cursor . nil) (scheme . dark)
+                          (palette . ["#000001" "#000002"])))))
+    (should (equal '((foreground . "#eeeeee") (background . "#111111")
+                     (scheme . "dark")
+                     (palette . ["0=#000001" "1=#000002"]))
+                   (rexel--theme))))
+  (cl-letf (((symbol-function 'ghostel-theme-colors)
+             (lambda () `((foreground . "#eeeeee") (background . "#111111")
+                          (cursor . "#ff0000") (scheme . light)
+                          (palette . [])))))
+    (should (equal '((foreground . "#eeeeee") (background . "#111111")
+                     (scheme . "light") (cursor . "#ff0000"))
+                   (rexel--theme)))))
+
+(ert-deftest rexel-test-resize-message-sizes-terminal ()
+  "The server's `resize' message gives the terminal its size."
+  (with-temp-buffer
+    (let (sizes)
+      (cl-letf (((symbol-function 'ghostel-set-size)
+                 (lambda (rows cols) (push (list rows cols) sizes))))
+        (rexel--handle-message "{\"type\":\"resize\",\"cols\":100,\"rows\":30}")
+        (rexel--handle-message "{\"type\":\"resize\",\"cols\":0,\"rows\":30}")
+        (rexel--handle-message "{\"type\":\"resize\"}"))
+      (should (equal '((30 100)) sizes)))))
+
+(ert-deftest rexel-test-end-stream-notes-reason-once ()
+  "An ended stream notes the reason in the terminal, a closed one does not."
+  (with-temp-buffer
+    (let (written)
+      (setq rexel--data-state 'live)
+      (cl-letf (((symbol-function 'ghostel-write-output)
+                 (lambda (bytes) (push bytes written))))
+        (rexel--end-stream (current-buffer) "gone")
+        (rexel--end-stream (current-buffer) "gone again"))
+      (should (eq 'closed rexel--data-state))
+      (should (equal '("\r\n[rexel: gone]\r\n") written)))))
+
+(ert-deftest rexel-test-commands-need-the-native-module ()
+  "Without ghostel's native module the commands end before they connect."
+  (cl-letf (((symbol-function 'ghostel-ensure-module)
+             (lambda () (user-error "No module")))
+            ((symbol-function 'rexel--read-host)
+             (lambda (&rest _) (ert-fail "asked for a host")))
+            ((symbol-function 'rexel--connect)
+             (lambda (&rest _) (ert-fail "connected")))
+            ((symbol-function 'rexel--connect-directory)
+             (lambda (&rest _) (ert-fail "connected"))))
+    (should-error (rexel) :type 'user-error)
+    (should-error (rexel-attach) :type 'user-error)
+    (should-error (rexel-new-session) :type 'user-error)))
+
 (ert-deftest rexel-test-size-requests-wait-for-live ()
   (rexel-test--with-fake-conn sent
     (setq rexel--data-state 'snapshot)
-    (rexel--resize 24 80 t)
+    (setq rexel--size-take t)
+    (rexel--resize 24 80)
     (should-not sent)
     (should-not rexel--requested-size)))
 
 (ert-deftest rexel-test-sync-size-takes-with-fitted-size ()
+  "A shown block is taken with the size ghostel asks for, if it asks."
   (rexel-test--with-fake-conn sent
     (setq rexel--data-state 'live)
-    (cl-letf (((symbol-function 'ghostel--desired-size) (lambda () nil)))
+    (cl-letf (((symbol-function 'ghostel-fit-window) (rexel-test--fit '(80 . 24))))
       (rexel--sync-size))
     (should-not sent)
-    (cl-letf (((symbol-function 'ghostel--desired-size) (lambda () '(80 . 24))))
+    (set-window-buffer (selected-window) (current-buffer))
+    ;; ghostel asks for no size in copy mode, and when the mode is left.
+    (cl-letf (((symbol-function 'ghostel-fit-window) (rexel-test--fit nil)))
       (rexel--sync-size))
+    (should-not sent)
+    (rexel--resize 24 80)
     (should (equal "session.own_block" (alist-get 'method (car sent))))
     (rexel-test--respond rexel--conn (car sent))
     (should (equal '((columns . 80) (rows . 24))
@@ -1472,7 +1548,7 @@ of the buffer it was asked from, even when the connection opens later."
   (rexel-test--with-fake-conn sent
     (setq rexel--data-state 'live)
     (let ((focused nil))
-      (cl-letf (((symbol-function 'ghostel--buffer-focused-p)
+      (cl-letf (((symbol-function 'ghostel-buffer-focused-p)
                  (lambda (_buffer) focused)))
         (rexel--resize 24 80)
         (should (equal "com.superlogical.terminal.resize"
@@ -1495,7 +1571,7 @@ of the buffer it was asked from, even when the connection opens later."
     (let ((state nil)
           (window (selected-window)))
       (cl-letf (((symbol-function 'frame-focus-state) (lambda (&rest _) state))
-                ((symbol-function 'ghostel--desired-size) (lambda () '(80 . 24))))
+                ((symbol-function 'ghostel-fit-window) (rexel-test--fit '(80 . 24))))
         (set-window-buffer window (current-buffer))
         (rexel--window-selected window)
         (should (equal '("session.focus_block")
@@ -1517,7 +1593,7 @@ of the buffer it was asked from, even when the connection opens later."
           (rexel--focus-timer nil)
           (window (selected-window)))
       (cl-letf (((symbol-function 'frame-focus-state) (lambda (&rest _) state))
-                ((symbol-function 'ghostel--desired-size) (lambda () '(80 . 24)))
+                ((symbol-function 'ghostel-fit-window) (rexel-test--fit '(80 . 24)))
                 ((symbol-function 'run-at-time)
                  (lambda (_time _repeat function &rest _)
                    (push function timers) 'timer)))
@@ -1573,8 +1649,11 @@ of the buffer it was asked from, even when the connection opens later."
                    (substring-no-properties (rexel--size-tag))))
     (setq rexel--data-state 'closed)
     (should-not (rexel--size-tag))
-    ;; A server that names no client ID tells nothing about the owner.
+    ;; A terminal that is gone has no size to name.
     (setq rexel--data-state 'live)
+    (let ((ghostel--term-cols nil))
+      (should-not (rexel--size-tag)))
+    ;; A server that names no client ID tells nothing about the owner.
     (setf (rexel--conn-client-id rexel--conn) t)
     (should-not (rexel--size-tag))
     (should-not sent)))
@@ -1584,7 +1663,7 @@ of the buffer it was asked from, even when the connection opens later."
   (rexel-test--with-fake-conn sent
     (setq rexel--data-state 'live)
     (let ((window (selected-window)))
-      (cl-letf (((symbol-function 'ghostel--desired-size) (lambda () '(80 . 24))))
+      (cl-letf (((symbol-function 'ghostel-fit-window) (rexel-test--fit '(80 . 24))))
         (set-window-buffer window (current-buffer))
         (with-temp-buffer
           (rexel--size-tag-take `(mouse-1 (,window mode-line (0 . 0) 0))))
@@ -3434,7 +3513,7 @@ takes the views to apply and then the IDs of the blocks."
   (let ((conn (rexel--make-conn :endpoints (list "none")))
         (named nil))
     (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work")
-    (cl-letf (((symbol-function 'ghostel--create)
+    (cl-letf (((symbol-function 'ghostel-make-terminal)
                (lambda (name &rest _) (setq named name) nil))
               ((symbol-function 'rexel--attach-block-buffer) #'ignore))
       (rexel--ensure-block-buffer conn "s" "block:01-123456"))
@@ -3458,10 +3537,10 @@ takes the views to apply and then the IDs of the blocks."
         (rexel--shown-in-minibuffer nil)
         (minibuffer-exit-hook nil))
     (cl-letf (((symbol-function 'rexel--in-minibuffer-p) (lambda () in-minibuffer))
-              ((symbol-function 'ghostel--desired-size)
-               (lambda () (and (get-buffer-window) '(80 . 24))))
+              ((symbol-function 'ghostel-fit-window) (rexel-test--fit '(80 . 24)))
               ((symbol-function 'rexel--resize)
-               (lambda (_rows _cols take) (when take (push (current-buffer) taken))))
+               (lambda (_rows _cols)
+                 (when rexel--size-take (push (current-buffer) taken))))
               ((symbol-function 'run-at-time)
                (lambda (_time _repeat function &rest _) (push function timers))))
       (with-temp-buffer
@@ -3499,10 +3578,10 @@ takes the views to apply and then the IDs of the blocks."
         (rexel--shown-in-minibuffer nil)
         (minibuffer-exit-hook nil))
     (cl-letf (((symbol-function 'rexel--in-minibuffer-p) (lambda () in-minibuffer))
-              ((symbol-function 'ghostel--desired-size)
-               (lambda () (and (get-buffer-window) '(80 . 24))))
+              ((symbol-function 'ghostel-fit-window) (rexel-test--fit '(80 . 24)))
               ((symbol-function 'rexel--resize)
-               (lambda (_rows _cols take) (when take (push (current-buffer) taken)))))
+               (lambda (_rows _cols)
+                 (when rexel--size-take (push (current-buffer) taken)))))
       (let ((previewed (generate-new-buffer "previewed"))
             (kept (generate-new-buffer "kept"))
             (original (window-buffer))
@@ -4119,7 +4198,7 @@ passed on.  Return (PROMPTS . METHODS), the methods oldest first."
           dirs)
       (setf (rexel--conn-host conn) "studio")
       (puthash "b" (current-buffer) (rexel--conn-blocks conn))
-      (cl-letf (((symbol-function 'ghostel--update-directory)
+      (cl-letf (((symbol-function 'ghostel-set-directory)
                  (lambda (dir) (push dir dirs))))
         (rexel--on-block-event conn (rexel-test--process-event shell))
         (should-not dirs)

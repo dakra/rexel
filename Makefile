@@ -15,7 +15,10 @@ CONSULT_REXEL = extensions/consult-rexel/consult-rexel
 REXEL         = lisp/rexel
 REXEL_PROJECT = lisp/rexel-project
 
-.PHONY: all byte-compile test test-consult lint package-lint checkdoc clean
+# ghostel's internal symbols that the packages may use.
+GHOSTEL_INTERNALS = ghostel--prompt-positions
+
+.PHONY: all byte-compile test test-consult lint package-lint checkdoc ghostel-internals clean
 
 all: byte-compile test test-consult lint
 
@@ -54,7 +57,7 @@ test-consult: $(CONSULT_REXEL).elc
 	$(EMACS) --batch $(EMACSFLAGS) -Q $(CONSULT_LOAD_PATH) \
 		-l ert -l test/consult-rexel-test.el -f ert-run-tests-batch-and-exit
 
-lint: byte-compile package-lint checkdoc
+lint: byte-compile package-lint checkdoc ghostel-internals
 
 $(LINT_DEPS_STAMP): Makefile | $(GHOSTEL_DIR)
 	$(EMACS) --batch $(EMACSFLAGS) -Q \
@@ -96,6 +99,17 @@ checkdoc: $(REXEL).el $(REXEL_PROJECT).el $(CONSULT_REXEL).el
 		    (setq ok nil) \
 		    (with-current-buffer \"*Warnings*\" (message \"%s\" (buffer-string)))) \
 		  (unless ok (kill-emacs 1)))"
+
+ghostel-internals: $(REXEL).el $(REXEL_PROJECT).el $(CONSULT_REXEL).el
+	@found=$$(grep -noE 'ghostel--[A-Za-z0-9*?/<>=!+_:%&~^-]+' $^); \
+	[ $$? -le 1 ] || exit 2; \
+	other=$$(printf '%s\n' "$$found" | awk -F: -v allowed='$(GHOSTEL_INTERNALS)' \
+	    'BEGIN { split(allowed, a, " "); for (i in a) ok[a[i]] } \
+	     $$NF != "" && !($$NF in ok)'); \
+	if [ -n "$$other" ]; then \
+	  printf '%s\n' "$$other" "ghostel internals in use; see GHOSTEL_INTERNALS"; \
+	  exit 1; \
+	fi
 
 clean:
 	rm -f $(REXEL).elc $(REXEL_PROJECT).elc $(CONSULT_REXEL).elc

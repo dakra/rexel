@@ -12,6 +12,10 @@
 (require 'ert)
 (require 'consult-rexel)
 
+;; The commands check for ghostel's native module, which these tests run
+;; without.
+(fset 'ghostel-ensure-module #'ignore)
+
 (defvar embark-keymap-alist)
 (defvar embark-default-action-overrides)
 (defvar embark-buffer-map)
@@ -476,6 +480,22 @@ A spec is (VAR CONN SESSION-ID); the buffers are made in that order."
                (lambda (&rest _) (error "Listed the sessions"))))
       (consult-rexel '(4)))
     (should (equal '((4)) called))))
+
+(ert-deftest consult-rexel-test-commands-need-the-native-module ()
+  "Without ghostel's native module the pickers end before they connect."
+  (cl-letf (((symbol-function 'ghostel-ensure-module)
+             (lambda () (user-error "No module")))
+            ((symbol-function 'project-current)
+             (lambda (&rest _) (ert-fail "looked for the project")))
+            ((symbol-function 'rexel--connect)
+             (lambda (&rest _) (ert-fail "connected")))
+            ((symbol-function 'consult-rexel--list-sessions)
+             (lambda (&rest _) (ert-fail "listed the sessions")))
+            ((symbol-function 'consult-rexel--session)
+             (lambda (&rest _) (ert-fail "looked up the session"))))
+    (should-error (consult-rexel) :type 'user-error)
+    (should-error (consult-rexel-project) :type 'user-error)
+    (should-error (consult-rexel-attach-session "work") :type 'user-error)))
 
 (ert-deftest consult-rexel-test-project-prefix-argument ()
   "With a prefix argument the project picker is `rexel-project'."

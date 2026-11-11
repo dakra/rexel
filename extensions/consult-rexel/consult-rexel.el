@@ -274,6 +274,7 @@ The sessions go to `consult-rexel--sessions'."
 (defun consult-rexel-attach-session (name)
   "Attach the listed session NAME and show it as `rexel-attach-display' says."
   (interactive (list (consult-rexel--read-session "Attach Rex session: ")))
+  (ghostel-ensure-module)
   (pcase-let ((`(,conn . ,sid) (consult-rexel--session name)))
     (if (consult-rexel--attached-p (cons conn sid))
         (rexel--with-view
@@ -435,6 +436,7 @@ With prefix ARG, behave like `rexel' called with ARG."
   (interactive "P")
   (if arg
       (rexel arg)
+    (ghostel-ensure-module)
     (let* ((conns (seq-filter #'rexel--ready-p rexel--conns))
            (buffer (current-buffer))
            (pick (lambda ()
@@ -508,6 +510,7 @@ With prefix ARG, behave like `rexel-project' called with ARG."
   (interactive "P")
   (if arg
       (rexel-project arg)
+    (ghostel-ensure-module)
     (let* ((project (project-current t))
            (root (project-root project)))
       (rexel-project--with-session
