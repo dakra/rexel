@@ -916,6 +916,18 @@ A block without an answer gets a conflict error."
       (should-not sent)
       (should (equal '("*scratch*" "block:00000a") (rexel-test--shown))))))
 
+(ert-deftest rexel-test-attach-without-terminal-says-so ()
+  "A session without a terminal block shows nothing and says so."
+  (let ((view '((revision . 2) (session_id . "s") (label . "work")))
+        (shown nil))
+    (rexel-test--with-attach view sent
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format &rest args) (setq shown (apply #'format format args)))))
+        (rexel--show-attached conn "s" view 'ask))
+      (should-not sent)
+      (should (equal "rexel: Rex session work has no terminal" shown))
+      (should (equal '("*scratch*" "*scratch*") (rexel-test--shown))))))
+
 (ert-deftest rexel-test-attach-asks-after-process-reports ()
   "`ask' prompts from a timer once every report is in, the focused block first."
   (rexel-test--with-attach rexel-test--attach-view sent

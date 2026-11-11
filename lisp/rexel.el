@@ -986,9 +986,12 @@ The server answers nothing about a session that is being reattached."
 
 (defun rexel--show-attached (conn sid view display)
   "Show session SID's VIEW on CONN as DISPLAY, a `rexel-attach-display' value."
-  (let ((tab (rexel--active-tab view)))
+  (let ((tab (rexel--active-tab view))
+        (blocks (rexel--view-terminal-blocks view)))
     (cond
-     ((null (cdr (rexel--view-terminal-blocks view)))
+     ((null blocks)
+      (message "rexel: Rex session %s has no terminal" (alist-get 'label view)))
+     ((null (cdr blocks))
       (rexel--show-focused-block conn view))
      ((eq display 'ask)
       (rexel--read-attach-choice
