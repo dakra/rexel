@@ -174,9 +174,13 @@ a confirmation when the block runs a command.  With
 =rexel-kill-buffer-action= set to =keep= the block keeps running, and =ask=
 asks each time.  This holds for every kill, also one by
 =project-kill-buffers= or =clean-buffer-list=.  =C-c C-r d= detaches from the
-whole session and leaves it running.  A session whose last block closed
-stays on the server, empty.  Exiting Emacs closes no block: the sessions
-keep running, and the server takes Emacs off them at once.
+whole session and leaves it running.  Exiting Emacs closes no block: the
+sessions keep running, and the server takes Emacs off them at once.
+
+An attached session whose last block closes is destroyed, whatever closes
+the block: a killed buffer, =C-c C-r x=, a shell that exits, or another Rex
+client.  With =rexel-destroy-empty-sessions= set to =nil= it stays on the
+server, empty.
 
 * In place of ghostel's commands
 
@@ -258,8 +262,8 @@ under the prefix, so =find-file= in one starts there.
 
 =project-kill-buffers= itself leaves the sessions alone: by default it
 kills no ghostel buffer.  Ghostel's README has the condition that makes
-it kill them, which closes the blocks of a project and leaves its
-session empty.
+it kill them, which closes the blocks of a project, and its session goes
+with the last of them.
 
 * Key bindings
 
@@ -452,6 +456,7 @@ Rex.app, which uses the directory report and ignores the rest.
 | =rexel-tramp-hosts=              | =nil=       | TRAMP prefixes of servers' machines, by server label   |
 | =rexel-session-label-function=   | =nil=       | Rewrites the label given to =rexel-new-session=          |
 | =rexel-kill-buffer-action=       | =close=     | What killing a block buffer does: =close=, =keep= or =ask=   |
+| =rexel-destroy-empty-sessions=   | =t=         | Destroy a session when its last block closes                 |
 | =rexel-prefix-key=               | ="C-c C-r"= | Prefix for =rexel-prefix-map= in block buffers           |
 | =rexel-autostart-server=         | =ask=       | Start a local server when none is found: =ask=, =t= or =nil= |
 | =rexel-program=                  | ="rex"=     | The Rex command-line program                           |

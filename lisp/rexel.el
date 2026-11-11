@@ -132,6 +132,14 @@ running."
                  (const :tag "Keep the block running" keep)
                  (const :tag "Ask" ask)))
 
+(defcustom rexel-destroy-empty-sessions t
+  "Whether a session is destroyed when its last block closes.
+This holds for the sessions rexel is attached to, whatever closes the
+block: a killed buffer, `rexel-close-block', a shell that exits, or
+another Rex client.  A session with a block outside of every tab is not
+empty.  With nil the session stays on the server without a tab."
+  :type 'boolean)
+
 (defvar rexel-prefix-map)
 (defvar rexel-block-mode-map)
 
@@ -175,19 +183,38 @@ A write gets this long plus the time its size takes; see
 
 (cl-defstruct (rexel--conn (:constructor rexel--make-conn))
   "One control connection to a Rex server.
-ENDPOINTS are the server's addresses, each a Unix socket path or an http
-or https URL.  ENDPOINT is the one that last answered, and UNTRIED are
-those left to try while a connection is being opened.  HOST is the
-server's label, nil for this machine's server.  CLIENT-ID is non-nil
-from a welcome until the connection closes, and TOKEN is the reconnect
-token of the latest welcome.  While the connection is being redialled, TIMER is
-the pending attempt and DELAY the seconds until the one after it.
-ATTACHING are the sessions whose `session.attach' after a redial is
-unanswered: the server refuses their typing and sizing until then.
-CLOSING are the blocks whose `block.close' is unanswered.  TRAMP is the
-prefix of the TRAMP directory the server was last connected to for."
+
+HOST is the server's label, nil for this machine's server.
+ENDPOINTS are its addresses, each a Unix socket path or an http or https URL.
+ENDPOINT is the one that last answered, and
+UNTRIED are those left to try while a connection is being opened.
+
+CLIENT-ID is the client's ID from the welcome, or t if it had none, and
+nil unless the connection is open and welcomed.
+TOKEN is the reconnect token of the latest welcome.
+ON-READY are the callbacks to call with the connection at its next welcome.
+
+DELAY is non-nil from the loss of the connection until the next
+welcome, which then attaches the sessions again: the seconds the next
+attempt to be scheduled waits.
+TIMER is the timer of a scheduled attempt.
+
+SESSIONS is an alist from the ID of an attached session to its label,
+REVISIONS one to the revision of its view last applied, and
+REFRESH-TIMERS one to the timer of its pending view refresh.
+ATTACHING are the IDs of the sessions whose `session.attach' after a redial
+is unanswered: the server refuses their typing and sizing until then.
+BLOCKS maps a block ID to its buffer.
+
+PENDING maps a request ID to the callback for its response.
+CLOSING are the IDs of the blocks whose `block.close' is unanswered.
+BUSY has a session's ID once for each unanswered request of
+`rexel--busy-request' naming it.
+
+TRAMP is the TRAMP prefix of the remote directory the server was last
+used for, see `rexel--connect-directory'."
   ws endpoints endpoint untried host client-id token timer delay attaching
-  closing tramp
+  closing busy tramp
   (next-id 0)
   (pending (make-hash-table :test #'equal))
   (sessions nil)
@@ -486,6 +513,28 @@ Without CALLBACK an error is shown as a message."
     (rexel--send conn `((type . "request") (id . ,id) (method . ,method)
                         ,@(when payload `((payload . ,payload)))))))
 
+(defun rexel--busy-request (conn sid method payload callback)
+  "Call METHOD with PAYLOAD on CONN as `rexel--request' does.
+Until CALLBACK returns, session SID is not destroyed for being empty."
+  (rexel--request
+   conn method payload
+   (lambda (result err)
+     (unwind-protect
+         (funcall callback result err)
+       (setf (rexel--conn-busy conn)
+             (cl-delete sid (rexel--conn-busy conn) :test #'equal :count 1)))))
+  (push sid (rexel--conn-busy conn)))
+
+(defun rexel--session-request (conn sid method callback)
+  "Call METHOD for session SID on CONN, and CALLBACK with its result.
+An error is shown as a message, unless it says that the session is gone."
+  (rexel--request
+   conn method `((session_id . ,sid))
+   (lambda (result err)
+     (cond ((null err) (funcall callback result))
+           ((equal (alist-get 'code err) "session_not_found"))
+           (t (message "rexel: %s: %s" method (rexel--error-string err)))))))
+
 (defun rexel--connect (host callback)
   "Call CALLBACK with a ready connection to HOST, opening one if needed.
 HOST is a (LABEL . ENDPOINTS) pair as `rexel--hosts' returns them."
@@ -638,7 +687,8 @@ stay for reading until `rexel-attach' reuses them."
     (cancel-timer timer))
   (setf (rexel--conn-refresh-timers conn) nil
         (rexel--conn-client-id conn) nil
-        (rexel--conn-closing conn) nil)
+        (rexel--conn-closing conn) nil
+        (rexel--conn-busy conn) nil)
   (clrhash (rexel--conn-pending conn))
   (dolist (buf (buffer-list))
     (when (and (eq (buffer-local-value 'rexel--conn buf) conn)
@@ -703,7 +753,9 @@ response or repeat a change the view already has."
            ("block_closed"
             (when-let* ((buf (gethash (alist-get 'block_id inner-payload)
                                       (rexel--conn-blocks conn))))
-              (rexel--discard-buffer buf)))
+              (rexel--discard-buffer buf))
+            (when rexel-destroy-empty-sessions
+              (rexel--destroy-if-empty conn sid)))
            ("session_view_changed"
             (when (assoc sid (rexel--conn-sessions conn))
               (rexel--schedule-view-refresh conn sid)))
@@ -966,8 +1018,8 @@ same read, and a quit out of it drops them."
 (defun rexel--with-view (conn sid callback)
   "Fetch session SID's view on CONN, apply it and call CALLBACK with it.
 A session detached meanwhile is left alone."
-  (rexel--request
-   conn "session.view" `((session_id . ,sid))
+  (rexel--busy-request
+   conn sid "session.view" `((session_id . ,sid))
    (lambda (view err)
      (cond
       (err (message "rexel: session.view: %s" (rexel--error-string err)))
@@ -1304,6 +1356,27 @@ Without a focused terminal block, pop to VIEW's first terminal block."
         (alist-get sid (rexel--conn-revisions conn) nil t #'equal) nil
         (rexel--conn-attaching conn) (delete sid (rexel--conn-attaching conn)))
   (mapc #'rexel--discard-buffer (rexel--session-buffers sid)))
+
+(defun rexel--destroy-if-empty (conn sid)
+  "Destroy session SID on CONN if it is attached and holds no block.
+A session with a block buffer on CONN holds one, and the server's
+`session.list_blocks' also has the blocks outside of every tab.
+A session with a request of `rexel--busy-request' unanswered stays."
+  (cl-flet ((unused-p ()
+              (and (assoc sid (rexel--conn-sessions conn))
+                   (not (member sid (rexel--conn-attaching conn)))
+                   (not (seq-some
+                         (lambda (buf)
+                           (eq (buffer-local-value 'rexel--conn buf) conn))
+                         (rexel--session-buffers sid))))))
+    (when (unused-p)
+      (rexel--session-request
+       conn sid "session.list_blocks"
+       (lambda (result)
+         (when (and (seq-empty-p (alist-get 'blocks result))
+                    (unused-p)
+                    (not (member sid (rexel--conn-busy conn))))
+           (rexel--session-request conn sid "session.destroy" #'ignore)))))))
 
 (defun rexel--session-buffers (sid)
   "Return the block buffers of session SID on any connection, streaming or not."
@@ -2632,7 +2705,7 @@ in PREFIX, else one with that name in an address."
 (defun rexel--conn-prefix (conn)
   "Return the TRAMP prefix of the files on CONN's server, or nil.
 It is the one `rexel-tramp-hosts' gives the server, else that of the
-TRAMP directory the server was last connected to for."
+TRAMP directory the server was last used for."
   (and (rexel--conn-host conn)
        (or (cdr (assoc-string (rexel--conn-host conn) rexel-tramp-hosts t))
            (rexel--conn-tramp conn))))
@@ -2736,12 +2809,7 @@ only from a connection attached to it, so CONN attaches for the time."
   (let ((attached (assoc sid (rexel--conn-sessions conn))))
     (cl-labels
         ((request (method callback)
-           (rexel--request
-            conn method `((session_id . ,sid))
-            (lambda (result err)
-              (if err
-                  (message "rexel: %s: %s" method (rexel--error-string err))
-                (funcall callback result)))))
+           (rexel--session-request conn sid method callback))
          (finish (destroy)
            (cond (destroy (request "session.destroy" #'ignore))
                  ((not attached) (request "session.detach" #'ignore))))
@@ -2793,7 +2861,7 @@ Without CWD the shell starts in the home directory."
 (defun rexel--shell-directory (conn)
   "Return `default-directory' as a directory on CONN's server, or nil.
 A local directory is one on this machine's server.  A TRAMP directory is
-one on the server it was connected to for, see `rexel--connect-directory',
+one on the server `rexel--connect-directory' last used for its prefix,
 unless it is relative to a home directory."
   (let ((prefix (file-remote-p default-directory)))
     (cond ((null prefix)
@@ -2967,8 +3035,8 @@ to show the block with."
   "Open a tab with one shell in CWD in session SID on CONN and show it.
 LABEL labels the tab unless nil or empty.  ACTION is the `display-buffer'
 action to show the shell with."
-  (rexel--request
-   conn "session.new_window"
+  (rexel--busy-request
+   conn sid "session.new_window"
    `((session_id . ,sid) (layout . ,(rexel--new-shell-layout cwd))
      ,@(unless (member label '(nil "")) `((window_label . ,label))))
    (lambda (result err)

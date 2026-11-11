@@ -3638,6 +3638,13 @@ The requests of its fake connection collect in SENT."
         (kill-buffer buf))
       (should (eq closes (and (rexel-test--find "block.close" sent) t))))))
 
+(defun rexel-test--block-closed (sid bid)
+  "Return the event of block BID closing in session SID."
+  `((type . "session_event")
+    (payload . ((session_id . ,sid)
+                (event . ((type . "block_closed")
+                          (payload . ((block_id . ,bid)))))))))
+
 (ert-deftest rexel-test-own-kills-close-no-block ()
   "Buffers rexel kills itself, or without a connection, leave their blocks."
   (rexel-test--with-block-buffer sent buf
@@ -3645,13 +3652,9 @@ The requests of its fake connection collect in SENT."
     (should-not (buffer-live-p buf))
     (should-not sent))
   (rexel-test--with-block-buffer sent buf
-    (rexel--on-event
-     rexel--conn '((type . "session_event")
-                   (payload . ((session_id . "k")
-                               (event . ((type . "block_closed")
-                                         (payload . ((block_id . "block:00000k")))))))))
+    (rexel--on-event rexel--conn (rexel-test--block-closed "k" "block:00000k"))
     (should-not (buffer-live-p buf))
-    (should-not sent))
+    (should-not (rexel-test--find "block.close" sent)))
   (rexel-test--with-block-buffer sent buf
     (rexel--apply-view rexel--conn "k" '((label . "work") (windows . [])))
     (should-not (buffer-live-p buf))
@@ -3662,6 +3665,107 @@ The requests of its fake connection collect in SENT."
     (cl-letf (((symbol-function 'yes-or-no-p)
                (lambda (&rest _) (error "Asked without a connection"))))
       (kill-buffer buf))
+    (should-not (buffer-live-p buf))
+    (should-not sent)))
+
+(ert-deftest rexel-test-last-block-closed-destroys-session ()
+  "A session is destroyed once the server lists no block of it."
+  (pcase-dolist (`(,blocks . ,destroyed)
+                 '(([] . t)
+                   ([((block_id . "block:00000d") (placement . "detached"))])))
+    ;; A block closed from here has no buffer when the event arrives.
+    (dolist (killed '(t nil))
+      (rexel-test--with-block-buffer sent buf
+        (let ((conn rexel--conn))
+          (when killed (kill-buffer buf))
+          (rexel--on-event conn (rexel-test--block-closed "k" "block:00000k"))
+          (should-not (buffer-live-p buf))
+          (should (equal "session.list_blocks" (alist-get 'method (car sent))))
+          (should (equal '((session_id . "k")) (alist-get 'payload (car sent))))
+          (rexel-test--respond conn (car sent) `((blocks . ,blocks)))
+          (should (equal (and destroyed '((session_id . "k")))
+                         (alist-get 'payload (rexel-test--find "session.destroy"
+                                                               sent))))))))
+  ;; A session destroyed meanwhile is no error.
+  (rexel-test--with-block-buffer sent buf
+    (rexel--on-event rexel--conn (rexel-test--block-closed "k" "block:00000k"))
+    (cl-letf (((symbol-function 'message)
+               (lambda (&rest args) (error "Message: %S" args))))
+      (rexel-test--respond rexel--conn (car sent) nil
+                           '((code . "session_not_found") (message . "gone"))))
+    (should-not (rexel-test--find "session.destroy" sent)))
+  ;; A session detached meanwhile stays.
+  (rexel-test--with-block-buffer sent buf
+    (rexel--on-event rexel--conn (rexel-test--block-closed "k" "block:00000k"))
+    (rexel--forget-session rexel--conn "k")
+    (rexel-test--respond rexel--conn (car sent) '((blocks . [])))
+    (should-not (rexel-test--find "session.destroy" sent))))
+
+(ert-deftest rexel-test-session-in-use-is-not-destroyed ()
+  "An empty session stays while a command's request for it is unanswered."
+  (dolist (use (list (lambda (conn) (rexel--with-view conn "k" #'ignore))
+                     (lambda (conn) (rexel--open-tab conn "k" nil))))
+    (rexel-test--with-block-buffer sent buf
+      (let ((conn rexel--conn))
+        (rexel--on-event conn (rexel-test--block-closed "k" "block:00000k"))
+        (let ((listing (car sent)))
+          (funcall use conn)
+          (rexel-test--respond conn listing '((blocks . [])))
+          (should-not (rexel-test--find "session.destroy" sent))
+          (rexel-test--respond conn (car sent) nil
+                               '((code . "internal") (message . "no")))
+          (should-not (rexel--conn-busy conn))))))
+  ;; A tab opened meanwhile has a buffer.
+  (rexel-test--with-block-buffer sent buf
+    (let ((conn rexel--conn)
+          (new (generate-new-buffer "rexel-test-new")))
+      (unwind-protect
+          (progn
+            (rexel--on-event conn (rexel-test--block-closed "k" "block:00000k"))
+            (with-current-buffer new
+              (setq rexel--session-id "k" rexel--block-id "block:00000n"))
+            (rexel-test--respond conn (car sent) '((blocks . [])))
+            (should-not (rexel-test--find "session.destroy" sent)))
+        (kill-buffer new)))))
+
+(ert-deftest rexel-test-session-request-reports-errors ()
+  "An error is shown as a message, unless it says the session is gone."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn)
+          (messages nil)
+          (results nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest args) (push (apply #'format args) messages))))
+        (dolist (code '("session_not_found" "conflict"))
+          (rexel--session-request conn "k" "session.destroy"
+                                  (lambda (result) (push result results)))
+          (rexel-test--respond conn (car sent) nil
+                               `((code . ,code) (message . "no")))))
+      (rexel--session-request conn "k" "session.destroy"
+                              (lambda (result) (push result results)))
+      (should (equal '((session_id . "k")) (alist-get 'payload (car sent))))
+      (rexel-test--respond conn (car sent) '((revision . 1)))
+      (should (equal '(((revision . 1))) results))
+      (should (= 1 (length messages)))
+      (should (string-match-p "session\\.destroy.*conflict" (car messages))))))
+
+(ert-deftest rexel-test-block-closed-leaves-session ()
+  "A session with a block buffer, not attached or being reattached stays.
+So does every session with `rexel-destroy-empty-sessions' nil."
+  (rexel-test--with-block-buffer sent buf
+    (rexel--on-event rexel--conn (rexel-test--block-closed "k" "block:00000x"))
+    (should (buffer-live-p buf))
+    (should-not sent))
+  (rexel-test--with-block-buffer sent buf
+    (rexel--on-event rexel--conn (rexel-test--block-closed "other" "block:00000x"))
+    (should-not sent))
+  (rexel-test--with-block-buffer sent buf
+    (setf (rexel--conn-attaching rexel--conn) '("k"))
+    (rexel--on-event rexel--conn (rexel-test--block-closed "k" "block:00000k"))
+    (should-not sent))
+  (rexel-test--with-block-buffer sent buf
+    (let ((rexel-destroy-empty-sessions nil))
+      (rexel--on-event rexel--conn (rexel-test--block-closed "k" "block:00000k")))
     (should-not (buffer-live-p buf))
     (should-not sent)))
 
