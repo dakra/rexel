@@ -2630,20 +2630,23 @@ A block or session gone meanwhile, or a server without the method, is no error."
         (error
          (message "rexel: program_status: %s" (error-message-string err)))))))
 
+(defun rexel--status-entry (record app)
+  "Return RECORD of `terminal.program_status' as the (ID . PLIST) ghostel takes.
+APP is the app to record: the record's own, or the one the server resolved."
+  (let-alist record
+    (cons (or .id "")
+          (list :state (intern-soft .state) :kind (intern-soft .kind)
+                :progress .progress :app app :title .title :msg .msg))))
+
 (defun rexel--apply-status (records)
   "Make RECORDS, as `terminal.program_status' lists them, this block's.
 They show as the program reported them, without notifying."
   (ghostel-set-program-status
-   (mapcar (lambda (record)
-             (let-alist record
-               (cons (or .id "")
-                     (list :state (intern-soft .state) :kind (intern-soft .kind)
-                           :progress .progress :app .app :title .title :msg .msg))))
-           ;; Most recently updated first; the times are RFC 3339 strings.
-           (sort (append records nil)
-                 (lambda (a b)
-                   (string> (or (alist-get 'updated_at a) "")
-                            (or (alist-get 'updated_at b) "")))))
+   (mapcar (lambda (record) (rexel--status-entry record (alist-get 'app record)))
+           ;; Most recently updated first: RFC 3339 times with the server's
+           ;; offset sort as strings.
+           (seq-sort-by (lambda (record) (alist-get 'updated_at record))
+                        #'string> records))
    t))
 
 

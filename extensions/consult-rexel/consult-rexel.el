@@ -5,7 +5,7 @@
 ;; Author: Daniel Kraus <daniel@kraus.my>
 ;; URL: https://github.com/dakra/rexel
 ;; Version: 0.3.0
-;; Package-Requires: ((emacs "28.1") (consult "1.5") (rexel "0.3.0"))
+;; Package-Requires: ((emacs "28.1") (consult "1.5") (ghostel "0.65.0") (rexel "0.3.0"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
@@ -17,7 +17,8 @@
 ;; `consult-rexel' lists the block buffers, grouped by their sessions,
 ;; the other sessions of the connected servers, and with consult-ghostel
 ;; installed what `consult-ghostel' lists.  A block is
-;; previewed as a buffer and a session by the text of its focused block.
+;; previewed as a buffer and a session by the text of its focused block,
+;; and a session shows the program status of its terminals.
 ;; Choosing a session attaches it, and a name that matches nothing opens
 ;; a tab with that label in the session of `rexel'.  Listing the sessions
 ;; subscribes the connection to the session events of its whole server.
@@ -63,6 +64,10 @@
 
 (defvar consult-rexel--sessions nil
   "The sessions `consult-rexel' last listed, as (NAME CONN . SESSION-ID).")
+
+(defvar consult-rexel--statuses nil
+  "Program status of the listed sessions, as (SESSION-ID . RECORDS).
+RECORDS as `ghostel-status-label' takes them.")
 
 (defvar consult-rexel--preview-bytes 16384
   "Bytes of a block's text fetched to preview a session.")
@@ -235,33 +240,68 @@ gets the end of its ID appended, as `rex ls' shows it."
 Without it a request naming a session the connection is not attached to
 fails.  It also subscribes to every session's events but `block_event'.")
 
+(defun consult-rexel--annotate-session (name)
+  "Return the status label of the terminals of the listed session NAME, or nil."
+  (ghostel-status-label
+   (cdr (assoc (cddr (assoc name consult-rexel--sessions))
+               consult-rexel--statuses))))
+
 (defun consult-rexel--list-sessions (conns callback)
-  "Call CALLBACK once CONNS listed their sessions, or after 1.5 seconds.
-The sessions go to `consult-rexel--sessions'."
-  (let ((pending (length conns))
+  "Call CALLBACK once CONNS listed their sessions and statuses, or after 1.5 s.
+The sessions go to `consult-rexel--sessions', and the program status of
+those without a block buffer to `consult-rexel--statuses'."
+  (let ((pending 0)
         (sessions nil)
+        (statuses nil)
         (timer nil))
-    (cl-flet ((finish ()
-                (when timer
-                  (cancel-timer timer)
-                  (setq timer nil
-                        consult-rexel--sessions
-                        (consult-rexel--name-sessions (nreverse sessions)))
-                  (funcall callback))))
+    (cl-labels ((finish ()
+                  (when timer
+                    (cancel-timer timer)
+                    (setq timer nil
+                          consult-rexel--sessions
+                          (consult-rexel--name-sessions (nreverse sessions))
+                          consult-rexel--statuses statuses)
+                    (funcall callback)))
+                (request (conn method payload handler)
+                  (when timer
+                    (cl-incf pending)
+                    (rexel--request conn method payload
+                                    (lambda (result err)
+                                      (when timer
+                                        (funcall handler result err)
+                                        (when (zerop (cl-decf pending))
+                                          (finish)))))))
+                (status (conn sid block)
+                  ;; Attaching opens no detached block.
+                  (when (and (equal (alist-get 'creator_name block)
+                                    "com.superlogical.terminal")
+                             (equal (alist-get 'placement block) "placed"))
+                    (request
+                      conn "com.superlogical.terminal.program_status"
+                      `((session_id . ,sid) (block_id . ,(alist-get 'block_id block)))
+                      (lambda (result _err)
+                        ;; The records of a session's terminals mix, so each
+                        ;; takes the app the server resolved in its own terminal.
+                        (seq-doseq (r (alist-get 'records result))
+                          (push (rexel--status-entry r (alist-get 'effective_app r))
+                                (alist-get sid statuses nil nil #'equal))))))))
       (setq timer (run-at-time 1.5 nil #'finish))
       (dolist (conn conns)
-        (apply #'rexel--request conn
+        (apply #'request conn
                `(,@consult-rexel--attach-all
                  ,(lambda (result err)
-                    (if err
-                        (message "rexel: session.attach_all: %s"
-                                 (rexel--error-string err))
-                      (seq-doseq (s (alist-get 'sessions result))
-                        (push (cons (alist-get 'label s)
-                                    (cons conn (alist-get 'session_id s)))
-                              sessions)))
-                    (when (zerop (cl-decf pending))
-                      (finish)))))))))
+                    (when err
+                      (message "rexel: session.attach_all: %s"
+                               (rexel--error-string err)))
+                    (seq-doseq (s (alist-get 'sessions result))
+                      (let ((sid (alist-get 'session_id s)))
+                        (push (cons (alist-get 'label s) (cons conn sid))
+                              sessions)
+                        (unless (consult-rexel--shown-p (cons conn sid))
+                          (request conn "session.list_blocks" `((session_id . ,sid))
+                            (lambda (result _err)
+                              (seq-doseq (block (alist-get 'blocks result))
+                                (status conn sid block))))))))))))))
 
 (defun consult-rexel--shown-p (session)
   "Return non-nil if SESSION, a (CONN . SESSION-ID), has a block buffer."
@@ -376,6 +416,7 @@ The preview is the end of the text of the session's focused block."
      :category rexel-session
      :face     font-lock-keyword-face
      :state    ,#'consult-rexel--session-state
+     :annotate ,#'consult-rexel--annotate-session
      :action   ,#'consult-rexel-attach-session
      :new      ,#'consult-rexel--new-tab
      :items    ,(lambda ()

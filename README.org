@@ -354,7 +354,8 @@ buffer, and everywhere with the =:bind-keymap= line of the [[*Quick start][Quick
   below them the other sessions of the connected servers.  In a project
   on this machine its session comes first.  A block is previewed as its
   buffer, and a session by the end of the text in its focused block,
-  without attaching to it.  Choosing a session attaches it as
+  without attaching to it.  A session shows the program status of its
+  terminals as a block buffer does.  Choosing a session attaches it as
   =rexel-attach= does.  A name that matches nothing opens a tab with that
   label in the session of =M-x rexel=, and the /New/ group offers such a
   tab and a new session.  Without a connection it connects to a server

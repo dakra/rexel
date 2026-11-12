@@ -59,9 +59,11 @@
     (should-error (consult-rexel--session "three" t) :type 'user-error)))
 
 (ert-deftest consult-rexel-test-list-sessions ()
-  "The sessions of every connection are listed, a failing one left out."
+  "The sessions of every connection are listed with their status.
+A failing connection, session or block adds none."
   (let ((a (rexel--make-conn)) (b (rexel--make-conn :host "b"))
         (consult-rexel--sessions nil)
+        (consult-rexel--statuses nil)
         (done 0))
     (consult-rexel-test--with-requests sent
       (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) (timer-create))))
@@ -70,12 +72,118 @@
                      (mapcar #'cadr sent)))
       (should (equal '((event_scope . "session")) (nth 2 (car sent))))
       (consult-rexel-test--answer
-       (assq a sent) '((sessions . [((label . "one") (session_id . "session:1"))])))
-      (should (= 0 done))
+       (assq a sent) '((sessions . [((label . "one") (session_id . "session:1"))
+                                    ((label . "two") (session_id . "session:2"))])))
       (let ((inhibit-message t))
         (consult-rexel-test--answer (assq b sent) nil '((code . "internal"))))
+      (should (equal '(("session.list_blocks" ((session_id . "session:2")))
+                       ("session.list_blocks" ((session_id . "session:1"))))
+                     (mapcar (lambda (r) (seq-subseq r 1 3)) (seq-take sent 2))))
+      (consult-rexel-test--answer (nth 1 sent) nil '((code . "not_found")))
+      (consult-rexel-test--answer
+       (car sent)
+       '((blocks . [((block_id . "b1") (creator_name . "com.superlogical.terminal")
+                     (placement . "placed"))
+                    ((block_id . "o") (creator_name . "com.superlogical.onboarding")
+                     (placement . "placed"))
+                    ((block_id . "d") (creator_name . "com.superlogical.terminal")
+                     (placement . "detached"))
+                    ((block_id . "b2") (creator_name . "com.superlogical.terminal")
+                     (placement . "placed"))
+                    ((block_id . "b3") (creator_name . "com.superlogical.terminal")
+                     (placement . "placed"))])))
+      (should (equal '(("com.superlogical.terminal.program_status"
+                        ((session_id . "session:2") (block_id . "b3")))
+                       ("com.superlogical.terminal.program_status"
+                        ((session_id . "session:2") (block_id . "b2")))
+                       ("com.superlogical.terminal.program_status"
+                        ((session_id . "session:2") (block_id . "b1"))))
+                     (mapcar (lambda (r) (seq-subseq r 1 3)) (seq-take sent 3))))
+      (consult-rexel-test--answer (car sent) '((records . [])))
+      (consult-rexel-test--answer
+       (nth 2 sent) '((records . [((state . "blocked") (kind . "question")
+                                   (effective_app . "claude") (msg . "Proceed?"))
+                                  ((id . "t") (state . "working") (progress . 40)
+                                   (app . "make") (effective_app . "make"))])))
+      (should (= 0 done))
+      (consult-rexel-test--answer (nth 1 sent) nil '((code . "method_not_found")))
       (should (= 1 done))
-      (should (equal `(("one" ,a . "session:1")) consult-rexel--sessions)))))
+      (should (equal `(("one" ,a . "session:1") ("two" ,a . "session:2"))
+                     consult-rexel--sessions))
+      (should (equal '(("session:2"
+                        ("t" :state working :kind nil :progress 40
+                         :app "make" :title nil :msg nil)
+                        ("" :state blocked :kind question :progress nil
+                         :app "claude" :title nil :msg "Proceed?")))
+                     consult-rexel--statuses)))))
+
+(ert-deftest consult-rexel-test-list-sessions-skips-shown ()
+  "A session with a block buffer is listed without fetching its status."
+  (let ((conn (rexel--make-conn))
+        (buffer (generate-new-buffer "consult-rexel-test-block"))
+        (consult-rexel--sessions nil)
+        (consult-rexel--statuses nil))
+    (unwind-protect
+        (consult-rexel-test--with-requests sent
+          (with-current-buffer buffer
+            (setq rexel--conn conn rexel--session-id "s" rexel--block-id "b"))
+          (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) (timer-create))))
+            (consult-rexel--list-sessions (list conn) #'ignore))
+          (consult-rexel-test--answer
+           (car sent) '((sessions . [((label . "one") (session_id . "s"))])))
+          (should (= 1 (length sent)))
+          (should (equal `(("one" ,conn . "s")) consult-rexel--sessions)))
+      (kill-buffer buffer))))
+
+(ert-deftest consult-rexel-test-list-sessions-timeout ()
+  "Answers after the timeout change nothing and send no requests.
+The sessions and statuses listed by then are used."
+  (let ((a (rexel--make-conn)) (b (rexel--make-conn :host "b"))
+        (consult-rexel--sessions nil)
+        (consult-rexel--statuses nil)
+        (timeout nil)
+        (done 0))
+    (consult-rexel-test--with-requests sent
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_time _repeat fn) (setq timeout fn) (timer-create))))
+        (consult-rexel--list-sessions (list a b) (lambda () (cl-incf done))))
+      (consult-rexel-test--answer
+       (assq a sent) '((sessions . [((label . "one") (session_id . "s1"))])))
+      (consult-rexel-test--answer
+       (car sent)
+       '((blocks . [((block_id . "b1") (creator_name . "com.superlogical.terminal")
+                     (placement . "placed"))
+                    ((block_id . "b2") (creator_name . "com.superlogical.terminal")
+                     (placement . "placed"))])))
+      (let ((late (car sent)))
+        (consult-rexel-test--answer (nth 1 sent) '((records . [((state . "done"))])))
+        (funcall timeout)
+        (should (= 1 done))
+        (should (equal `(("one" ,a . "s1")) consult-rexel--sessions))
+        (should (equal '(("s1" ("" :state done :kind nil :progress nil
+                                :app nil :title nil :msg nil)))
+                       consult-rexel--statuses))
+        (consult-rexel-test--answer
+         (assq b sent) '((sessions . [((label . "two") (session_id . "s2"))])))
+        (should (eq late (car sent)))
+        (consult-rexel-test--answer late '((records . [((state . "blocked"))])))
+        (should (equal '(("s1" ("" :state done :kind nil :progress nil
+                                :app nil :title nil :msg nil)))
+                       consult-rexel--statuses))
+        (should (equal `(("one" ,a . "s1")) consult-rexel--sessions)))
+      (should (= 1 done)))))
+
+(ert-deftest consult-rexel-test-session-status-annotation ()
+  "A session is annotated with its terminals' status as a block buffer is."
+  (let* ((records '(("" :state done) ("x" :state blocked :kind question)))
+         (consult-rexel--sessions `(("one" nil . "s1") ("two" nil . "s2")))
+         (consult-rexel--statuses `(("s1" ,@records))))
+    (should (equal-including-properties (ghostel-status-label records)
+                                        (consult-rexel--annotate-session "one")))
+    (should-not (consult-rexel--annotate-session "two"))
+    (should-not (consult-rexel--annotate-session "three"))
+    (should (eq #'consult-rexel--annotate-session
+                (plist-get consult-rexel-session-source :annotate)))))
 
 (ert-deftest consult-rexel-test-block-pairs ()
   "Only the buffers of blocks are offered."

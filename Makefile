@@ -101,7 +101,7 @@ checkdoc: $(REXEL).el $(REXEL_PROJECT).el $(CONSULT_REXEL).el
 		  (unless ok (kill-emacs 1)))"
 
 ghostel-internals: $(REXEL).el $(REXEL_PROJECT).el $(CONSULT_REXEL).el
-	@found=$$(grep -noE 'ghostel--[A-Za-z0-9*?/<>=!+_:%&~^-]+' $^); \
+	@found=$$(grep -noE 'ghostel(-[a-z0-9]+)*--[A-Za-z0-9*?/<>=!+_:%&~^-]+' $^); \
 	[ $$? -le 1 ] || exit 2; \
 	other=$$(printf '%s\n' "$$found" | awk -F: -v allowed='$(GHOSTEL_INTERNALS)' \
 	    'BEGIN { split(allowed, a, " "); for (i in a) ok[a[i]] } \
