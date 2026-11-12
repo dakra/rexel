@@ -1955,7 +1955,8 @@ Signal an error on a record longer than `rexel--max-record-bytes'."
        (when (> (length rest) 0)
          (rexel--on-live-bytes rest))
        (rexel--sync-theme)
-       (rexel--sync-size)))))
+       (rexel--sync-size)
+       (rexel--fetch-status)))))
 
 (defconst rexel--max-message-bytes 65536
   "Longest stream control message held back waiting for its end.")
@@ -2599,6 +2600,50 @@ a time; colors that changed meanwhile follow when it completes."
 
 (add-hook 'enable-theme-functions #'rexel--sync-themes)
 (add-hook 'disable-theme-functions #'rexel--sync-themes)
+
+
+;;; Program status
+
+;; A snapshot leaves out the records of OSC 7501 reports; the server
+;; keeps them, and `terminal.program_status' lists them.
+
+(defun rexel--fetch-status ()
+  "Replace this block's program status records with the server's.
+A block or session gone meanwhile, or a server without the method, is no error."
+  (when (and (rexel--ready-p rexel--conn)
+             (eq rexel--data-state 'live)
+             (not (member rexel--session-id
+                          (rexel--conn-attaching rexel--conn))))
+    (let ((buf (current-buffer)))
+      (condition-case err
+          (rexel--request
+           rexel--conn "com.superlogical.terminal.program_status"
+           `((session_id . ,rexel--session-id) (block_id . ,rexel--block-id))
+           (lambda (result err)
+             (cond ((member (alist-get 'code err)
+                            '("not_found" "method_not_found" "session_not_found")))
+                   (err (message "rexel: program_status: %s"
+                                 (rexel--error-string err)))
+                   ((buffer-live-p buf)
+                    (with-current-buffer buf
+                      (rexel--apply-status (alist-get 'records result)))))))
+        (error
+         (message "rexel: program_status: %s" (error-message-string err)))))))
+
+(defun rexel--apply-status (records)
+  "Make RECORDS, as `terminal.program_status' lists them, this block's.
+They show as the program reported them, without notifying.
+A state ghostel does not know counts as `idle'."
+  (let ((ghostel-status-notify-states nil)
+        (ids (seq-map (lambda (record) (or (alist-get 'id record) "")) records)))
+    (dolist (entry ghostel-program-status)
+      (unless (member (car entry) ids)
+        (ghostel--osc-program-status "clear" (car entry) nil nil nil nil nil)))
+    (seq-doseq (record records)
+      (let-alist record
+        (ghostel--osc-program-status
+         (if (member .state '("working" "done" "blocked" "error")) .state "idle")
+         .id .kind .progress .app .title .msg)))))
 
 
 ;;; Commands

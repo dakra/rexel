@@ -1466,6 +1466,75 @@ of the buffer it was asked from, even when the connection opens later."
                            `((view . ,(rexel-test--view rexel--block-id))))
       (should (rexel-test--find "com.superlogical.terminal.set_theme" sent)))))
 
+;; Program status
+
+(ert-deftest rexel-test-status-replaced-without-notifying ()
+  "The server's records replace the buffer's and notify nothing; reports do."
+  (rexel-test--with-fake-conn sent
+    (let ((ghostel-program-status-functions '(ghostel-status-notify))
+          (notified nil))
+      (cl-letf (((symbol-function 'ghostel--defer)
+                 (lambda (&rest args) (push args notified))))
+        (setq rexel--data-state 'live)
+        (ghostel--osc-program-status "working" "old" nil nil nil nil nil)
+        (rexel--fetch-status)
+        (should (equal "com.superlogical.terminal.program_status"
+                       (alist-get 'method (car sent))))
+        (should (equal '((session_id . "s") (block_id . "b"))
+                       (alist-get 'payload (car sent))))
+        (rexel-test--respond
+         rexel--conn (car sent)
+         '((records . [((state . "blocked") (kind . "permission") (app . "claude")
+                        (title . "Edit file") (msg . "Allow?"))
+                       ((id . "a") (state . "done"))])))
+        (should (equal '(:state blocked :kind permission :app "claude"
+                         :title "Edit file" :msg "Allow?")
+                       (cdr (assoc "" ghostel-program-status))))
+        (should (eq 'done (plist-get (cdr (assoc "a" ghostel-program-status))
+                                     :state)))
+        (should-not (assoc "old" ghostel-program-status))
+        (should-not notified)
+        (ghostel--osc-program-status "error" "b" nil nil nil nil nil)
+        (should notified)))))
+
+(ert-deftest rexel-test-status-unknown-state-is-idle ()
+  (rexel-test--with-fake-conn sent
+    (let ((ghostel-program-status-functions nil))
+      (setq rexel--data-state 'live)
+      (rexel--fetch-status)
+      (rexel-test--respond rexel--conn (car sent)
+                           '((records . [((state . "pondering"))])))
+      (should (equal '(("" :state idle)) ghostel-program-status)))))
+
+(ert-deftest rexel-test-status-gone-block-is-quiet ()
+  "An answer that the block or the method is gone shows no message."
+  (rexel-test--with-fake-conn sent
+    (let ((messages nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest args) (push args messages))))
+        (setq rexel--data-state 'live)
+        (dolist (code '("not_found" "method_not_found" "session_not_found"))
+          (rexel--fetch-status)
+          (rexel-test--respond rexel--conn (car sent) nil `((code . ,code))))
+        (should-not messages)
+        (rexel--fetch-status)
+        (rexel-test--respond rexel--conn (car sent) nil
+                             '((code . "internal") (message . "no")))
+        (should messages)))))
+
+(ert-deftest rexel-test-status-fetched-after-snapshot ()
+  "Restoring a snapshot fetches the block's program status."
+  (rexel-test--with-fake-conn sent
+    (setq ghostel--term 'fake
+          rexel--stream (rexel--make-stream :marker "\e_rex1;1;"))
+    (setf (rexel--stream-snapshot rexel--stream) (list "snapshot"))
+    (cl-letf (((symbol-function 'ghostel-snapshot-restore) #'ignore)
+              ((symbol-function 'rexel--sync-theme) #'ignore)
+              ((symbol-function 'rexel--sync-size) #'ignore))
+      (rexel--restore-snapshot))
+    (should (eq 'live rexel--data-state))
+    (should (rexel-test--find "com.superlogical.terminal.program_status" sent))))
+
 (ert-deftest rexel-test-theme-names-ghostel-colors ()
   (let ((theme (rexel--theme)))
     (should (string-match-p "\\`#[0-9a-f]\\{6\\}\\'" (alist-get 'background theme)))
@@ -3364,6 +3433,7 @@ is waiting to be read."
                 ((symbol-function 'ghostel--invalidate) #'ignore)
                 ((symbol-function 'rexel--sync-theme) #'ignore)
                 ((symbol-function 'rexel--sync-size) #'ignore)
+                ((symbol-function 'rexel--fetch-status) #'ignore)
                 ((symbol-function 'rexel--flush-out) #'ignore))
         (rexel--on-live-bytes "\e[c")
         (should-not rexel--out-pending)

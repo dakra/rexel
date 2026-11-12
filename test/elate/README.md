@@ -74,7 +74,7 @@ it again.
 
 | Scenario | Variants | Groups |
 |---|---|---|
-| `session.json` | local, unix, tcp | `new-session`, `type`, `directory`, `rename`, `prefix-key`, `label-function`, `server-label`, `detach`, `attach`, `kill-buffer-keep`, `kill-buffer`, `host-prompt`, `attach-tabs`, `sync-picker`, `attach-again`, `attach-one-block-tab`, `detach-refresh`, `destroyed-elsewhere`, `no-server` |
+| `session.json` | local, unix, tcp | `new-session`, `type`, `directory`, `rename`, `prefix-key`, `label-function`, `server-label`, `detach`, `attach`, `kill-buffer-keep`, `program-status`, `kill-buffer`, `host-prompt`, `attach-tabs`, `sync-picker`, `attach-again`, `attach-one-block-tab`, `detach-refresh`, `destroyed-elsewhere`, `no-server` |
 | `typing.json` | local, unix, tcp, fallback, tls | `echo`, `burst`, `edit`, `paste`, `unicode`, `interrupt`, `full-screen`, `keys`, `scrollback`, `copy-mode`, `flood`, `large-paste`, `bracketed-paste`, `zsh-paste` |
 | `project.json` | none, this machine's server | `rexel`, `again`, `new-tab`, `numbered`, `recent`, `attach`, `empty-session`, `last-block`, `last-block-reused`, `detached-block`, `project`, `project-new`, `project-kill-running`, `project-kill`, `project-kill-detached`, `project-kill-no-buffers`, `remote`, `remote-unknown` |
 | `consult.json` | none, this machine's server | `project-new-name`, `project-pick`, `project-new-tab`, `project-attach`, `groups`, `session` |
