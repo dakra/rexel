@@ -1503,8 +1503,25 @@ of the buffer it was asked from, even when the connection opens later."
       (setq rexel--data-state 'live)
       (rexel--fetch-status)
       (rexel-test--respond rexel--conn (car sent)
-                           '((records . [((state . "pondering"))])))
+                           '((records . [((state . "pondering")
+                                          (kind . "telepathy"))])))
       (should (equal '(("" :state idle)) ghostel-program-status)))))
+
+(ert-deftest rexel-test-status-newest-first ()
+  "The records are kept most recently updated first, as ghostel orders them."
+  (rexel-test--with-fake-conn sent
+    (let ((ghostel-program-status-functions nil))
+      (setq rexel--data-state 'live)
+      (rexel--fetch-status)
+      (rexel-test--respond
+       rexel--conn (car sent)
+       '((records . [((id . "a") (state . "working")
+                      (updated_at . "2026-11-12T15:03:42.100000+01:00"))
+                     ((state . "blocked")
+                      (updated_at . "2026-11-12T15:03:42.300000+01:00"))
+                     ((id . "b") (state . "done")
+                      (updated_at . "2026-11-12T15:03:42.200000+01:00"))])))
+      (should (equal '("" "b" "a") (mapcar #'car ghostel-program-status))))))
 
 (ert-deftest rexel-test-status-gone-block-is-quiet ()
   "An answer that the block or the method is gone shows no message."

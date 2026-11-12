@@ -5,7 +5,7 @@
 ;; Author: Daniel Kraus <daniel@kraus.my>
 ;; URL: https://github.com/dakra/rexel
 ;; Version: 0.3.0
-;; Package-Requires: ((emacs "28.1") (ghostel "0.64.0") (websocket "1.15"))
+;; Package-Requires: ((emacs "28.1") (ghostel "0.65.0") (websocket "1.15"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
@@ -2632,18 +2632,19 @@ A block or session gone meanwhile, or a server without the method, is no error."
 
 (defun rexel--apply-status (records)
   "Make RECORDS, as `terminal.program_status' lists them, this block's.
-They show as the program reported them, without notifying.
-A state ghostel does not know counts as `idle'."
-  (let ((ghostel-status-notify-states nil)
-        (ids (seq-map (lambda (record) (or (alist-get 'id record) "")) records)))
-    (dolist (entry ghostel-program-status)
-      (unless (member (car entry) ids)
-        (ghostel--osc-program-status "clear" (car entry) nil nil nil nil nil)))
-    (seq-doseq (record records)
-      (let-alist record
-        (ghostel--osc-program-status
-         (if (member .state '("working" "done" "blocked" "error")) .state "idle")
-         .id .kind .progress .app .title .msg)))))
+They show as the program reported them, without notifying."
+  (ghostel-set-program-status
+   (mapcar (lambda (record)
+             (let-alist record
+               (cons (or .id "")
+                     (list :state (intern-soft .state) :kind (intern-soft .kind)
+                           :progress .progress :app .app :title .title :msg .msg))))
+           ;; Most recently updated first; the times are RFC 3339 strings.
+           (sort (append records nil)
+                 (lambda (a b)
+                   (string> (or (alist-get 'updated_at a) "")
+                            (or (alist-get 'updated_at b) "")))))
+   t))
 
 
 ;;; Commands
