@@ -938,7 +938,7 @@ Nil until the answer to `data.connect'.")
   "ID of the client that owns this block and so sizes it, nil when none does.")
 
 (defvar-local rexel--stale-prompt nil
-  "The newest of `ghostel--prompt-positions' when the shell last execed.
+  "The value of `ghostel-last-prompt' when the shell last execed.
 OSC 133 marks count again once a prompt was marked after it.")
 
 (defvar rexel--keep-blocks nil
@@ -1463,21 +1463,21 @@ buffer is named after the end of BID until a view names its tab."
   (let ((buf (gethash bid (rexel--conn-blocks conn))))
     (unless (buffer-live-p buf)
       (setq buf (rexel--stale-block-buffer bid)))
-    (cond
-     ((null buf)
+    (if (and buf (not (eq (buffer-local-value 'rexel--data-state buf) 'closed)))
+        buf
       (rexel--attach-block-buffer
        conn sid bid
-       (ghostel-make-terminal (rexel--buffer-name conn sid (substring bid -6))
-                              24 80)))
-     ((eq (buffer-local-value 'rexel--data-state buf) 'closed)
-      (rexel--attach-block-buffer conn sid bid
-                                  (ghostel-make-terminal buf 24 80)))
-     (t buf))))
+       (or buf (rexel--buffer-name conn sid (substring bid -6)))))))
 
-(defun rexel--attach-block-buffer (conn sid bid buf)
-  "Make BUF show block BID of session SID on CONN and return it."
-  (puthash bid buf (rexel--conn-blocks conn))
-  (with-current-buffer buf
+(defun rexel--attach-block-buffer (conn sid bid buffer-or-name)
+  "Make a terminal for block BID of session SID on CONN, return its buffer.
+BUFFER-OR-NAME is as for `ghostel-make-terminal'."
+  (with-current-buffer (ghostel-make-terminal buffer-or-name
+                                              :size '(80 . 24)
+                                              :send #'rexel--pty-out
+                                              :resize #'rexel--resize
+                                              :send-files #'rexel--send-files)
+    (puthash bid (current-buffer) (rexel--conn-blocks conn))
     ;; A block streamed again on its connection keeps its typed bytes
     ;; and the requests it has in flight.
     (unless (eq rexel--conn conn)
@@ -1493,10 +1493,7 @@ buffer is named after the end of BID until a view names its tab."
           rexel--data-state nil
           rexel--requested-size nil
           rexel--size-take nil
-          rexel--close-on-kill 'unasked
-          ghostel-pty-out-function #'rexel--pty-out
-          ghostel-resize-function #'rexel--resize
-          ghostel-send-files-function #'rexel--send-files)
+          rexel--close-on-kill 'unasked)
     (setq-local ghostel-annotation-function #'rexel--annotation)
     ;; A directory the shell reports itself is put under the prefix
     ;; `default-directory' has.
@@ -1509,8 +1506,8 @@ buffer is named after the end of BID until a view names its tab."
     (add-function :after after-focus-change-function #'rexel--focus-changed)
     (add-hook 'kill-buffer-query-functions #'rexel--kill-buffer-query nil t)
     (add-hook 'kill-buffer-hook #'rexel--block-buffer-killed nil t)
-    (rexel--open-data-connection conn buf))
-  buf)
+    (rexel--open-data-connection conn (current-buffer))
+    (current-buffer)))
 
 (defun rexel--discard-buffer (buf)
   "Kill the block buffer BUF, if live, and leave its block to the server."
@@ -1690,8 +1687,8 @@ server that has one."
             (when-let* ((prefix (rexel--conn-prefix conn)))
               (ghostel-set-directory (concat prefix cwd)))))
         ;; OSC 133 marks from the shell are exact and take over once seen.
-        (unless (and ghostel--prompt-positions
-                     (not (eq (car ghostel--prompt-positions) rexel--stale-prompt)))
+        (unless (let ((prompt (ghostel-last-prompt)))
+                  (and prompt (not (eq prompt rexel--stale-prompt))))
           (ghostel-set-command-running
            (and fg rexel--shell-pid
                 (not (eql (alist-get 'pid fg) rexel--shell-pid)))))))))
@@ -1705,7 +1702,7 @@ path and argv0; an `exec' that keeps both goes unnoticed."
         (program (list (alist-get 'path shell) (alist-get 'argv0 shell))))
     (when (and (eql pid rexel--shell-pid)
                (not (equal program rexel--shell-program)))
-      (setq rexel--stale-prompt (car ghostel--prompt-positions)))
+      (setq rexel--stale-prompt (ghostel-last-prompt)))
     (setq rexel--shell-pid pid
           rexel--shell-program program)))
 
@@ -1944,9 +1941,7 @@ Signal an error on a record longer than `rexel--max-record-bytes'."
     (setf (rexel--stream-snapshot s) nil
           (rexel--stream-tail s) nil)
     (condition-case err
-        ;; The server answers the program's terminal queries.
-        (let ((ghostel-pty-out-function #'ignore))
-          (ghostel-snapshot-restore snapshot))
+        (ghostel-restore-snapshot snapshot)
       (error (rexel--end-stream (current-buffer)
                                 (format "bad snapshot: %s"
                                         (error-message-string err))))
@@ -2022,7 +2017,7 @@ after `rexel--max-message-bytes' passes through as output."
        (let ((cols (alist-get 'cols msg))
              (rows (alist-get 'rows msg)))
          (when (and (natnump cols) (natnump rows) (> cols 0) (> rows 0))
-           (ghostel-set-size rows cols)
+           (ghostel-set-size (cons cols rows))
            (force-mode-line-update))))
       ("child_exited"
        (message "rexel: %s: program exited with status %s"
@@ -2067,8 +2062,7 @@ TEMP is non-nil when FILE is a copy to delete afterwards."
 When the server runs on this machine and all FILES are local, their own
 paths are typed.  Otherwise the files are uploaded in batches of
 `rexel--upload-batch-max' and the server types the paths it stores them
-under; calls made in one command share a batch.  ghostel calls this as
-`ghostel-send-files-function'."
+under; calls made in one command share a batch."
   (cond
    ((null rexel--conn)
     (user-error "Not connected; use M-x rexel-attach"))
@@ -2404,20 +2398,19 @@ the batch, so no path is typed."
   (and (active-minibuffer-window)
        (eq (selected-window) (active-minibuffer-window))))
 
-(defun rexel--resize (rows cols)
-  "Ask the server to size this block ROWS by COLS, if that changes anything.
-With `rexel--size-take', also take ownership of the block from other
+(defun rexel--resize (size)
+  "Ask the server to give this block SIZE, if that changes anything.
+SIZE is (COLS . ROWS), fitting the windows that show the block.  With
+`rexel--size-take', also take ownership of the block from other
 clients.  A new size takes it too while the block has the focus, as for
-`ghostel-buffer-focused-p'.  ghostel calls this as
-`ghostel-resize-function' with the size fitting the windows showing the
-buffer; the terminal itself resizes when the server echoes it."
-  (when (and (rexel--ready-p rexel--conn) (eq rexel--data-state 'live))
-    (let ((size (cons cols rows)))
-      (when (or rexel--size-take (not (equal size rexel--requested-size)))
-        (setq rexel--requested-size size
-              rexel--size-take (or rexel--size-take
-                                   (ghostel-buffer-focused-p (current-buffer))))
-        (rexel--send-size (current-buffer))))))
+`ghostel-buffer-focused-p'.  The terminal resizes when the server
+echoes the size."
+  (when (and (rexel--ready-p rexel--conn) (eq rexel--data-state 'live)
+             (or rexel--size-take (not (equal size rexel--requested-size))))
+    (setq rexel--requested-size size
+          rexel--size-take (or rexel--size-take
+                               (ghostel-buffer-focused-p (current-buffer))))
+    (rexel--send-size (current-buffer))))
 
 (defun rexel--sync-size (&optional window)
   "Take this block and size it to the windows showing it, if any.

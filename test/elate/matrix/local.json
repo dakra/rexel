@@ -79,7 +79,7 @@
     {"group": "exec-shell", "comment": "a shell with integration that execs one without it: the end of a command is still noticed"},
     {"eval": "(advice-remove 'ghostel--osc133-marker 'rexel-elate-no-osc133)"},
     {"eval": "(rexel-elate-send (format \"source %s\\n\" (shell-quote-argument (expand-file-name \"etc/shell/ghostel.bash\" ghostel-module-directory))))"},
-    {"wait": "until", "pred": "ghostel--prompt-positions", "comment": "the shell sends OSC 133 marks"},
+    {"wait": "until", "pred": "(ghostel-last-prompt)", "comment": "the shell sends OSC 133 marks"},
     {"type": "sleep 2"},
     {"keys": "RET"},
     {"wait": "until", "pred": "ghostel--command-running", "timeout": 5},

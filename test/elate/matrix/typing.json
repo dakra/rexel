@@ -56,6 +56,7 @@
     {"type": "echo t6b-ßé-日本"},
     {"keys": "RET"},
     {"wait": "until", "pred": "(rexel-elate-has \"^t6b-ßé-日本$\")", "comment": "typed, not pasted"},
+    {"assert": {"eval": "(with-current-buffer (rexel-elate-block) (not buffer-read-only))"}, "comment": "an Emacs input method composes only in a buffer that takes edits"},
 
     {"group": "interrupt", "comment": "C-c C-c interrupts the running program"},
     {"type": "sleep 307"},

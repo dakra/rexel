@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- An Emacs input method such as `chinese-py` composes in a block, whose
+  buffer was read-only.
+
 ## [0.3.0] — 2026-11-11
 
 ### Added

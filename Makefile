@@ -16,7 +16,7 @@ REXEL         = lisp/rexel
 REXEL_PROJECT = lisp/rexel-project
 
 # ghostel's internal symbols that the packages may use.
-GHOSTEL_INTERNALS = ghostel--prompt-positions
+GHOSTEL_INTERNALS =
 
 .PHONY: all byte-compile test test-consult lint package-lint checkdoc ghostel-internals clean
 

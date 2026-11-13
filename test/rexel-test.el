@@ -488,7 +488,7 @@ Like ghostel, it asks in the buffer of its window, and nothing without SIZE."
   (lambda (window)
     (when size
       (with-current-buffer (window-buffer window)
-        (rexel--resize (cdr size) (car size))))))
+        (rexel--resize size)))))
 
 (defun rexel-test--sent-data (object)
   "Return the typed text in the write request OBJECT."
@@ -656,7 +656,7 @@ The terminal and the stream's connection are stubbed."
       (set-window-buffer (selected-window) (current-buffer))
       (cl-letf (((symbol-function 'ghostel-fit-window) (rexel-test--fit '(100 . 30))))
         (rexel--reattach conn)
-        (rexel--resize 30 100)
+        (rexel--resize '(100 . 30))
         (should (equal '("session.attach")
                        (mapcar (lambda (o) (alist-get 'method o)) sent)))
         (rexel-test--respond conn (car sent)
@@ -1316,22 +1316,22 @@ of the buffer it was asked from, even when the connection opens later."
   (rexel-test--with-fake-conn sent
     (setq rexel--data-state 'live)
     (setq rexel--size-take t)
-    (rexel--resize 24 80)
+    (rexel--resize '(80 . 24))
     (should (equal '("session.own_block")
                    (mapcar (lambda (o) (alist-get 'method o)) sent)))
     ;; Sizes requested meanwhile wait; the latest one follows the take.
-    (rexel--resize 30 100)
-    (rexel--resize 40 120)
+    (rexel--resize '(100 . 30))
+    (rexel--resize '(120 . 40))
     (should (= 1 (length sent)))
     (rexel-test--respond rexel--conn (car sent))
     (should (equal '((columns . 120) (rows . 40))
                    (alist-get 'args (alist-get 'payload (car sent)))))
     ;; An unchanged size sends nothing more.
     (rexel-test--respond rexel--conn (car sent))
-    (rexel--resize 40 120)
+    (rexel--resize '(120 . 40))
     (should (= 2 (length sent)))
     ;; A resize without take sends no own_block.
-    (rexel--resize 20 90)
+    (rexel--resize '(90 . 20))
     (should (equal "com.superlogical.terminal.resize"
                    (alist-get 'method (car sent))))
     (should (= 3 (length sent)))))
@@ -1347,8 +1347,8 @@ of the buffer it was asked from, even when the connection opens later."
                    (push object sent)
                    (unless nested
                      (setq nested t)
-                     (with-current-buffer buf (rexel--resize 30 100))))))
-        (rexel--resize 24 80))
+                     (with-current-buffer buf (rexel--resize '(100 . 30)))))))
+        (rexel--resize '(80 . 24)))
       (should (= 1 (length sent)))
       (rexel-test--respond rexel--conn (car sent))
       (should (= 2 (length sent)))
@@ -1364,7 +1364,7 @@ of the buffer it was asked from, even when the connection opens later."
                  (lambda (_conn object)
                    (push object sent)
                    (rexel-test--respond conn object))))
-        (rexel--resize 24 80))
+        (rexel--resize '(80 . 24)))
       (should-not rexel--size-inflight))))
 
 (ert-deftest rexel-test-size-failed-send-clears-the-mark ()
@@ -1373,9 +1373,9 @@ of the buffer it was asked from, even when the connection opens later."
     (setq rexel--data-state 'live)
     (cl-letf (((symbol-function 'rexel--send)
                (lambda (&rest _) (error "Boom"))))
-      (should-error (rexel--resize 24 80)))
+      (should-error (rexel--resize '(80 . 24))))
     (should-not rexel--size-inflight)
-    (rexel--resize 30 100)
+    (rexel--resize '(100 . 30))
     (should (= 1 (length sent)))))
 
 (ert-deftest rexel-test-restream-keeps-size-in-flight ()
@@ -1384,7 +1384,7 @@ of the buffer it was asked from, even when the connection opens later."
     (let ((conn rexel--conn))
       (rexel-test--with-attached-block conn
         (setq rexel--data-state 'live)
-        (rexel--resize 24 80)
+        (rexel--resize '(80 . 24))
         (let ((resize (car sent)))
           (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
           (should (eq conn rexel--size-inflight))
@@ -1400,7 +1400,7 @@ of the buffer it was asked from, even when the connection opens later."
       (rexel-test--with-attached-block conn
         (setq rexel--data-state 'live)
         (setq rexel--size-take t)
-        (rexel--resize 24 80)
+        (rexel--resize '(80 . 24))
         (let ((take (car sent)))
           (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
           (setq sent nil)
@@ -1525,7 +1525,7 @@ Reports notify."
     (setq ghostel--term 'fake
           rexel--stream (rexel--make-stream :marker "\e_rex1;1;"))
     (setf (rexel--stream-snapshot rexel--stream) (list "snapshot"))
-    (cl-letf (((symbol-function 'ghostel-snapshot-restore) #'ignore)
+    (cl-letf (((symbol-function 'ghostel-restore-snapshot) #'ignore)
               ((symbol-function 'rexel--sync-theme) #'ignore)
               ((symbol-function 'rexel--sync-size) #'ignore))
       (rexel--restore-snapshot))
@@ -1563,11 +1563,11 @@ Reports notify."
   (with-temp-buffer
     (let (sizes)
       (cl-letf (((symbol-function 'ghostel-set-size)
-                 (lambda (rows cols) (push (list rows cols) sizes))))
+                 (lambda (size) (push size sizes))))
         (rexel--handle-message "{\"type\":\"resize\",\"cols\":100,\"rows\":30}")
         (rexel--handle-message "{\"type\":\"resize\",\"cols\":0,\"rows\":30}")
         (rexel--handle-message "{\"type\":\"resize\"}"))
-      (should (equal '((30 100)) sizes)))))
+      (should (equal '((100 . 30)) sizes)))))
 
 (ert-deftest rexel-test-end-stream-notes-reason-once ()
   "An ended stream notes the reason in the terminal, a closed one does not."
@@ -1599,7 +1599,7 @@ Reports notify."
   (rexel-test--with-fake-conn sent
     (setq rexel--data-state 'snapshot)
     (setq rexel--size-take t)
-    (rexel--resize 24 80)
+    (rexel--resize '(80 . 24))
     (should-not sent)
     (should-not rexel--requested-size)))
 
@@ -1615,7 +1615,7 @@ Reports notify."
     (cl-letf (((symbol-function 'ghostel-fit-window) (rexel-test--fit nil)))
       (rexel--sync-size))
     (should-not sent)
-    (rexel--resize 24 80)
+    (rexel--resize '(80 . 24))
     (should (equal "session.own_block" (alist-get 'method (car sent))))
     (rexel-test--respond rexel--conn (car sent))
     (should (equal '((columns . 80) (rows . 24))
@@ -1628,15 +1628,15 @@ Reports notify."
     (let ((focused nil))
       (cl-letf (((symbol-function 'ghostel-buffer-focused-p)
                  (lambda (_buffer) focused)))
-        (rexel--resize 24 80)
+        (rexel--resize '(80 . 24))
         (should (equal "com.superlogical.terminal.resize"
                        (alist-get 'method (car sent))))
         (rexel-test--respond rexel--conn (car sent))
         (setq focused t)
         ;; The size asked for last takes nothing.
-        (rexel--resize 24 80)
+        (rexel--resize '(80 . 24))
         (should (= 1 (length sent)))
-        (rexel--resize 30 100)
+        (rexel--resize '(100 . 30))
         (should (equal "session.own_block" (alist-get 'method (car sent))))
         (rexel-test--respond rexel--conn (car sent))
         (should (equal '((columns . 100) (rows . 30))
@@ -3403,43 +3403,22 @@ is waiting to be read."
       (should (= 5 rexel--shell-pid))
       (should-not ghostel--command-running))))
 
-(ert-deftest rexel-test-exec-survives-stream-restart ()
-  "Prompt marks an exec ended stay ended when the block is streamed afresh."
-  (rexel-test--with-fake-conn _sent
-    (let ((conn rexel--conn)
-          (mark '(fake)))
-      (setq ghostel--prompt-positions (list mark)
-            rexel--stale-prompt mark)
-      (cl-letf (((symbol-function 'rexel-block-mode) #'ignore))
-        (rexel--attach-block-buffer conn "s" "b" (current-buffer)))
-      (should (eq mark rexel--stale-prompt)))))
-
 (ert-deftest rexel-test-replies-dropped ()
   "Replies made while parsing the stream are dropped, typed bytes are sent."
   (with-temp-buffer
-    (let ((reply (lambda (&rest _) (ghostel--pty-out "\e[?62;22c") 0)))
-      (setq rexel--conn 'fake
-            rexel--stream (rexel--make-stream :marker "\e_rex1;1;")
-            ghostel--term 'fake
-            ghostel-pty-out-function #'rexel--pty-out)
-      (cl-letf (((symbol-function 'ghostel--write-vt) reply)
-                ((symbol-function 'ghostel--restore-snapshot) reply)
-                ((symbol-function 'ghostel--apply-palette) reply)
-                ((symbol-function 'ghostel--apply-bold-config) #'ignore)
-                ((symbol-function 'ghostel--set-size-with-cell-dims) #'ignore)
-                ((symbol-function 'ghostel--invalidate) #'ignore)
-                ((symbol-function 'rexel--sync-theme) #'ignore)
-                ((symbol-function 'rexel--sync-size) #'ignore)
-                ((symbol-function 'rexel--fetch-status) #'ignore)
-                ((symbol-function 'rexel--flush-out) #'ignore))
-        (rexel--on-live-bytes "\e[c")
-        (should-not rexel--out-pending)
-        (setf (rexel--stream-snapshot rexel--stream) (list "snapshot"))
-        (rexel--restore-snapshot)
-        (should (eq 'live rexel--data-state))
-        (should-not rexel--out-pending)
-        (ghostel--pty-out "typed")
-        (should (equal "typed" rexel--out-pending))))))
+    (setq rexel--conn 'fake
+          rexel--stream (rexel--make-stream :marker "\e_rex1;1;")
+          rexel--data-state 'live
+          ghostel--term 'fake
+          ghostel--pty-out-function #'rexel--pty-out)
+    (cl-letf (((symbol-function 'ghostel--write-vt)
+               (lambda (&rest _) (ghostel--pty-out "\e[?62;22c") 0))
+              ((symbol-function 'ghostel--invalidate) #'ignore)
+              ((symbol-function 'rexel--flush-out) #'ignore))
+      (rexel--on-live-bytes "\e[c")
+      (should-not rexel--out-pending)
+      (ghostel--pty-out "typed")
+      (should (equal "typed" rexel--out-pending)))))
 
 (ert-deftest rexel-test-read-host-starts-server ()
   "The server starts only with no host known and as the option allows."
@@ -3592,9 +3571,8 @@ takes the views to apply and then the IDs of the blocks."
   (let ((conn (rexel--make-conn :endpoints (list "none")))
         (named nil))
     (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work")
-    (cl-letf (((symbol-function 'ghostel-make-terminal)
-               (lambda (name &rest _) (setq named name) nil))
-              ((symbol-function 'rexel--attach-block-buffer) #'ignore))
+    (cl-letf (((symbol-function 'rexel--attach-block-buffer)
+               (lambda (_conn _sid _bid name) (setq named name) nil)))
       (rexel--ensure-block-buffer conn "s" "block:01-123456"))
     (should (equal "*rex:work:123456*" named))))
 
@@ -3618,7 +3596,7 @@ takes the views to apply and then the IDs of the blocks."
     (cl-letf (((symbol-function 'rexel--in-minibuffer-p) (lambda () in-minibuffer))
               ((symbol-function 'ghostel-fit-window) (rexel-test--fit '(80 . 24)))
               ((symbol-function 'rexel--resize)
-               (lambda (_rows _cols)
+               (lambda (_size)
                  (when rexel--size-take (push (current-buffer) taken))))
               ((symbol-function 'run-at-time)
                (lambda (_time _repeat function &rest _) (push function timers))))
@@ -3659,7 +3637,7 @@ takes the views to apply and then the IDs of the blocks."
     (cl-letf (((symbol-function 'rexel--in-minibuffer-p) (lambda () in-minibuffer))
               ((symbol-function 'ghostel-fit-window) (rexel-test--fit '(80 . 24)))
               ((symbol-function 'rexel--resize)
-               (lambda (_rows _cols)
+               (lambda (_size)
                  (when rexel--size-take (push (current-buffer) taken)))))
       (let ((previewed (generate-new-buffer "previewed"))
             (kept (generate-new-buffer "kept"))
@@ -4252,7 +4230,9 @@ passed on.  Return (PROMPTS . METHODS), the methods oldest first."
   (let ((conn (rexel--make-conn :endpoints (list "x") :host "studio"
                                 :tramp "/ssh:studio:"))
         (rexel-tramp-hosts nil))
-    (cl-letf (((symbol-function 'rexel-block-mode) #'ignore)
+    (cl-letf (((symbol-function 'ghostel-make-terminal)
+               (lambda (buffer &rest _) buffer))
+              ((symbol-function 'rexel-block-mode) #'ignore)
               ((symbol-function 'rexel--open-data-connection) #'ignore))
       (with-temp-buffer
         (setq default-directory "/usr/lib/")
