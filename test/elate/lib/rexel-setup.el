@@ -252,10 +252,8 @@ Its prompt is \"$ \"."
 
 (defun rexel-elate-asks-p (regexp)
   "Return non-nil when the open minibuffer's prompt starts with REGEXP."
-  (when-let* ((window (active-minibuffer-window)))
-    (with-selected-window window
-      (and (string-match-p (concat "\\`\\(?:" regexp "\\)") (minibuffer-prompt))
-           t))))
+  (when-let* ((prompt (minibuffer-prompt)))
+    (string-match-p (concat "\\`\\(?:" regexp "\\)") prompt)))
 
 (defun rexel-elate-choices ()
   "Return the completions the open minibuffer offers, in their order."
