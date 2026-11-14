@@ -1595,6 +1595,7 @@ ran no query follows `rexel-kill-buffer-action', `ask' keeping the block."
   (when rexel--conn
     (remhash rexel--block-id (rexel--conn-blocks rexel--conn)))
   (rexel--upload-fail (current-buffer) "buffer killed")
+  (rexel--fail-downloads (current-buffer) "buffer killed")
   (rexel--close-stream))
 
 (defun rexel--window-selected (window)

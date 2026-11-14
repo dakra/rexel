@@ -109,6 +109,16 @@
     {"wait": "until", "pred": "(file-exists-p (rexel-elate-copy f-large))", "timeout": 60},
     {"assert": {"eval": "(rexel-elate-copied-p f-large)"}},
 
+    {"group": "cancel", "comment": "a cancelled download stops and leaves nothing behind"},
+    {"eval": "(setq d-count (length (directory-files rexel-elate-copies-dir)))"},
+    {"eval": "(rexel-elate-clear-messages)"},
+    {"eval": "(rexel-download-file f-large (expand-file-name \"cancelled.bin\" rexel-elate-copies-dir))"},
+    {"wait": "until", "pred": "(seq-some (lambda (f) (< 0 (file-attribute-size (file-attributes f)))) (directory-files rexel-elate-copies-dir t \"\\\\.part\\\\'\"))"},
+    {"eval": "(rexel-cancel-download)"},
+    {"wait": "until", "pred": "(rexel-elate-messages-p \"rexel: download of .*large\\\\.bin failed: cancelled\")"},
+    {"assert": {"eval": "(= d-count (length (directory-files rexel-elate-copies-dir)))"}},
+    {"assert": {"eval": "(null rexel--downloads)"}},
+
     {"group": "visit", "comment": "with a prefix argument the copy is visited"},
     {"eval": "(rexel-download-file f-inner (expand-file-name \"visit.txt\" rexel-elate-copies-dir) t)"},
     {"wait": "until", "pred": "(equal (buffer-file-name (window-buffer)) (expand-file-name \"visit.txt\" rexel-elate-copies-dir))"},

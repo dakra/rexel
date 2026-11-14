@@ -8,6 +8,8 @@ All notable changes to this project will be documented in this file.
 - `rexel-download-file` copies a file from a block's machine to this
   one.  It reads the path there, with completion of the files there, and
   where to save it; with a prefix argument it visits the copy.
+  `rexel-cancel-download` stops the downloads of a block, as does
+  killing its buffer.
 
 ### Changed
 - Requires Rex 0.1.0-preview.19 or later, for its API revision 14.

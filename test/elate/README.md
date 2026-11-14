@@ -81,7 +81,7 @@ it again.
 | `layout.json` | local, unix | `size`, `resize`, `resize-full-screen`, `taken-unfocused`, `taken-by-focus`, `taken-by-resize`, `taken-by-select`, `preview-takes-nothing`, `taken-by-click`, `taken-by-show`, `smallest-window`, `split-right`, `split-below`, `split-left`, `split-above`, `split`, `sync-layout`, `new-tab`, `sync-tab`, `close-block`, `exit` |
 | `reconnect.json` | unix, tcp | `stream-drop`, `control-drop`, `write-in-flight`, `upload-redial`, `relay-restart`, `half-open`, `upload-stall`, `upload-cut`, `lost-connect`, `refused-hello`, `attach-hold`, `upload-while-attaching`, `detach-while-attaching` |
 | `upload.json` | unix, tcp, tls | `upload-file`, `several`, `empty`, `boundaries`, `symlink`, `names`, `compressed`, `dnd`, `drop`, `yank-media`, `dired`, `seventeen`, `remote-file`, `not-a-file`, `too-large`, `stays-usable`, `slow`, `file-changes`, `cancel`, `after-cancel`, `cancel-idle`, `two-blocks`, `kill-buffer` |
-| `download.json` | local, unix, tcp, tls | `download-file`, `overwrite`, `sizes`, `names`, `compressed`, `relative`, `complete`, `refusals`, `large`, `visit` |
+| `download.json` | local, unix, tcp, tls | `download-file`, `overwrite`, `sizes`, `names`, `compressed`, `relative`, `complete`, `refusals`, `large`, `cancel`, `visit` |
 | `local.json` | — | `directory`, `command-running`, `upload-file`, `remote-file`, `drop`, `yank-media`, `exec-shell` |
 
 Each scenario's `comment` and its groups' comments say what is checked.

@@ -423,18 +423,19 @@ the batch, so no path is typed."
   "One file on its way from the machine a block runs on.
 PATH is the file there and FILE the local file it becomes; its bytes
 collect in TEMP beside FILE, RECEIVED of them so far, shown by REPORTER.
-CONN is the control connection its ticket is requested on and WS the
-WebSocket of its data stream.  STATE is `begin' while the ticket is
-requested, `welcome' until the server answers the HELLO, `receiving',
-then `done' or `failed'.  CALLBACK is called with FILE once it is whole."
-  path file conn temp ws state (received 0) reporter callback)
+BUFFER is the block's buffer, CONN the control connection its ticket is
+requested on and WS the WebSocket of its data stream.  STATE is `begin'
+while the ticket is requested, `welcome' until the server answers the
+HELLO, `receiving', then `done' or `failed'.
+CALLBACK is called with FILE once it is whole."
+  path file buffer conn temp ws state (received 0) reporter callback)
 
 (defun rexel--download (path file &optional callback)
   "Copy PATH on the machine of this buffer's block to the local FILE.
 Call CALLBACK with FILE once it is written."
-  (let ((buf (current-buffer))
-        (download (rexel--make-download :path path :file file :conn rexel--conn
-                                        :state 'begin :callback callback)))
+  (let ((download (rexel--make-download
+                   :path path :file file :buffer (current-buffer)
+                   :conn rexel--conn :state 'begin :callback callback)))
     (rexel--request
      rexel--conn "com.superlogical.terminal.download_begin"
      `((session_id . ,rexel--session-id)
@@ -443,10 +444,9 @@ Call CALLBACK with FILE once it is written."
                 (path . ,path))))
      (lambda (result err)
        (cond
+        ((eq (rexel--download-state download) 'failed))
         (err (rexel--download-fail download (rexel--error-string err)))
-        ((not (buffer-live-p buf))
-         (rexel--download-fail download "the block's buffer was killed"))
-        (t (with-current-buffer buf
+        (t (with-current-buffer (rexel--download-buffer download)
              (condition-case err
                  (rexel--download-open download result)
                (error (rexel--download-fail
@@ -525,6 +525,15 @@ The file keeps the modes of the one it replaces."
       (ignore-errors (delete-file temp)))
     (message "rexel: download of %s failed: %s"
              (rexel--download-path download) reason)))
+
+(defun rexel--fail-downloads (buf reason)
+  "Give up the downloads started from BUF, reporting REASON.
+Return non-nil if there were any."
+  (let ((downloads (cl-remove buf rexel--downloads
+                              :key #'rexel--download-buffer :test-not #'eq)))
+    (dolist (download downloads)
+      (rexel--download-fail download reason))
+    downloads))
 
 (defun rexel--fail-transfers (conn)
   "Give up the uploads to CONN's blocks and its downloads without a ticket."
@@ -648,6 +657,12 @@ marked files to a block buffer read from the minibuffer."
   (unless (or rexel--uploads rexel--upload-queue)
     (user-error "No upload in progress"))
   (rexel--upload-fail (current-buffer) "cancelled"))
+
+(defun rexel-cancel-download ()
+  "Cancel the files being downloaded from the current block."
+  (interactive)
+  (unless (rexel--fail-downloads (current-buffer) "cancelled")
+    (user-error "No download in progress")))
 
 (defun rexel--download-target (path file)
   "Return the local file PATH is copied to when FILE is given for it.

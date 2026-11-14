@@ -923,6 +923,36 @@ first."
         (rexel-test--download-message open "")
         (should-not (directory-files dir nil "[^.]"))))))
 
+(ert-deftest rexel-test-cancel-download ()
+  (rexel-test--with-downloads
+    (let ((file (expand-file-name "out.bin" dir)))
+      (rexel--download "a.bin" file)
+      (rexel-test--download-begin rexel--conn (car sent) 100)
+      (rexel-test--upload-welcome (car opened))
+      (rexel-test--download-message (car opened) "half")
+      ;; One waits for the server's WELCOME, one for its ticket.
+      (rexel--download "b.bin" file)
+      (rexel-test--download-begin rexel--conn (car sent) 100)
+      (rexel--download "c.bin" file)
+      (with-temp-buffer
+        (should-error (rexel-cancel-download) :type 'user-error))
+      (rexel-cancel-download)
+      (should (equal '("rexel: download of a.bin failed: cancelled"
+                       "rexel: download of b.bin failed: cancelled"
+                       "rexel: download of c.bin failed: cancelled")
+                     (seq-take said 3)))
+      (dolist (open opened)
+        (should-not (process-live-p (websocket-conn (car open)))))
+      (should-not (directory-files dir nil "[^.]"))
+      (should-not rexel--downloads)
+      ;; What still arrives changes nothing, and c.bin's ticket is not used.
+      (setq said nil)
+      (rexel-test--upload-welcome (car opened))
+      (rexel-test--download-begin rexel--conn (car sent) 100)
+      (should (= 2 (length opened)))
+      (should-not said)
+      (should-error (rexel-cancel-download) :type 'user-error))))
+
 (ert-deftest rexel-test-download-reports-refusals ()
   (rexel-test--with-downloads
     (let ((file (expand-file-name "out.bin" dir)))

@@ -422,10 +422,12 @@ point.  A relative path is one in that directory, and =~= is the home
 directory there.  With a prefix argument the copy is visited once it has
 arrived.
 
-Emacs stays usable meanwhile.  The copy collects in a =.part= file beside
-it and appears under its name only when it is complete, with the
-permissions of a file it replaces.  A download whose connection drops
-leaves nothing behind and is not resumed.
+Emacs stays usable meanwhile.  =rexel-cancel-download= in the block's
+buffer stops its downloads, as does killing the buffer.  The copy
+collects in a =.part= file beside it and appears under its name only when
+it is complete, with the permissions of a file it replaces.  A cancelled
+download, or one whose connection drops, leaves nothing behind and is
+not resumed.
 
 * Shell integration
 
