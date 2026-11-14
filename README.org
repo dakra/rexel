@@ -17,7 +17,8 @@ same session at the same time.
 - =M-x rexel= and =M-x rexel-project= in place of =M-x ghostel= and
   =M-x ghostel-project=: a session per project, a tab per terminal.
 - Survives dropped connections, sleep and network changes.
-- Drop or paste files onto a terminal to send them to the server's machine.
+- Drop or paste files onto a terminal to send them to the server's machine,
+  and copy files from there.
 - Directory tracking and command state from the processes Rex reports.
 - Your ghostel key bindings and settings apply in every block buffer.
 - Optional pickers with previews and Embark actions, see [[*Consult and Embark][Consult and Embark]].
@@ -76,10 +77,10 @@ The rest of this document covers each part in detail.
 
 * Requirements
 
-- Rex, for macOS, Linux or FreeBSD.  On macOS it comes with the Rex Beta app,
-  which need not run; rexel looks for =rexel-program= on =exec-path=, then for
-  the copy inside the app.  The app does not put =rex= on =PATH=; for use in a
-  shell, symlink it:
+- Rex 0.1.0-preview.19 or later, for macOS, Linux or FreeBSD.  On macOS it
+  comes with the Rex Beta app, which need not run; rexel looks for
+  =rexel-program= on =exec-path=, then for the copy inside the app.  The app
+  does not put =rex= on =PATH=; for use in a shell, symlink it:
   #+begin_src sh
   ln -s "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex" /usr/local/bin/rex
   #+end_src
@@ -410,6 +411,22 @@ nothing and is not resumed.
 The exception is this machine's server: a local file is not copied, and
 Rexel types its own path.
 
+* Downloading files
+
+=M-x rexel-download-file= in a block buffer copies a file from the block's
+machine to this one.  It reads the file's path there and where to save it;
+a directory gets a file of the same name.  The path is read as =find-file=
+reads one, with completion of the files there, starting in the directory
+of the program in the block's foreground; =M-n= inserts the file name at
+point.  A relative path is one in that directory, and =~= is the home
+directory there.  With a prefix argument the copy is visited once it has
+arrived.
+
+Emacs stays usable meanwhile.  The copy collects in a =.part= file beside
+it and appears under its name only when it is complete, with the
+permissions of a file it replaces.  A download whose connection drops
+leaves nothing behind and is not resumed.
+
 * Shell integration
 
 The Rex server starts the shell of a block, so ghostel cannot inject its
@@ -466,7 +483,8 @@ in each new one.
 
 * Status
 
-Attaching, typing, resizing, uploads and the basic layout commands work.
+Attaching, typing, resizing, uploads, downloads and the basic layout
+commands work.
 
 A dropped data connection resumes its stream, and a lost control
 connection is redialled with backoff while sessions are attached; typing

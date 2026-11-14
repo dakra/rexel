@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `rexel-download-file` copies a file from a block's machine to this
+  one.  It reads the path there, with completion of the files there, and
+  where to save it; with a prefix argument it visits the copy.
+
+### Changed
+- Requires Rex 0.1.0-preview.19 or later, for its API revision 14.
+
 ## [0.4.0] — 2026-11-14
 
 ### Added

@@ -3318,6 +3318,227 @@ Without STATUS the connection just drops."
           (should-not rexel--uploads))
       (delete-file file))))
 
+(defmacro rexel-test--with-downloads (&rest body)
+  "Run BODY as `rexel-test--with-uploads' does, in a temporary directory.
+The variable `dir' names it and `said' collects the messages, newest
+first."
+  (declare (indent 0))
+  `(let ((dir (file-name-as-directory (make-temp-file "rexel-download" t)))
+         rexel--downloads said)
+     (unwind-protect
+         (cl-letf (((symbol-function 'message)
+                    (lambda (format &rest args)
+                      (when format
+                        (push (apply #'format format args) said)))))
+           (rexel-test--with-uploads ,@body))
+       (delete-directory dir t))))
+
+(defun rexel-test--download-begin (conn object size)
+  "Answer the `download_begin' request OBJECT on CONN for a file of SIZE bytes."
+  (rexel-test--respond
+   conn object `((ticket . ,(base64url-encode-string (make-string 16 7) t))
+                 (expires_in_ms . 60000)
+                 (path . "/srv/log.bin") (name . "log.bin") (size . ,size)
+                 (modified_at . "2026-11-14T16:28:56+01:00"))))
+
+(defun rexel-test--download-message (open payload)
+  "Hand the binary message PAYLOAD to the data connection OPEN."
+  (pcase-let ((`(,ws ,_ ,on-message ,_) open))
+    (funcall on-message ws (make-websocket-frame :opcode 'binary :completep t
+                                                 :payload payload))))
+
+(defun rexel-test--file-bytes (file)
+  "Return the bytes of FILE."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file)
+    (buffer-string)))
+
+(ert-deftest rexel-test-download-writes-file-at-end-marker ()
+  (rexel-test--with-downloads
+    (let ((file (expand-file-name "out.bin" dir))
+          ;; A part of the file can start like a WELCOME.
+          (parts (list (concat (unibyte-string #x81 0 255) (make-string 40 ?a))
+                       (unibyte-string #x82 1 10 13 0)))
+          got)
+      (rexel--download "logs/log.bin" file (lambda (f) (push f got)))
+      (should (equal "com.superlogical.terminal.download_begin"
+                     (alist-get 'method (car sent))))
+      (should (equal '((session_id . "s") (block_id . "b"))
+                     (seq-take (alist-get 'payload (car sent)) 2)))
+      (let ((args (rexel-test--upload-args (car sent))))
+        (should (equal "logs/log.bin" (alist-get 'path args)))
+        (should (string-match-p
+                 (concat "\\`download:[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-4[0-9a-f]\\{3\\}"
+                         "-[89ab][0-9a-f]\\{3\\}-[0-9a-f]\\{12\\}\\'")
+                 (alist-get 'ref args))))
+      (rexel-test--download-begin rexel--conn (car sent) 48)
+      (let ((open (car opened)))
+        (rexel-test--upload-welcome open)
+        (should (equal (list (concat "\1" (make-string 16 7)))
+                       (rexel-test--upload-payloads frames (car open))))
+        (dolist (part parts)
+          (rexel-test--download-message open part))
+        (should-not (file-exists-p file))
+        (should-not got)
+        (rexel-test--download-message open "")
+        (should (equal (list file) got))
+        (should (equal (apply #'concat parts) (rexel-test--file-bytes file)))
+        (should (= (logand #o666 (default-file-modes)) (file-modes file)))
+        ;; The server closes the connection after the end marker.
+        (funcall (nth 3 open) (car open))
+        (should (equal '("out.bin") (directory-files dir nil "[^.]")))
+        (should-not (seq-some (lambda (m) (string-search "failed" m)) said))))))
+
+(ert-deftest rexel-test-download-replaces-existing-file ()
+  (rexel-test--with-downloads
+    (let ((file (expand-file-name "out.bin" dir)))
+      (write-region "old content" nil file nil 'quiet)
+      (set-file-modes file #o640)
+      (rexel--download "log.bin" file)
+      (rexel-test--download-begin rexel--conn (car sent) 0)
+      (rexel-test--upload-welcome (car opened))
+      (should (equal "old content" (rexel-test--file-bytes file)))
+      (rexel-test--download-message (car opened) "")
+      (should (equal "" (rexel-test--file-bytes file)))
+      (should (= #o640 (file-modes file))))))
+
+(ert-deftest rexel-test-download-close-before-end-fails ()
+  (rexel-test--with-downloads
+    (let ((file (expand-file-name "out.bin" dir))
+          got)
+      (rexel--download "log.bin" file (lambda (f) (push f got)))
+      (rexel-test--download-begin rexel--conn (car sent) 100)
+      (let ((open (car opened)))
+        (rexel-test--upload-welcome open)
+        (rexel-test--download-message open "half")
+        (funcall (nth 3 open) (car open))
+        (should-not got)
+        (should-not (directory-files dir nil "[^.]"))
+        (should (equal "rexel: download of log.bin failed: connection lost"
+                       (car said)))
+        ;; What still arrives changes nothing.
+        (rexel-test--download-message open "")
+        (should-not (directory-files dir nil "[^.]"))))))
+
+(ert-deftest rexel-test-download-reports-refusals ()
+  (rexel-test--with-downloads
+    (let ((file (expand-file-name "out.bin" dir)))
+      (rexel--download "gone.txt" file)
+      (rexel-test--respond rexel--conn (car sent) nil
+                           '((code . "not_found")
+                             (message . "not found: /srv/gone.txt does not exist")))
+      (should-not opened)
+      (should (equal (concat "rexel: download of gone.txt failed: "
+                             "not found: /srv/gone.txt does not exist (not_found)")
+                     (car said)))
+      (rexel--download "log.bin" file)
+      (rexel-test--download-begin rexel--conn (car sent) 3)
+      (pcase-let ((`(,ws ,on-open ,_ ,_) (car opened)))
+        (funcall on-open ws)
+        (rexel-test--download-message (car opened) (unibyte-string #x82 1))
+        (should-not (process-live-p (websocket-conn ws))))
+      (should (equal (concat "rexel: download of log.bin failed: "
+                             "data connection rejected, reason 1")
+                     (car said)))
+      (should-not (directory-files dir nil "[^.]")))))
+
+(ert-deftest rexel-test-control-close-fails-requested-downloads ()
+  (rexel-test--with-downloads
+    (let ((file (expand-file-name "out.bin" dir))
+          (rexel--conns (list rexel--conn)))
+      (rexel--download "a.bin" file)
+      (rexel-test--download-begin rexel--conn (car sent) 1)
+      (rexel-test--upload-welcome (car opened))
+      (rexel--download "b.bin" (expand-file-name "b.bin" dir))
+      (rexel--on-control-close rexel--conn)
+      (should (member "rexel: download of b.bin failed: control connection lost"
+                      said))
+      ;; A download with its ticket runs on its own connection.
+      (rexel-test--download-message (car opened) "x")
+      (rexel-test--download-message (car opened) "")
+      (should (equal "x" (rexel-test--file-bytes file)))
+      (should (equal '("out.bin") (directory-files dir nil "[^.]")))
+      (should-not rexel--downloads))))
+
+(ert-deftest rexel-test-download-file-checks-destination ()
+  (rexel-test--with-downloads
+    (rexel-download-file "logs/log.bin" dir)
+    (rexel-test--download-begin rexel--conn (car sent) 0)
+    (rexel-test--upload-welcome (car opened))
+    (rexel-test--download-message (car opened) "")
+    (should (equal '("log.bin") (directory-files dir nil "[^.]")))
+    (should-error (rexel-download-file "log.bin" "/ssh:studio:/tmp/log.bin")
+                  :type 'user-error)
+    (should-error (rexel-download-file
+                   "log.bin" (expand-file-name "none/log.bin" dir))
+                  :type 'user-error)
+    (should (= 1 (length sent)))))
+
+(ert-deftest rexel-test-file-table-completes-in-listed-directories ()
+  (rexel-test--with-uploads
+    (let* ((cache (make-hash-table :test #'equal))
+           (table (rexel--file-table (current-buffer) cache))
+           asked)
+      (cl-letf (((symbol-function 'process-live-p) #'always)
+                ((symbol-function 'accept-process-output)
+                 (lambda (&rest _)
+                   (let ((args (rexel-test--upload-args (car sent))))
+                     (should (eq t (alist-get 'files args)))
+                     (push (alist-get 'path args) asked))
+                   (rexel-test--respond
+                    rexel--conn (car sent)
+                    '((path . "/srv/logs") (home . "/home/u") (status . "ok")
+                      (entries . [((name . "app.log") (file . t))
+                                  ((name . "archive"))
+                                  ((name . "app.txt") (file . t))]))))))
+        (should (equal "/srv/logs" (car (rexel--list-dir "" cache))))
+        (should (eq 'file (completion-metadata-get
+                           (completion-metadata "" table nil) 'category)))
+        (should (equal '("app.log" "archive/" "app.txt")
+                       (all-completions "logs/" table)))
+        (should (equal "logs/app." (try-completion "logs/ap" table)))
+        (should (equal "logs/archive/" (try-completion "logs/ar" table)))
+        (should (test-completion "logs/app.log" table))
+        (should (equal '(5 . 1) (completion-boundaries "logs/ap" table nil "p/x")))
+        ;; A listing is asked for once.
+        (should (equal '("" "logs/") (reverse asked)))
+        (all-completions "logs//etc/" table)
+        (all-completions "logs/~/" table)
+        (should (equal '("~/" "/etc/") (seq-take asked 2)))))))
+
+(ert-deftest rexel-test-file-path-starts-anew ()
+  (should (equal "/etc/hosts" (rexel--file-path "/srv/logs//etc/hosts")))
+  (should (equal "~/notes" (rexel--file-path "/srv/logs/~/notes")))
+  (should (equal "~" (rexel--file-path "/srv/~")))
+  (should (equal "/srv/~old/a" (rexel--file-path "/srv/~old/a")))
+  (should (equal "logs/app.log" (rexel--file-path "logs/app.log"))))
+
+(ert-deftest rexel-test-download-file-visits ()
+  (rexel-test--with-downloads
+    (let ((file (expand-file-name "out.txt" dir))
+          shown)
+      (cl-letf (((symbol-function 'rexel--prompt-later) #'funcall)
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (buffer &rest _) (push buffer shown))))
+        (let ((default-directory dir))
+          (rexel-download-file "~/notes/out.txt" "out.txt" t))
+        (should (equal "~/notes/out.txt"
+                       (alist-get 'path (rexel-test--upload-args (car sent)))))
+        (rexel-test--download-begin rexel--conn (car sent) 5)
+        (rexel-test--upload-welcome (car opened))
+        (rexel-test--download-message (car opened) "hello")
+        (should-not shown)
+        (rexel-test--download-message (car opened) "")
+        (unwind-protect
+            (progn
+              (should (equal (list (get-file-buffer file)) shown))
+              (should (equal "hello" (with-current-buffer (car shown)
+                                       (buffer-string)))))
+          (mapc #'kill-buffer shown)))
+      (with-temp-buffer
+        (should-error (rexel-download-file "a.txt" file) :type 'user-error)))))
+
 (ert-deftest rexel-test-ws-open-gives-up-on-silent-unix-socket ()
   "A Unix socket that accepts and never answers counts as closed."
   (let* ((socket (make-temp-name

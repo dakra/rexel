@@ -250,6 +250,13 @@ Its prompt is \"$ \"."
     (insert string)
     string))
 
+(defun rexel-elate-asks-p (regexp)
+  "Return non-nil when the open minibuffer's prompt starts with REGEXP."
+  (when-let* ((window (active-minibuffer-window)))
+    (with-selected-window window
+      (and (string-match-p (concat "\\`\\(?:" regexp "\\)") (minibuffer-prompt))
+           t))))
+
 (defun rexel-elate-choices ()
   "Return the completions the open minibuffer offers, in their order."
   (with-selected-window (or (active-minibuffer-window)
@@ -749,6 +756,20 @@ The event goes through the command loop to the buffer's binding."
     (goto-char (point-min))
     (looking-at "\\([0-9]+ [0-9]+\\)")
     (match-string 1)))
+
+(defvar rexel-elate-copies-dir
+  (expand-file-name "copies/" rexel-elate-files-dir)
+  "Directory a scenario downloads files into.")
+
+(defun rexel-elate-copy (file)
+  "Return the path FILE is downloaded to."
+  (expand-file-name (file-name-nondirectory file) rexel-elate-copies-dir))
+
+(defun rexel-elate-copied-p (file)
+  "Return non-nil when the copy of FILE has its checksum and size."
+  (let ((copy (rexel-elate-copy file)))
+    (and (file-exists-p copy)
+         (equal (rexel-elate-cksum file) (rexel-elate-cksum copy)))))
 
 (defun rexel-elate-uploads ()
   "Return the files the server stores for the block buffer's block.

@@ -29,7 +29,8 @@
 ;; A file dropped on a block buffer, pasted with `yank-media' or given to
 ;; `rexel-upload-file' is sent to the server's machine, and its path
 ;; there is typed into the terminal.  On this machine's server a local
-;; file's own path is typed.
+;; file's own path is typed.  `rexel-download-file' copies a file from
+;; the block's machine to this one.
 ;;
 ;; Both connections are WebSockets, on a server's Unix socket or on its
 ;; network address, such as the one Rex's built-in Tailscale gives it.
@@ -177,7 +178,7 @@ A write gets this long plus the time its size takes; see
 (defconst rexel--version (package-get-version)
   "This package's version, sent in the hello.")
 
-(defconst rexel--api-revision 11
+(defconst rexel--api-revision 14
   "Control API revision this client speaks.")
 
 (cl-defstruct (rexel--conn (:constructor rexel--make-conn))
@@ -224,6 +225,9 @@ used for, see `rexel--connect-directory'."
 
 (defvar rexel--conns nil
   "Open server connections, one per host.")
+
+(defvar rexel--downloads nil
+  "The `rexel--download's in progress.")
 
 (defvar-local rexel--conn nil
   "The server connection of this block buffer.")
@@ -679,9 +683,10 @@ Return non-nil if there were any."
 
 (defun rexel--on-control-close (conn)
   "Redial CONN if sessions are attached to it, else forget it.
-Uploads fail either way.  Block streams run on their own connections and
-stay up while CONN redials; without sessions they end, and the buffers
-stay for reading until `rexel-attach' reuses them."
+Uploads fail either way, and so do downloads still waiting for their
+ticket.  Block streams run on their own connections and stay up while
+CONN redials; without sessions they end, and the buffers stay for
+reading until `rexel-attach' reuses them."
   (pcase-dolist (`(,_sid . ,timer) (rexel--conn-refresh-timers conn))
     (cancel-timer timer))
   (setf (rexel--conn-refresh-timers conn) nil
@@ -693,6 +698,10 @@ stay for reading until `rexel-attach' reuses them."
     (when (and (eq (buffer-local-value 'rexel--conn buf) conn)
                (buffer-local-value 'rexel--uploads buf))
       (rexel--upload-fail buf "control connection lost")))
+  (dolist (download rexel--downloads)
+    (when (and (eq (rexel--download-conn download) conn)
+               (eq (rexel--download-state download) 'begin))
+      (rexel--download-fail download "control connection lost")))
   (if (rexel--conn-sessions conn)
       (progn
         (setf (rexel--conn-revisions conn) nil)
@@ -2411,6 +2420,202 @@ the batch, so no path is typed."
         (message "rexel: %s: upload failed: %s" (buffer-name) reason)))))
 
 
+;;; Downloads
+
+(cl-defstruct (rexel--download (:constructor rexel--make-download) (:copier nil))
+  "One file on its way from the machine a block runs on.
+PATH is the file there and FILE the local file it becomes; its bytes
+collect in TEMP beside FILE, RECEIVED of them so far, shown by REPORTER.
+CONN is the control connection its ticket is requested on and WS the
+WebSocket of its data stream.  STATE is `begin' while the ticket is
+requested, `welcome' until the server answers the HELLO, `receiving',
+then `done' or `failed'.  CALLBACK is called with FILE once it is whole."
+  path file conn temp ws state (received 0) reporter callback)
+
+(defun rexel--download (path file &optional callback)
+  "Copy PATH on the machine of this buffer's block to the local FILE.
+The server reads a relative PATH in the directory of the block's
+foreground process, and a leading ~ as the home directory.
+Call CALLBACK with FILE once it is written."
+  (let ((buf (current-buffer))
+        (download (rexel--make-download :path path :file file :conn rexel--conn
+                                        :state 'begin :callback callback)))
+    (rexel--request
+     rexel--conn "com.superlogical.terminal.download_begin"
+     `((session_id . ,rexel--session-id)
+       (block_id . ,rexel--block-id)
+       (args . ((ref . ,(concat "download:" (rexel--uuid)))
+                (path . ,path))))
+     (lambda (result err)
+       (cond
+        (err (rexel--download-fail download (rexel--error-string err)))
+        ((not (buffer-live-p buf))
+         (rexel--download-fail download "the block's buffer was killed"))
+        (t (with-current-buffer buf
+             (condition-case err
+                 (rexel--download-open download result)
+               (error (rexel--download-fail
+                       download (error-message-string err)))))))))
+    (push download rexel--downloads)))
+
+(defun rexel--download-open (download result)
+  "Connect the stream of DOWNLOAD with the ticket in RESULT.
+RESULT is the answer to `download_begin' for this buffer's block."
+  (setf (rexel--download-temp download)
+        (make-temp-file (concat (rexel--download-file download) ".") nil ".part")
+        (rexel--download-reporter download)
+        (make-progress-reporter
+         (format "Downloading %s from %s..."
+                 (alist-get 'name result) (rexel--conn-name rexel--conn))
+         0 (max 1 (alist-get 'size result)))
+        (rexel--download-state download) 'welcome
+        (rexel--download-ws download)
+        (rexel--open-data-ws
+         "rex.data.bytes.v1" (rexel--hello (alist-get 'ticket result))
+         (lambda (_ws frame)
+           (rexel--on-download-message download
+                                       (websocket-frame-payload frame)))
+         (lambda (_ws) (rexel--download-fail download "connection lost")))))
+
+(defun rexel--on-download-message (download bytes)
+  "Handle BYTES received on the data connection of DOWNLOAD.
+After the WELCOME every message is part of the file, and an empty one ends it."
+  (pcase (rexel--download-state download)
+    ('welcome
+     (pcase (rexel--handshake bytes)
+       ('welcome (setf (rexel--download-state download) 'receiving))
+       ((and (pred integerp) reason)
+        (rexel--download-fail
+         download (format "data connection rejected, reason %d" reason)))
+       (_ (rexel--download-fail download "malformed data handshake"))))
+    ('receiving
+     (if (string-empty-p bytes)
+         (rexel--download-finish download)
+       (condition-case err
+           (progn
+             (let ((coding-system-for-write 'binary))
+               (write-region bytes nil (rexel--download-temp download) t 'quiet))
+             (progress-reporter-update
+              (rexel--download-reporter download)
+              (cl-incf (rexel--download-received download) (length bytes))))
+         (error (rexel--download-fail download (error-message-string err))))))))
+
+(defun rexel--download-finish (download)
+  "Move the received bytes of DOWNLOAD to its file and call its callback.
+The file keeps the modes of the one it replaces."
+  (let ((file (rexel--download-file download))
+        (temp (rexel--download-temp download)))
+    (when (condition-case err
+              (progn
+                (set-file-modes temp (or (file-modes file)
+                                         (logand #o666 (default-file-modes))))
+                (rename-file temp file t)
+                t)
+            (error (rexel--download-fail download (error-message-string err))
+                   nil))
+      (setf (rexel--download-state download) 'done)
+      (setq rexel--downloads (delq download rexel--downloads))
+      (message "rexel: downloaded %s" (abbreviate-file-name file))
+      (when-let* ((callback (rexel--download-callback download)))
+        (funcall callback file)))))
+
+(defun rexel--download-fail (download reason)
+  "Give up DOWNLOAD unless it has ended, reporting REASON."
+  (unless (memq (rexel--download-state download) '(done failed))
+    (setf (rexel--download-state download) 'failed)
+    (setq rexel--downloads (delq download rexel--downloads))
+    (when-let* ((ws (rexel--download-ws download)))
+      (ignore-errors (delete-process (websocket-conn ws))))
+    (when-let* ((temp (rexel--download-temp download)))
+      (ignore-errors (delete-file temp)))
+    (message "rexel: download of %s failed: %s"
+             (rexel--download-path download) reason)))
+
+(defconst rexel--list-dir-timeout 3
+  "Seconds a prompt for a file waits for a directory's listing.")
+
+(defvar rexel--file-history nil
+  "History of the paths read by `rexel--read-file'.")
+
+(defun rexel--list-dir (dir cache)
+  "Return (PATH . NAMES) for DIR on the machine of this buffer's block.
+PATH is DIR as an absolute path and NAMES are its entries, a directory
+with a slash at its end.  The server reads a relative DIR in the
+directory of the block's foreground process, and an empty one as that
+directory.  CACHE is a hash table that keeps the answers by DIR.
+Return nil when none arrives within `rexel--list-dir-timeout' seconds."
+  (when (rexel--ready-p rexel--conn)
+    (let ((process (websocket-conn (rexel--conn-ws rexel--conn))))
+      (unless (gethash dir cache)
+        (puthash dir 'requested cache)
+        (rexel--request
+         rexel--conn "com.superlogical.terminal.list_dir"
+         `((session_id . ,rexel--session-id)
+           (block_id . ,rexel--block-id)
+           (args . ((path . ,dir) (files . t))))
+         (lambda (result _err)
+           (puthash dir
+                    (cons (alist-get 'path result)
+                          (mapcar (lambda (entry)
+                                    (let ((name (alist-get 'name entry)))
+                                      (if (alist-get 'file entry)
+                                          name
+                                        (concat name "/"))))
+                                  (alist-get 'entries result)))
+                    cache))))
+      (let ((end (+ (float-time) rexel--list-dir-timeout)))
+        (while (and (eq (gethash dir cache) 'requested)
+                    (process-live-p process)
+                    (< (float-time) end))
+          (accept-process-output process 0.05)))
+      (let ((answer (gethash dir cache)))
+        (cond ((consp answer) answer)
+              ;; The answer is lost with its connection.
+              ((not (process-live-p process)) (remhash dir cache) nil))))))
+
+(defun rexel--file-path (string)
+  "Return the path that STRING, typed as a file name, stands for.
+A // and a /~ start the path anew, as they do for `find-file'."
+  (if (string-match ".*/\\(/\\|~\\(?:/\\|\\'\\)\\)" string)
+      (substring string (match-beginning 1))
+    string))
+
+(defun rexel--file-table (buffer cache)
+  "Return a completion table of the files on the machine of BUFFER's block.
+It completes the last name of a path among the entries of its directory,
+which `rexel--list-dir' keeps in CACHE."
+  (lambda (string pred action)
+    (let ((start (if (string-match ".*/" string) (match-end 0) 0)))
+      (cond
+       ((eq action 'metadata) '(metadata (category . file)))
+       ((eq (car-safe action) 'boundaries)
+        `(boundaries ,start . ,(or (string-search "/" (cdr action))
+                                   (length (cdr action)))))
+       (t
+        (let* ((dir (substring string 0 start))
+               (names (cdr (with-current-buffer buffer
+                             (rexel--list-dir (rexel--file-path dir) cache))))
+               (found (complete-with-action
+                       action names (substring string start) pred)))
+          (if (and (null action) (stringp found))
+              (concat dir found)
+            found)))))))
+
+(defun rexel--read-file (prompt)
+  "Read with PROMPT the path of a file on the machine of this buffer's block.
+Completion starts in the directory of the block's foreground process, as
+that of `read-file-name' does in `default-directory'.  The file name at
+point is the default."
+  (let* ((cache (make-hash-table :test #'equal))
+         (dir (car (rexel--list-dir "" cache)))
+         (minibuffer-completing-file-name t))
+    (rexel--file-path
+     (completing-read prompt (rexel--file-table (current-buffer) cache) nil nil
+                      (and dir (file-name-as-directory dir))
+                      'rexel--file-history
+                      (thing-at-point 'filename t)))))
+
+
 ;;; Sizing
 
 (defvar rexel--shown-in-minibuffer nil
@@ -3287,6 +3492,51 @@ marked files to a block buffer read from the minibuffer."
   (unless (or rexel--uploads rexel--upload-queue)
     (user-error "No upload in progress"))
   (rexel--upload-fail (current-buffer) "cancelled"))
+
+(defun rexel--download-target (path file)
+  "Return the local file PATH is copied to when FILE is given for it.
+A directory gets a file named as PATH's.  Signal a `user-error' for a
+file on another machine and for one that cannot be written."
+  (let ((file (expand-file-name file)))
+    (when (file-remote-p file)
+      (user-error "Not a local file: %s" file))
+    (when (file-directory-p file)
+      (setq file (file-name-concat file (file-name-nondirectory path))))
+    (unless (file-writable-p file)
+      (user-error "Cannot write %s" (abbreviate-file-name file)))
+    file))
+
+(defun rexel-download-file (path file &optional visit)
+  "Copy PATH on the machine of the current block to the local FILE.
+The server reads a relative PATH in the directory of the block's
+foreground process, and a leading ~ as the home directory there.  A
+directory given for FILE gets a file named as PATH's.  With VISIT, visit
+FILE once it has arrived.
+Interactively, read PATH with completion, starting in that directory,
+and FILE.  A prefix argument is VISIT."
+  (interactive
+   (progn
+     (rexel--ensure-block-buffer-context)
+     (let* ((path (rexel--read-file "Download file: "))
+            (file (if (string-empty-p (file-name-nondirectory path))
+                      (user-error "No file to download")
+                    (rexel--download-target
+                     path
+                     (read-file-name
+                      "Save as: " (and (file-remote-p default-directory) "~/")
+                      nil nil (file-name-nondirectory path))))))
+       (when (and (file-exists-p file)
+                  (not (y-or-n-p (format "File %s already exists; overwrite it? "
+                                         (abbreviate-file-name file)))))
+         (user-error "Not downloaded"))
+       (list path file current-prefix-arg))))
+  (rexel--ensure-block-buffer-context)
+  (rexel--download
+   path (rexel--download-target path file)
+   (and visit
+        (lambda (file)
+          (rexel--prompt-later
+           (lambda () (pop-to-buffer (find-file-noselect file))))))))
 
 
 ;;; Block mode

@@ -41,8 +41,8 @@ Environment, all optional:
 Every scenario creates its own Rex session, labelled `rexel-elate-…`, and destroys it
 in its `cleanup` group; `run.sh` also kills the sessions and relays a run that was cut
 short left behind.  Other sessions on the server are listed in prompts and never
-attached or changed.  Files to upload are made under the temporary directory and
-removed again.
+attached or changed.  Files to upload or download and their copies are made under
+the temporary directory and removed again.
 
 ## Files
 
@@ -81,6 +81,7 @@ it again.
 | `layout.json` | local, unix | `size`, `resize`, `resize-full-screen`, `taken-unfocused`, `taken-by-focus`, `taken-by-resize`, `taken-by-select`, `preview-takes-nothing`, `taken-by-click`, `taken-by-show`, `smallest-window`, `split-right`, `split-below`, `split-left`, `split-above`, `split`, `sync-layout`, `new-tab`, `sync-tab`, `close-block`, `exit` |
 | `reconnect.json` | unix, tcp | `stream-drop`, `control-drop`, `write-in-flight`, `upload-redial`, `relay-restart`, `half-open`, `upload-stall`, `upload-cut`, `lost-connect`, `refused-hello`, `attach-hold`, `upload-while-attaching`, `detach-while-attaching` |
 | `upload.json` | unix, tcp, tls | `upload-file`, `several`, `empty`, `boundaries`, `symlink`, `names`, `compressed`, `dnd`, `drop`, `yank-media`, `dired`, `seventeen`, `remote-file`, `not-a-file`, `too-large`, `stays-usable`, `slow`, `file-changes`, `cancel`, `after-cancel`, `cancel-idle`, `two-blocks`, `kill-buffer` |
+| `download.json` | local, unix, tcp, tls | `download-file`, `overwrite`, `sizes`, `names`, `compressed`, `relative`, `complete`, `refusals`, `large`, `visit` |
 | `local.json` | — | `directory`, `command-running`, `upload-file`, `remote-file`, `drop`, `yank-media`, `exec-shell` |
 
 Each scenario's `comment` and its groups' comments say what is checked.
@@ -111,6 +112,8 @@ Each scenario's `comment` and its groups' comments say what is checked.
   it, and the output is compared with the checksum of the local file.
   `rexel-elate-hold-upload` stops an upload after a number of bytes, for a step that
   has to see it halfway through a file.
+- Downloads are checked with `rexel-elate-copied-p`, the `cksum` of a file against
+  that of its copy.
 - A terminal Emacs has no drops and no image clipboard.  `rexel-elate-dnd` calls the
   `dnd` dispatch of X11 and pgtk, `rexel-elate-drop` queues the `drag-n-drop` event of
   NS and w32, and `rexel-elate-yank-media` calls the handler `yank-media` registered.
