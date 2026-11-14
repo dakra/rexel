@@ -4,14 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-14
+
 ### Added
 - A password prompt in a block is read with `read-passwd`, as in a
   ghostel buffer, when Emacs connects to a server on this machine
   directly.
+- A block shows the program status its program reported before the
+  block was streamed, such as an agent waiting for input since before
+  the attach.  These records update the mode line and the status
+  pickers without notifying.
+- `consult-rexel` labels a session without a block buffer with the
+  program status of its terminals, as ghostel labels a block buffer.
+
+### Changed
+- Requires ghostel 0.65.0; consult-rexel requires it too.
 
 ### Fixed
 - An Emacs input method such as `chinese-py` composes in a block, whose
   buffer was read-only.
+- `consult-rexel-project` lists the blocks of the project's session
+  alone.  Opened from a block of another session, it listed that block
+  too, as did a block of another session whose shell was in the
+  project's directory.
 
 ## [0.3.0] — 2026-11-11
 
