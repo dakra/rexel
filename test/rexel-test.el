@@ -591,7 +591,8 @@ The terminal and the stream's connection are stubbed."
         (rexel-test--respond conn (car sent)
                              `((view . ,(rexel-test--view rexel--block-id))))
         (should (= 1 (rexel-test--count "data.connect" sent)))
-        (rexel-test--respond conn (car sent) '((ticket . "AAAA")))
+        (rexel-test--respond conn (rexel-test--find "data.connect" sent)
+                             '((ticket . "AAAA")))
         (should (eq 'welcome rexel--data-state))))))
 
 (ert-deftest rexel-test-reattach-sends-keys-typed-during-outage ()
@@ -695,6 +696,102 @@ The terminal and the stream's connection are stubbed."
         (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
         (should-not rexel--out-pending)
         (should-not rexel--out-inflight)))))
+
+(defmacro rexel-test--with-password-pids (set &rest body)
+  "Run BODY with SET collecting what `ghostel-set-password-pid' gets.
+Each entry is (BUFFER . PID)."
+  (declare (indent 1))
+  `(let ((,set nil))
+     (cl-letf (((symbol-function 'ghostel-set-password-pid)
+                (lambda (pid) (push (cons (current-buffer) pid) ,set))))
+       ,@body)))
+
+(defun rexel-test--answer-whoami (conn sent &optional principal err)
+  "Answer the newest `server.whoami' in SENT on CONN with PRINCIPAL or ERR.
+PRINCIPAL defaults to Emacs itself on a Unix socket."
+  (rexel-test--respond
+   conn (rexel-test--find "server.whoami" sent)
+   (unless err
+     `((principal . ,(or principal
+                         `((kind . "peer") (transport . "unix")
+                           (pid . ,(emacs-pid)))))))
+   err))
+
+(ert-deftest rexel-test-password-pid-of-local-block ()
+  "A block of a server that sees Emacs itself has its tty read.
+The pid goes to the block's buffer, whichever is current, while it is live."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn) (buf (current-buffer)))
+      (rexel-test--with-attached-block conn
+        (rexel-test--with-password-pids set
+          (rexel--attach-block-buffer conn "s" rexel--block-id buf)
+          (should-not (rexel-test--find "com.superlogical.terminal.process"
+                                        sent))
+          (rexel-test--answer-whoami conn sent)
+          (let ((request (rexel-test--find "com.superlogical.terminal.process"
+                                           sent)))
+            (should (equal '((session_id . "s") (block_id . "block:123456"))
+                           (alist-get 'payload request)))
+            (with-temp-buffer
+              (rexel-test--respond conn request
+                                   '((child . ((name . "login") (pid . 1)))
+                                     (foreground . ((name . "bash") (pid . 2)))))))
+          (should (equal `((,buf . 1)) set))
+          ;; The foreground process may have a PTY of its own, as under sudo.
+          (setq set nil)
+          (rexel--attach-block-buffer conn "s" rexel--block-id buf)
+          (rexel-test--answer-whoami conn sent)
+          (rexel-test--respond
+           conn (rexel-test--find "com.superlogical.terminal.process" sent)
+           '((foreground . ((name . "login") (pid . 1)))))
+          (should-not set)
+          (let ((other (generate-new-buffer " other")))
+            (rexel--attach-block-buffer conn "s" "block:654321" other)
+            (rexel-test--answer-whoami conn sent)
+            (kill-buffer other)
+            (rexel-test--respond
+             conn (rexel-test--find "com.superlogical.terminal.process" sent)
+             '((child . ((pid . 2))))))
+          (should-not set))))))
+
+(ert-deftest rexel-test-password-pid-not-set ()
+  "No pid is set unless the server sees Emacs itself, or for a failed report.
+A server elsewhere is not asked."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn))
+      (rexel-test--with-attached-block conn
+        (rexel-test--with-password-pids set
+          (dolist (answer `(;; A relay, such as socat, connected for Emacs.
+                            (((kind . "peer") (pid . ,(1+ (emacs-pid)))))
+                            (((kind . "tailscale")))
+                            (nil ((code . "internal") (message . "failed")))))
+            (setq sent nil)
+            (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
+            (apply #'rexel-test--answer-whoami conn sent answer)
+            (should-not (rexel-test--find "com.superlogical.terminal.process"
+                                          sent)))
+          (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
+          (rexel-test--answer-whoami conn sent)
+          (rexel-test--respond
+           conn (rexel-test--find "com.superlogical.terminal.process" sent)
+           nil '((code . "conflict") (message . "not attached")))
+          (should-not set)
+          (setq sent nil)
+          (setf (rexel--conn-host conn) "studio")
+          (rexel--attach-block-buffer conn "s" "block:123456" (current-buffer))
+          (should-not (rexel-test--find "server.whoami" sent)))))))
+
+(ert-deftest rexel-test-password-pid-cleared-on-control-close ()
+  "A block whose control connection closes for good reads no tty."
+  (let* ((conn (rexel--make-conn :endpoints (list "none") :client-id t))
+         (rexel--conns (list conn)))
+    (with-temp-buffer
+      (setq rexel--conn conn
+            rexel--data-state 'closed)
+      (rexel-test--with-password-pids set
+        (rexel--on-control-close conn)
+        (should-not rexel--conn)
+        (should (equal `((,(current-buffer))) set))))))
 
 (ert-deftest rexel-test-reattach-leaves-other-connections-requests ()
   "A reconnect leaves the requests of another connection in flight."

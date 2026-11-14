@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- A password prompt in a block is read with `read-passwd`, as in a
+  ghostel buffer, when Emacs connects to a server on this machine
+  directly.
+
 ### Fixed
 - An Emacs input method such as `chinese-py` composes in a block, whose
   buffer was read-only.

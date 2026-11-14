@@ -704,7 +704,10 @@ stay for reading until `rexel-attach' reuses them."
     (dolist (buf (buffer-list))
       (when (eq (buffer-local-value 'rexel--conn buf) conn)
         (rexel--end-stream buf "control connection closed")
-        (with-current-buffer buf (setq rexel--conn nil))))
+        (with-current-buffer buf
+          (setq rexel--conn nil)
+          ;; A password typed now would go nowhere.
+          (ghostel-set-password-pid nil))))
     (unless (rexel--fail-waiters conn)
       (message "rexel: control connection to %s closed" (rexel--conn-name conn)))))
 
@@ -1507,7 +1510,27 @@ BUFFER-OR-NAME is as for `ghostel-make-terminal'."
     (add-hook 'kill-buffer-query-functions #'rexel--kill-buffer-query nil t)
     (add-hook 'kill-buffer-hook #'rexel--block-buffer-killed nil t)
     (rexel--open-data-connection conn (current-buffer))
+    (unless (rexel--conn-host conn)
+      (rexel--fetch-password-pid conn sid bid (current-buffer)))
     (current-buffer)))
+
+(defun rexel--fetch-password-pid (conn sid bid buf)
+  "Have ghostel detect password prompts in BUF on the tty of block BID.
+BID is a block of session SID on CONN.  Its tty is that of the process
+the terminal started, which is on this machine when the server sees
+Emacs itself at the other end of CONN, not a relay."
+  (rexel--request
+   conn "server.whoami" nil
+   (lambda (result _err)
+     (when (eql (alist-get 'pid (alist-get 'principal result)) (emacs-pid))
+       (rexel--request
+        conn "com.superlogical.terminal.process"
+        `((session_id . ,sid) (block_id . ,bid))
+        (lambda (result _err)
+          (when-let* (((buffer-live-p buf))
+                      (pid (alist-get 'pid (alist-get 'child result))))
+            (with-current-buffer buf
+              (ghostel-set-password-pid pid)))))))))
 
 (defun rexel--discard-buffer (buf)
   "Kill the block buffer BUF, if live, and leave its block to the server."
