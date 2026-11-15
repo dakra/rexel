@@ -367,7 +367,9 @@ The sessions and statuses listed by then are used."
       (with-temp-buffer
         (consult-rexel--in-block (buffer-name block)
                                  (lambda () (interactive) (setq ran (current-buffer)))))
-      (should (eq block ran)))))
+      (should (eq block ran))
+      (should-error (consult-rexel--in-block "rexel-test-no-such-buffer" #'ignore)
+                    :type 'user-error))))
 
 (defmacro consult-rexel-test--with-blocks (specs &rest body)
   "Run BODY with a block buffer bound for each of SPECS.

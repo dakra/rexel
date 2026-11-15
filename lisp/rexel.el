@@ -2321,18 +2321,18 @@ BUFFER defaults to the current buffer."
   (rexel--buffer-value 'rexel--session-id buffer))
 
 (defun rexel-session-label (&optional buffer)
-  "Return the label of the Rex session of BUFFER's block, or nil.
-BUFFER defaults to the current buffer."
+  "Return the label of the Rex session of BUFFER's block.
+BUFFER defaults to the current buffer.  Return nil for a buffer without
+a server connection."
   (when-let* ((conn (rexel--buffer-value 'rexel--conn buffer)))
     (alist-get (rexel-session-id buffer) (rexel--conn-sessions conn)
                nil nil #'equal)))
 
 (defun rexel-host (&optional buffer)
   "Return the label of the server of BUFFER's block.
-BUFFER defaults to the current buffer.  The label is that of
-`rexel-hosts' or of Rex's own list of hosts.  Return nil for the server
-found on this machine without either, and for a buffer that shows no
-block."
+BUFFER defaults to the current buffer.  The label is that of `rexel-hosts'
+or of Rex's own list of hosts.  Return nil for the server found on this
+machine without either, and for a buffer without a server connection."
   (when-let* ((conn (rexel--buffer-value 'rexel--conn buffer)))
     (rexel--conn-host conn)))
 

@@ -470,16 +470,16 @@ A package finds the block buffers, and what each of them shows, with the
 functions below.  BUFFER is a block buffer, by default the current buffer;
 for any other buffer they return =nil=.
 
-| Function                        | Returns                                                                                                                            |
-|---------------------------------+------------------------------------------------------------------------------------------------------------------------------------|
-| =(rexel-block-p BUFFER)=        | Non-nil if BUFFER shows a block, also while it is disconnected.                                                                    |
-| =(rexel-block-id BUFFER)=       | The block's ID, such as ="block:<uuid>"=.                                                                                          |
-| =(rexel-session-id BUFFER)=     | The ID of the block's session, such as ="session:<uuid>"=.                                                                         |
-| =(rexel-session-label BUFFER)=  | The session's label.                                                                                                               |
-| =(rexel-host BUFFER)=           | The label of the block's server, as in =rexel-hosts= or Rex's own list; =nil= for the server found on this machine without either. |
-| =(rexel-block-live-p BUFFER)=   | Non-nil while the terminal has the block's content and its output.                                                                 |
-| =(rexel-block-buffers)=         | The block buffers, most recently selected first.                                                                                   |
-| =(rexel-block-buffer BLOCK-ID)= | The buffer of a block; of several, as for a server attached to at two addresses, the most recently selected.                       |
+| Function                        | Returns                                                                                                                                                             |
+|---------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| =(rexel-block-p BUFFER)=        | Non-nil if BUFFER shows a block, also while it is disconnected.                                                                                                     |
+| =(rexel-block-id BUFFER)=       | The block's ID, such as ="block:<uuid>"=.                                                                                                                           |
+| =(rexel-session-id BUFFER)=     | The ID of the block's session, such as ="session:<uuid>"=.                                                                                                          |
+| =(rexel-session-label BUFFER)=  | The session's label, =nil= without a server connection.                                                                                                             |
+| =(rexel-host BUFFER)=           | The label of the block's server, as in =rexel-hosts= or Rex's own list; =nil= for the server found on this machine without either, and without a server connection. |
+| =(rexel-block-live-p BUFFER)=   | Non-nil while the terminal has the block's content and its output.                                                                                                  |
+| =(rexel-block-buffers)=         | The block buffers, most recently selected first.                                                                                                                    |
+| =(rexel-block-buffer BLOCK-ID)= | The buffer of a block; of several, as for a server attached to at two addresses, the most recently selected.                                                        |
 
 A block buffer is a ghostel buffer: =ghostel-send-string= in it types into
 the block and =ghostel-paste-string= pastes, and =(rexel-upload-file FILES

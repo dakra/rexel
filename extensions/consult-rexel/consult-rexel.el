@@ -689,7 +689,8 @@ An empty LABEL restores the label the server chose."
 
 (defun consult-rexel--in-block (buffer command)
   "Call COMMAND interactively in BUFFER, which must show a Rex block."
-  (unless (rexel-block-p (get-buffer buffer))
+  (unless (when-let* ((buffer (get-buffer buffer)))
+            (rexel-block-p buffer))
     (user-error "%s shows no Rex block" buffer))
   (with-current-buffer buffer
     (call-interactively command)))
