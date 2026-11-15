@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-15
+
 ### Added
 - `rexel-download-file` copies a file from a block's machine to this
   one.  It reads the path there, with completion of the files there, and
