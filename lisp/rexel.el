@@ -1504,7 +1504,9 @@ BUFFER-OR-NAME is as for `ghostel-make-terminal'."
     (rexel--open-data-connection conn (current-buffer))
     (unless (rexel--conn-host conn)
       (rexel--fetch-password-pid conn sid bid (current-buffer)))
-    (rexel-block-mode 1)
+    ;; An error in the mode's hook would end the view being applied.
+    (with-demoted-errors "rexel: rexel-block-mode-hook: %S"
+      (rexel-block-mode 1))
     (current-buffer)))
 
 (defun rexel--fetch-password-pid (conn sid bid buf)

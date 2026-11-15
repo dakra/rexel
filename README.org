@@ -489,7 +489,8 @@ redialled, what is typed waits and an upload fails.
 
 =rexel-block-mode-hook= runs in a new block buffer before its terminal has
 the block's content, and again when a block whose stream ended is streamed
-into its buffer anew.  A block that closes has its buffer killed, as have
+into its buffer anew; an error in one of its functions is shown as a
+message.  A block that closes has its buffer killed, as have
 the blocks of a session that is detached or destroyed (=kill-buffer-hook=).
 
 #+begin_src emacs-lisp

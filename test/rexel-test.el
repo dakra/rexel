@@ -3609,13 +3609,44 @@ passed on.  Return (PROMPTS . METHODS), the methods oldest first."
   "A block whose mode hook signals is streamed and closes when killed."
   (rexel-test--with-fake-conn sent
     (let ((conn rexel--conn)
-          (rexel-block-mode-hook (list (lambda () (error "Hook failed")))))
+          (rexel-block-mode-hook (list (lambda () (error "Hook failed"))))
+          (debug-on-error nil)
+          (inhibit-message t))
       (cl-letf (((symbol-function 'ghostel-make-terminal)
                  (lambda (buffer &rest _) buffer)))
-        (should-error (rexel--attach-block-buffer conn "s" "b" (current-buffer)))
+        (should (eq (current-buffer)
+                    (rexel--attach-block-buffer conn "s" "b" (current-buffer))))
         (should (= 1 (rexel-test--count "data.connect" sent)))
         (should (memq #'rexel--kill-buffer-query kill-buffer-query-functions))
         (should (memq #'rexel--block-buffer-killed kill-buffer-hook))))))
+
+(ert-deftest rexel-test-block-mode-hook-error-keeps-view ()
+  "A view is applied whole when the mode hook signals in each of its blocks."
+  (rexel-test--with-fake-conn _sent
+    (let ((conn rexel--conn)
+          (rexel-block-mode-hook (list (lambda () (error "Hook failed"))))
+          (debug-on-error nil)
+          (inhibit-message t)
+          (view `((label . "work")
+                  (windows . [((layers . [((blocks . [((block_id . "block:hook-a")
+                                                       (creator_name . ,rexel--terminal-creator))
+                                                      ((block_id . "block:hook-b")
+                                                       (creator_name . ,rexel--terminal-creator))]))]))]))))
+      (cl-letf (((symbol-function 'ghostel-make-terminal)
+                 (lambda (name &rest _) (get-buffer-create name))))
+        (unwind-protect
+            (progn
+              (rexel--apply-view conn "hook" view)
+              (should (buffer-live-p (rexel-block-buffer "block:hook-a")))
+              (should (buffer-live-p (rexel-block-buffer "block:hook-b")))
+              (should (equal '("*rex:work:1*" "*rex:work:1.2*")
+                             (sort (mapcar #'buffer-name
+                                           (seq-filter
+                                            (lambda (buffer)
+                                              (equal (rexel-session-id buffer) "hook"))
+                                            (rexel-block-buffers)))
+                                   #'string<))))
+          (mapc #'rexel--discard-buffer (rexel--session-buffers "hook")))))))
 
 (defmacro rexel-test--with-lookup-block (buf conn sid bid &rest body)
   "Run BODY with BUF a buffer of block BID in session SID on CONN."
