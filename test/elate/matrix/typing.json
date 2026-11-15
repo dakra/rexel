@@ -13,6 +13,7 @@
   "session": {"ui": "tty", "size": "120x36", "eval_file": ["../lib/rexel-setup.el"]},
   "steps": [
     {"group": "setup"},
+    {"eval": "(setq ghostel-detect-password-prompts nil)", "comment": "the programs below read with echo off, which on this machine's server is a password prompt"},
     {"eval": "(rexel-elate-start \"{{host}}\")"},
     {"wait": "until", "pred": "(rexel-elate-live-p)"},
     {"eval": "(delete-other-windows)"},
