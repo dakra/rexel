@@ -18,6 +18,11 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - Requires Rex 0.1.0-preview.19 or later, for its API revision 14.
 
+### Fixed
+- A block whose buffer had a function of `rexel-block-mode-hook` signal
+  an error is streamed all the same, and closes when its buffer is
+  killed.
+
 ## [0.4.0] — 2026-11-14
 
 ### Added

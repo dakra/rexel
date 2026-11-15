@@ -1496,7 +1496,6 @@ BUFFER-OR-NAME is as for `ghostel-make-terminal'."
     (when-let* ((prefix (rexel--conn-prefix conn))
                 ((not (string-prefix-p prefix default-directory))))
       (setq default-directory (concat prefix "/")))
-    (rexel-block-mode 1)
     (add-hook 'window-buffer-change-functions #'rexel--window-shown nil t)
     (add-hook 'window-selection-change-functions #'rexel--window-selected nil t)
     (add-function :after after-focus-change-function #'rexel--focus-changed)
@@ -1505,6 +1504,7 @@ BUFFER-OR-NAME is as for `ghostel-make-terminal'."
     (rexel--open-data-connection conn (current-buffer))
     (unless (rexel--conn-host conn)
       (rexel--fetch-password-pid conn sid bid (current-buffer)))
+    (rexel-block-mode 1)
     (current-buffer)))
 
 (defun rexel--fetch-password-pid (conn sid bid buf)

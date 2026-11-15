@@ -3605,6 +3605,18 @@ passed on.  Return (PROMPTS . METHODS), the methods oldest first."
 
 ;;; For other packages
 
+(ert-deftest rexel-test-block-mode-hook-error ()
+  "A block whose mode hook signals is streamed and closes when killed."
+  (rexel-test--with-fake-conn sent
+    (let ((conn rexel--conn)
+          (rexel-block-mode-hook (list (lambda () (error "Hook failed")))))
+      (cl-letf (((symbol-function 'ghostel-make-terminal)
+                 (lambda (buffer &rest _) buffer)))
+        (should-error (rexel--attach-block-buffer conn "s" "b" (current-buffer)))
+        (should (= 1 (rexel-test--count "data.connect" sent)))
+        (should (memq #'rexel--kill-buffer-query kill-buffer-query-functions))
+        (should (memq #'rexel--block-buffer-killed kill-buffer-hook))))))
+
 (defmacro rexel-test--with-lookup-block (buf conn sid bid &rest body)
   "Run BODY with BUF a buffer of block BID in session SID on CONN."
   (declare (indent 4))
