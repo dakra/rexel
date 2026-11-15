@@ -3603,5 +3603,81 @@ passed on.  Return (PROMPTS . METHODS), the methods oldest first."
   "An event without a session ID matches no buffer."
   (should-not (rexel--session-buffers nil)))
 
+;;; For other packages
+
+(defmacro rexel-test--with-lookup-block (buf conn sid bid &rest body)
+  "Run BODY with BUF a buffer of block BID in session SID on CONN."
+  (declare (indent 4))
+  `(let ((,buf (generate-new-buffer "rexel-test-lookup")))
+     (unwind-protect
+         (progn
+           (with-current-buffer ,buf
+             (setq rexel--conn ,conn rexel--session-id ,sid rexel--block-id ,bid))
+           ,@body)
+       (kill-buffer ,buf))))
+
+(ert-deftest rexel-test-lookup-block ()
+  "The lookups name the block, session and server of a block buffer."
+  (let ((conn (rexel--make-conn :host "box" :sessions '(("lookup:s" . "work"))))
+        killed)
+    (rexel-test--with-lookup-block buf conn "lookup:s" "lookup:b"
+      (setq killed buf)
+      (should (rexel-block-p buf))
+      (should (equal "lookup:b" (rexel-block-id buf)))
+      (should (equal "lookup:s" (rexel-session-id buf)))
+      (should (equal "work" (rexel-session-label buf)))
+      (should (equal "box" (rexel-host buf)))
+      (with-current-buffer buf
+        (should (rexel-block-p))
+        (should (equal "lookup:b" (rexel-block-id)))
+        (should (equal "lookup:s" (rexel-session-id)))
+        (should (equal "work" (rexel-session-label)))
+        (should (equal "box" (rexel-host)))))
+    (dolist (lookup '(rexel-block-p rexel-block-id rexel-session-id
+                      rexel-session-label rexel-host rexel-block-live-p))
+      (should-not (funcall lookup killed))
+      (with-temp-buffer
+        (should-not (funcall lookup))))))
+
+(ert-deftest rexel-test-lookup-without-connection ()
+  "A block buffer without a connection is one without a label or a server."
+  (rexel-test--with-lookup-block buf nil "lookup:s" "lookup:b"
+    (should (rexel-block-p buf))
+    (should (equal "lookup:s" (rexel-session-id buf)))
+    (should-not (rexel-session-label buf))
+    (should-not (rexel-host buf))))
+
+(ert-deftest rexel-test-lookup-unlabelled ()
+  "A found server has no label, and neither has a session the connection lacks."
+  (rexel-test--with-lookup-block buf (rexel--make-conn) "lookup:s" "lookup:b"
+    (should-not (rexel-host buf))
+    (should-not (rexel-session-label buf))))
+
+(ert-deftest rexel-test-lookup-live ()
+  "A block is live only once its snapshot is restored and until its stream ends."
+  (rexel-test--with-lookup-block buf nil "lookup:s" "lookup:b"
+    (dolist (state '(nil welcome snapshot closed))
+      (with-current-buffer buf (setq rexel--data-state state))
+      (should-not (rexel-block-live-p buf)))
+    (with-current-buffer buf
+      (setq rexel--data-state 'live)
+      (should (rexel-block-live-p)))
+    (should (rexel-block-live-p buf))))
+
+(ert-deftest rexel-test-lookup-buffers ()
+  "Block buffers are found, all of them and by block."
+  (rexel-test--with-lookup-block one nil "lookup:s" "lookup:1"
+    (rexel-test--with-lookup-block two nil "lookup:s" "lookup:2"
+      (rexel-test--with-lookup-block other nil "lookup:t" "lookup:3"
+        (with-temp-buffer
+          (let ((all (rexel-block-buffers)))
+            (should (memq one all))
+            (should (memq two all))
+            (should (memq other all))
+            (should-not (memq (current-buffer) all)))
+          (should (eq two (rexel-block-buffer "lookup:2")))
+          (should-not (rexel-block-buffer "lookup:none"))
+          (should-not (rexel-block-buffer nil)))))))
+
 (provide 'rexel-test)
 ;;; rexel-test.el ends here

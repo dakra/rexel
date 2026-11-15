@@ -464,6 +464,43 @@ Nushell emits OSC 7 and 133 itself; see ghostel's README for its
 =ghostel.nu=.  Sourcing the scripts is harmless when the block is shown in
 Rex.app, which uses the directory report and ignores the rest.
 
+* For other packages
+
+A package finds the block buffers, and what each of them shows, with the
+functions below.  BUFFER is a block buffer, by default the current buffer;
+for any other buffer they return =nil=.
+
+| Function                        | Returns                                                                                                                            |
+|---------------------------------+------------------------------------------------------------------------------------------------------------------------------------|
+| =(rexel-block-p BUFFER)=        | Non-nil if BUFFER shows a block, also while it is disconnected.                                                                    |
+| =(rexel-block-id BUFFER)=       | The block's ID, such as ="block:<uuid>"=.                                                                                          |
+| =(rexel-session-id BUFFER)=     | The ID of the block's session, such as ="session:<uuid>"=.                                                                         |
+| =(rexel-session-label BUFFER)=  | The session's label.                                                                                                               |
+| =(rexel-host BUFFER)=           | The label of the block's server, as in =rexel-hosts= or Rex's own list; =nil= for the server found on this machine without either. |
+| =(rexel-block-live-p BUFFER)=   | Non-nil while the terminal has the block's content and its output.                                                                 |
+| =(rexel-block-buffers)=         | The block buffers, most recently selected first.                                                                                   |
+| =(rexel-block-buffer BLOCK-ID)= | The buffer of a block; of several, as for a server attached to at two addresses, the most recently selected.                       |
+
+A block buffer is a ghostel buffer: =ghostel-send-string= in it types into
+the block and =ghostel-paste-string= pastes, and =(rexel-upload-file FILES
+BUFFER)= sends files to it.  These go through the server's control
+connection, which =rexel-block-live-p= says nothing about: while it is
+redialled, what is typed waits and an upload fails.
+
+=rexel-block-mode-hook= runs in a new block buffer before its terminal has
+the block's content, and again when a block whose stream ended is streamed
+into its buffer anew.  A block that closes has its buffer killed, as have
+the blocks of a session that is detached or destroyed (=kill-buffer-hook=).
+
+#+begin_src emacs-lisp
+;; The live terminals of the session the current block is in.
+(when-let* ((session (rexel-session-id)))
+  (seq-filter (lambda (buffer)
+                (and (equal (rexel-session-id buffer) session)
+                     (rexel-block-live-p buffer)))
+              (rexel-block-buffers)))
+#+end_src
+
 * Customization
 
 | Option                         | Default   | Meaning                                                |

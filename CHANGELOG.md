@@ -10,6 +10,10 @@ All notable changes to this project will be documented in this file.
   where to save it; with a prefix argument it visits the copy.
   `rexel-cancel-download` stops the downloads of a block, as does
   killing its buffer.
+- Functions for packages that build on rexel, see "For other packages"
+  in the README: `rexel-block-p`, `rexel-block-id`, `rexel-session-id`,
+  `rexel-session-label`, `rexel-host`, `rexel-block-live-p`,
+  `rexel-block-buffers` and `rexel-block-buffer`.
 
 ### Changed
 - Requires Rex 0.1.0-preview.19 or later, for its API revision 14.

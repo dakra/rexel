@@ -75,14 +75,10 @@ RECORDS as `ghostel-status-label' takes them.")
 
 ;;; Blocks
 
-(defun consult-rexel--block-p (buffer)
-  "Return non-nil if BUFFER shows a Rex block."
-  (buffer-local-value 'rexel--block-id buffer))
-
 (defun consult-rexel--block-pairs ()
   "Return `consult' (NAME . BUFFER) pairs of the block buffers, switch-ordered."
   (consult--buffer-query :sort 'visibility
-                         :predicate #'consult-rexel--block-p
+                         :predicate #'rexel-block-p
                          :as #'consult--buffer-pair))
 
 (defvar consult-rexel-source
@@ -121,8 +117,8 @@ register sources narrow with `r'.")
 (defun consult-rexel--session-block-p (conn sid buffer)
   "Return non-nil if BUFFER shows a block of session SID on CONN."
   (and (eq (buffer-local-value 'rexel--conn buffer) conn)
-       (equal (buffer-local-value 'rexel--session-id buffer) sid)
-       (consult-rexel--block-p buffer)))
+       (equal (rexel-session-id buffer) sid)
+       (rexel-block-p buffer)))
 
 (defun consult-rexel--session-source (conn sid name new)
   "Return a `consult' source named NAME for the blocks of session SID on CONN.
@@ -152,7 +148,7 @@ The session of the current project comes first, then the sessions in
 the order their blocks were selected last."
   (let ((project (and (not (file-remote-p default-directory))
                       (rexel-project-session-label)))
-        (blocks (seq-filter #'consult-rexel--block-p (buffer-list)))
+        (blocks (rexel-block-buffers))
         (sessions nil))
     (dolist (conn rexel--conns)
       (pcase-dolist (`(,sid . ,label) (rexel--conn-sessions conn))
@@ -194,7 +190,7 @@ The sources that list the Rex blocks alone are left out."
                          (seq-remove
                           (lambda (item)
                             (when-let* ((buffer (consult-rexel--item-buffer item)))
-                              (consult-rexel--block-p buffer)))
+                              (rexel-block-p buffer)))
                           (funcall items)))
                       ,@plist))
                    (t plist))))
@@ -693,7 +689,7 @@ An empty LABEL restores the label the server chose."
 
 (defun consult-rexel--in-block (buffer command)
   "Call COMMAND interactively in BUFFER, which must show a Rex block."
-  (unless (consult-rexel--block-p (get-buffer buffer))
+  (unless (rexel-block-p (get-buffer buffer))
     (user-error "%s shows no Rex block" buffer))
   (with-current-buffer buffer
     (call-interactively command)))

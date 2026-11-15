@@ -2295,6 +2295,68 @@ They show as the program reported them, without notifying."
    t))
 
 
+;;; For other packages
+
+(defun rexel--buffer-value (variable buffer)
+  "Return the value of VARIABLE in BUFFER, by default the current buffer.
+Return nil for anything but a live buffer."
+  (let ((buffer (or buffer (current-buffer))))
+    (and (buffer-live-p buffer)
+         (buffer-local-value variable buffer))))
+
+(defun rexel-block-id (&optional buffer)
+  "Return the ID of the Rex block BUFFER shows, or nil.
+BUFFER defaults to the current buffer."
+  (rexel--buffer-value 'rexel--block-id buffer))
+
+(defun rexel-block-p (&optional buffer)
+  "Return non-nil if BUFFER shows a Rex block.
+BUFFER defaults to the current buffer.  A block buffer stays one while
+it is disconnected."
+  (and (rexel-block-id buffer) t))
+
+(defun rexel-session-id (&optional buffer)
+  "Return the ID of the Rex session of BUFFER's block, or nil.
+BUFFER defaults to the current buffer."
+  (rexel--buffer-value 'rexel--session-id buffer))
+
+(defun rexel-session-label (&optional buffer)
+  "Return the label of the Rex session of BUFFER's block, or nil.
+BUFFER defaults to the current buffer."
+  (when-let* ((conn (rexel--buffer-value 'rexel--conn buffer)))
+    (alist-get (rexel-session-id buffer) (rexel--conn-sessions conn)
+               nil nil #'equal)))
+
+(defun rexel-host (&optional buffer)
+  "Return the label of the server of BUFFER's block.
+BUFFER defaults to the current buffer.  The label is that of
+`rexel-hosts' or of Rex's own list of hosts.  Return nil for the server
+found on this machine without either, and for a buffer that shows no
+block."
+  (when-let* ((conn (rexel--buffer-value 'rexel--conn buffer)))
+    (rexel--conn-host conn)))
+
+(defun rexel-block-live-p (&optional buffer)
+  "Return non-nil if BUFFER's terminal has its block's content and output.
+BUFFER defaults to the current buffer.  Return nil while the block's
+stream is being opened or resumed, and once it has ended.  Typing and
+uploads need the server's control connection instead, which is redialled
+without ending the stream."
+  (eq (rexel--buffer-value 'rexel--data-state buffer) 'live))
+
+(defun rexel-block-buffers ()
+  "Return the block buffers, most recently selected first."
+  (seq-filter #'rexel-block-p (buffer-list)))
+
+(defun rexel-block-buffer (block-id)
+  "Return the buffer of the block with ID BLOCK-ID, or nil.
+Of several, as for a server attached to at two addresses, return the
+most recently selected."
+  (and block-id
+       (seq-find (lambda (buffer) (equal (rexel-block-id buffer) block-id))
+                 (buffer-list))))
+
+
 ;;; Commands
 
 (defun rexel--pick-session (conn callback)
