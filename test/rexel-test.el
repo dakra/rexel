@@ -451,6 +451,11 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
     (should (equal "*rex:work@studio:2.3*"
                    (rexel--buffer-name conn "s" "2.3")))))
 
+(defun rexel-test--named-by-view (conn)
+  "Make this buffer one of CONN that `rexel--apply-view' names."
+  (setq rexel--conn conn)
+  (setq-local ghostel-buffer-name-function #'rexel--name-buffer))
+
 (ert-deftest rexel-test-apply-view-renames-on-label-change ()
   (let* ((conn (rexel--make-conn :endpoints (list "none")))
          (buf (generate-new-buffer "rexel-test"))
@@ -458,7 +463,8 @@ signals.  `rexel--on-control-close' sets the variable `closed'."
                  (windows . [((layers . [((blocks . [((block_id . "block:123456")
                                                       (creator_name . "com.superlogical.terminal"))]))]))]))))
     (with-current-buffer buf
-      (setq rexel--session-id "label-test" rexel--block-id "block:123456"))
+      (setq rexel--session-id "label-test" rexel--block-id "block:123456")
+      (rexel-test--named-by-view conn))
     (puthash "block:123456" buf (rexel--conn-blocks conn))
     (unwind-protect
         (progn
@@ -929,14 +935,17 @@ A server elsewhere is not asked."
         (home . "/home/d"))
        ("block:00000b" (foreground (name . "vim") (cwd . "/home/d"))
         (home . "/home/d"))
-       ("block:00000c" (foreground (name . "login")))))
+       ("block:00000c" (foreground (name . "login"))))
+     (rexel--view-numbers rexel-test--attach-view nil))
     `(("main: vim in ~" block . "block:00000b")
       ("main: bash in ~/src" block . "block:00000a")
       ("tab 2: shell" block . "block:00000c")
       ("Layout of main <1>" tab . ,(aref (alist-get 'windows rexel-test--attach-view) 0))
       ("Layout of tab 2" tab . ,(aref (alist-get 'windows rexel-test--attach-view) 1))
       ("Layout of main <3>" tab . ,(aref (alist-get 'windows rexel-test--attach-view) 2)))))
-  (should (equal (mapcar #'car (rexel--attach-choices rexel-test--attach-view nil))
+  (should (equal (mapcar #'car (rexel--attach-choices
+                                rexel-test--attach-view nil
+                                (rexel--view-numbers rexel-test--attach-view nil)))
                  '("main: shell <00000b>" "main: shell <00000a>" "tab 2: shell"
                    "Layout of main <1>" "Layout of tab 2" "Layout of main <3>"))))
 
@@ -1187,7 +1196,10 @@ floating blocks over an empty layout, one of them minimized.")
                  (mapcar #'car (rexel--view-terminal-blocks rexel-test--floating-view))))
   (should (equal '("main: shell (floating)" "main: shell" "float: shell (minimized)"
                    "float: shell (floating)" "Layout of main" "Layout of float")
-                 (mapcar #'car (rexel--attach-choices rexel-test--floating-view nil)))))
+                 (mapcar #'car (rexel--attach-choices
+                                rexel-test--floating-view nil
+                                (rexel--view-numbers rexel-test--floating-view
+                                                     nil))))))
 
 (ert-deftest rexel-test-floating-block-finds-its-tab ()
   "A block in a floating layer belongs to its tab, and the layout leaves it out."
@@ -2740,7 +2752,8 @@ takes the views to apply and then the IDs of the blocks."
                 (lambda (_sid) (seq-filter #'buffer-live-p buffers))))
        (dolist (buf buffers)
          (with-current-buffer buf
-           (setq rexel--block-id (buffer-name) rexel--session-id "s")))
+           (setq rexel--block-id (buffer-name) rexel--session-id "s")
+           (rexel-test--named-by-view conn)))
        (cl-flet ((,names (views &rest bids)
                    (dolist (view views)
                      (rexel--apply-view conn "s" `((label . "work") ,@view)))
@@ -2756,26 +2769,147 @@ takes the views to apply and then the IDs of the blocks."
                    (names (list rexel-test--attach-view)
                           "block:00000a" "block:00000b" "block:00000c")))))
 
-(ert-deftest rexel-test-apply-view-renumbers-buffers ()
-  "Buffers of tabs that moved up take the names of the tabs before them."
+(ert-deftest rexel-test-number-ids ()
+  "An ID keeps its number; a new one gets the lowest number left."
+  (should (equal '(("a" . 1) ("b" . 2) ("c" . 3))
+                 (rexel--number-ids '("a" "b" "c") nil)))
+  (should (equal '(("b" . 2) ("c" . 3))
+                 (rexel--number-ids '("b" "c") '(("a" . 1) ("b" . 2) ("c" . 3)))))
+  (should (equal '(("c" . 3) ("d" . 1) ("b" . 2) ("e" . 4))
+                 (rexel--number-ids '("c" "d" "b" "e") '(("b" . 2) ("c" . 3))))))
+
+(defun rexel-test--names (&rest views)
+  "Return the block names of the last of VIEWS, a session's views in turn."
+  (let ((numbers nil)
+        (names nil))
+    (dolist (view views)
+      (setq numbers (rexel--view-numbers view numbers)
+            names (rexel--view-block-names view numbers)))
+    names))
+
+(ert-deftest rexel-test-view-block-names-keep-tab-numbers ()
+  "A tab keeps its number when tabs close or change places."
   (let* ((tabs (mapcar (lambda (n)
-                         (rexel-test--tab (format "w%d" n) ""
-                                          `((block_id . ,(format "block:00000%d" n)))
-                                          (rexel-test--block
-                                           (format "block:00000%d" n))))
-                       '(1 2 3)))
-         (three `((windows . ,(vconcat tabs))))
-         (two `((windows . ,(vconcat (cdr tabs))))))
-    (rexel-test--with-named-blocks three names
-      (should (equal '("*rex:work:1*" "*rex:work:2*" "*rex:work:3*")
-                     (names (list three)
-                            "block:000001" "block:000002" "block:000003")))
+                         (rexel-test--tab (format "w%d" n) "" nil
+                                          (rexel-test--block (format "b%d" n))))
+                       '(1 2 3 4)))
+         (view (lambda (&rest ns)
+                 `((windows . ,(vconcat (mapcar (lambda (n) (nth (1- n) tabs))
+                                                ns)))))))
+    (should (equal '(("b1" . "1") ("b2" . "2") ("b3" . "3"))
+                   (rexel-test--names (funcall view 1 2 3))))
+    (should (equal '(("b3" . "3") ("b2" . "2"))
+                   (rexel-test--names (funcall view 1 2 3) (funcall view 3 2))))
+    ;; A new tab takes the lowest number left.
+    (should (equal '(("b2" . "2") ("b3" . "3") ("b4" . "1"))
+                   (rexel-test--names (funcall view 1 2 3) (funcall view 2 3)
+                                      (funcall view 2 3 4))))))
+
+(ert-deftest rexel-test-view-block-names-keep-split-numbers ()
+  "A block keeps its number in its tab when a block before it closes."
+  (let ((view (lambda (&rest bids)
+                `((windows . [,(apply #'rexel-test--tab "w1" "" nil
+                                      (mapcar #'rexel-test--block bids))])))))
+    (should (equal '(("a" . "1") ("b" . "1.2"))
+                   (rexel-test--names (funcall view "a" "b"))))
+    (should (equal '(("b" . "1.2"))
+                   (rexel-test--names (funcall view "a" "b") (funcall view "b"))))
+    (should (equal '(("b" . "1.2") ("c" . "1"))
+                   (rexel-test--names (funcall view "a" "b") (funcall view "b")
+                                      (funcall view "b" "c"))))))
+
+(ert-deftest rexel-test-view-block-names-moved-block ()
+  "A block that moves to another tab is numbered there; the others keep theirs."
+  (let ((view (lambda (first second)
+                `((windows . [,(apply #'rexel-test--tab "w1" "" nil
+                                      (mapcar #'rexel-test--block first))
+                              ,(apply #'rexel-test--tab "w2" "" nil
+                                      (mapcar #'rexel-test--block second))])))))
+    (should (equal '(("b" . "1.2") ("a" . "2.2") ("c" . "2"))
+                   (rexel-test--names (funcall view '("a" "b") '("c"))
+                                      (funcall view '("b") '("a" "c")))))))
+
+(ert-deftest rexel-test-apply-view-keeps-numbers ()
+  "A buffer keeps its tab's number through a label and a closed tab."
+  (let* ((a (rexel-test--tab "w1" "" nil (rexel-test--block "block:00000a")))
+         (b (rexel-test--tab "w2" "" nil (rexel-test--block "block:00000b")))
+         (view `((windows . [,a ,b]))))
+    (rexel-test--with-named-blocks view names
       (should (equal '("*rex:work:1*" "*rex:work:2*")
-                     (names (list two) "block:000002" "block:000003")))
-      ;; Tabs that change places trade names.
-      (should (equal '("*rex:work:2*" "*rex:work:1*")
-                     (names (list `((windows . ,(vconcat (reverse (cdr tabs))))))
-                            "block:000002" "block:000003"))))))
+                     (names (list view) "block:00000a" "block:00000b")))
+      (should (equal '("*rex:work:1*" "*rex:work:x*")
+                     (names (list `((windows . [,a ((label . "x") ,@b)])))
+                            "block:00000a" "block:00000b")))
+      (should (equal '("*rex:work:2*")
+                     (names (list `((windows . [,b]))) "block:00000b"))))))
+
+(ert-deftest rexel-test-apply-view-trades-names ()
+  "Tabs that swap their labels swap the names of their buffers."
+  (let* ((a (rexel-test--tab "w1" "one" nil (rexel-test--block "block:00000a")))
+         (b (rexel-test--tab "w2" "two" nil (rexel-test--block "block:00000b")))
+         (view `((windows . [,a ,b]))))
+    (rexel-test--with-named-blocks view names
+      (names (list view))
+      (should (equal '("*rex:work:two*" "*rex:work:one*")
+                     (names (list `((windows . [((label . "two") ,@a)
+                                                ((label . "one") ,@b)])))
+                            "block:00000a" "block:00000b"))))))
+
+(ert-deftest rexel-test-forget-session-forgets-numbers ()
+  "A session detached from numbers its tabs anew."
+  (let ((conn (rexel--make-conn :endpoints (list "none"))))
+    (setf (alist-get "s" (rexel--conn-numbers conn) nil nil #'equal)
+          '(("w2" . 2)))
+    (rexel--forget-session conn "s")
+    (should-not (rexel--conn-numbers conn))))
+
+(ert-deftest rexel-test-buffer-name-function ()
+  "The function names a buffer at a view and at a title, until a manual rename."
+  (let ((view `((windows . [,(rexel-test--tab "w1" "logs" nil
+                                              (rexel-test--block "block:00000a"))])))
+        (rexel-buffer-name-function
+         (lambda (tab)
+           (format "%s/%s/%s" (rexel-session-label) tab (or ghostel-title "-")))))
+    (rexel-test--with-named-blocks view names
+      (should (equal '("work/logs/-") (names (list view) "block:00000a")))
+      (with-current-buffer (car buffers)
+        (ghostel--set-title "make")
+        (should (equal "work/logs/make" (buffer-name)))
+        ;; An error leaves the name, as does a result that is no name.
+        (let ((debug-on-error nil)
+              (inhibit-message t))
+          (dolist (function (list (lambda (_tab) (error "No name"))
+                                  (lambda (_tab) "")
+                                  (lambda (_tab) 'name)))
+            (let ((rexel-buffer-name-function function))
+              (ghostel-update-buffer-name))
+            (should (equal "work/logs/make" (buffer-name)))))
+        (rename-buffer "mine"))
+      (should (equal '("mine")
+                     (names (list `((windows . [((label . "x") ,@(aref (alist-get 'windows view) 0))])))
+                            "block:00000a"))))))
+
+(ert-deftest rexel-test-name-buffer-waits-for-view ()
+  "A block is named once a view named it, on a connection."
+  (let ((conn (rexel--make-conn :endpoints (list "none"))))
+    (setf (alist-get "s" (rexel--conn-sessions conn) nil nil #'equal) "work")
+    (with-temp-buffer
+      (setq rexel--session-id "s")
+      (should-not (rexel--name-buffer nil))
+      (setq rexel--block-name "1")
+      (should-not (rexel--name-buffer nil))
+      (setq rexel--conn conn)
+      (should (equal "*rex:work:1*" (rexel--name-buffer nil))))))
+
+(ert-deftest rexel-test-attach-names-the-buffer-by-function ()
+  "A block buffer has rexel's name function for ghostel to call."
+  (rexel-test--with-fake-conn sent
+    (ignore sent)
+    (let ((conn rexel--conn))
+      (rexel-test--with-attached-block conn
+        (rexel--attach-block-buffer conn "s" rexel--block-id (current-buffer))
+        (should (eq #'rexel--name-buffer ghostel-buffer-name-function))
+        (should (local-variable-p 'ghostel-buffer-name-function))))))
 
 (ert-deftest rexel-test-apply-view-shares-a-name-in-tab-order ()
   "Of two tabs with one label the first names its buffer; the other is <2>."
@@ -2811,14 +2945,35 @@ takes the views to apply and then the IDs of the blocks."
 (ert-deftest rexel-test-read-tab-uses-the-choice-function ()
   "The tab prompt goes through `rexel-read-choice-function'."
   (let* ((asked nil)
+         (conn (rexel--make-conn :endpoints (list "none")))
          (rexel-read-choice-function
           (lambda (prompt choices conn sid view)
             (setq asked (list prompt (mapcar #'car choices) conn sid
                               (eq view rexel-test--attach-view)))
             (cdr (nth 1 choices)))))
+    ;; The tabs have the numbers of the session's buffers.
+    (setf (alist-get "s" (rexel--conn-numbers conn) nil nil #'equal)
+          '(("w1" . 2) ("w2" . 4)))
     (should (equal "w2" (alist-get 'window_id
-                                   (rexel--read-tab 'conn "s" rexel-test--attach-view))))
-    (should (equal '("Rex tab: " ("1: main" "2: " "3: main") conn "s" t) asked))))
+                                   (rexel--read-tab conn "s" rexel-test--attach-view))))
+    (should (equal `("Rex tab: " ("2: main" "4: " "1: main") ,conn "s" t) asked))))
+
+(ert-deftest rexel-test-show-session-finds-a-tab-by-its-number ()
+  "A numeric argument shows the tab with that number, or opens a tab."
+  (let ((conn (rexel--make-conn :endpoints (list "none")))
+        (shown nil))
+    (setf (alist-get "s" (rexel--conn-numbers conn) nil nil #'equal)
+          '(("w1" . 2) ("w2" . 4)))
+    (cl-letf (((symbol-function 'rexel--with-session)
+               (lambda (_conn _sid callback)
+                 (funcall callback rexel-test--attach-view)))
+              ((symbol-function 'rexel--pop-to-block)
+               (lambda (_conn bid &rest _) (push bid shown)))
+              ((symbol-function 'rexel--open-tab)
+               (lambda (&rest _) (push 'new shown))))
+      (rexel--show-session conn "s" 4 nil)
+      (rexel--show-session conn "s" 3 nil)
+      (should (equal '(new "block:00000c") shown)))))
 
 (ert-deftest rexel-test-block-shown-from-minibuffer-is-taken-after-it ()
   "A block shown from a minibuffer is taken once that exits, if still shown."

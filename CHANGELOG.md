@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `rexel-buffer-name-function` names the block buffers.  It is called
+  with the name of a block in its session when that name, the session's
+  label or the terminal's title or directory changes.
+
+### Changed
+- A tab and a block keep their numbers: closing a tab no longer
+  renumbers the buffers of the tabs after it, and a new tab takes the
+  lowest number left.  `C-u N M-x rexel` and the prompts for a tab
+  use these numbers.
+- A block buffer renamed by hand keeps its name, and
+  `ghostel-buffer-name-function` no longer renames block buffers.
+
 ## [0.5.0] — 2026-11-15
 
 ### Added

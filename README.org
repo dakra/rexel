@@ -162,8 +162,23 @@ whatever it is set to.
 
 A block buffer is named =*rex:SESSION:TAB*=, after its session and the
 label of its tab, or the tab's number when it has no label.  The other
-blocks of a split tab are =TAB.2=, =TAB.3= and so on.  The names follow the
-tabs: closing a tab renumbers the buffers of those after it.
+blocks of a split tab are =TAB.2=, =TAB.3= and so on.  A tab and a block
+keep their numbers: closing a tab leaves the buffers of the others as they
+are named, and a new tab takes the lowest number left.
+
+=rexel-buffer-name-function= names the buffers.  It is called in a block
+buffer with the =TAB= part of the name, when that part, the session's label
+or the terminal's title or directory changes:
+
+#+begin_src emacs-lisp
+;; Name a block buffer after its session, its tab and the terminal's title.
+(setq rexel-buffer-name-function
+      (lambda (tab)
+        (format "*rex:%s:%s %s*" (rexel-session-label) tab (or ghostel-title ""))))
+#+end_src
+
+A buffer renamed by hand keeps its name.  =ghostel-buffer-name-function=
+does not apply to block buffers.
 
 =M-x rexel-new-session= creates a session with one shell and attaches to
 it, asking for its label with a prefix argument.  On this machine's server
@@ -519,19 +534,20 @@ the blocks of a session that is detached or destroyed (=kill-buffer-hook=).
 
 * Customization
 
-| Option                         | Default   | Meaning                                                |
-|--------------------------------+-----------+--------------------------------------------------------|
-| =rexel-hosts=                    | =nil=       | Servers besides those =rex= knows, see [[*Servers][Servers]]           |
-| =rexel-attach-display=           | =ask=       | What =rexel-attach= shows: =ask=, =focused= or =layout=        |
-| =rexel-default-session=          | ="emacs"=   | Label of the session =M-x rexel= shows                   |
-| =rexel-default-session-function= | =nil=       | Names the session of =M-x rexel= for a buffer            |
-| =rexel-tramp-hosts=              | =nil=       | TRAMP prefixes of servers' machines, by server label   |
-| =rexel-session-label-function=   | =nil=       | Rewrites the label given to =rexel-new-session=          |
-| =rexel-kill-buffer-action=       | =close=     | What killing a block buffer does: =close=, =keep= or =ask=   |
-| =rexel-destroy-empty-sessions=   | =t=         | Destroy a session when its last block closes                 |
-| =rexel-prefix-key=               | ="C-c C-r"= | Prefix for =rexel-prefix-map= in block buffers           |
-| =rexel-autostart-server=         | =ask=       | Start a local server when none is found: =ask=, =t= or =nil= |
-| =rexel-program=                  | ="rex"=     | The Rex command-line program                           |
+| Option                           | Default                    | Meaning                                                      |
+|----------------------------------+----------------------------+--------------------------------------------------------------|
+| =rexel-hosts=                    | =nil=                      | Servers besides those =rex= knows, see [[*Servers][Servers]]               |
+| =rexel-attach-display=           | =ask=                      | What =rexel-attach= shows: =ask=, =focused= or =layout=      |
+| =rexel-default-session=          | ="emacs"=                  | Label of the session =M-x rexel= shows                       |
+| =rexel-default-session-function= | =nil=                      | Names the session of =M-x rexel= for a buffer                |
+| =rexel-tramp-hosts=              | =nil=                      | TRAMP prefixes of servers' machines, by server label         |
+| =rexel-session-label-function=   | =nil=                      | Rewrites the label given to =rexel-new-session=              |
+| =rexel-buffer-name-function=     | =rexel-buffer-name-by-tab= | Names a block buffer, see [[*Sessions][Sessions]]                           |
+| =rexel-kill-buffer-action=       | =close=                    | What killing a block buffer does: =close=, =keep= or =ask=   |
+| =rexel-destroy-empty-sessions=   | =t=                        | Destroy a session when its last block closes                 |
+| =rexel-prefix-key=               | ="C-c C-r"=                | Prefix for =rexel-prefix-map= in block buffers               |
+| =rexel-autostart-server=         | =ask=                      | Start a local server when none is found: =ask=, =t= or =nil= |
+| =rexel-program=                  | ="rex"=                    | The Rex command-line program                                 |
 
 Block buffers run =rexel-block-mode=, whose hook =rexel-block-mode-hook= runs
 in each new one.

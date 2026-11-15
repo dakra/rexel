@@ -63,6 +63,15 @@
     {"keys": "RET", "delivery": "events"},
     {"wait": "until", "pred": "(rexel-elate-buffer-name-p)"},
 
+    {"group": "name-function", "comment": "rexel-buffer-name-function names the buffer, also when the terminal's title changes"},
+    {"eval": "(setq rexel-elate-named (rexel-elate-block) rexel-buffer-name-function (lambda (tab) (format \"rx %s %s\" tab (or ghostel-title \"\"))))"},
+    {"type": "printf '\\033]2;rexel-title\\007'"},
+    {"keys": "RET"},
+    {"wait": "until", "pred": "(equal \"rx 1 rexel-title\" (buffer-name rexel-elate-named))"},
+    {"eval": "(progn (setq rexel-buffer-name-function #'rexel-buffer-name-by-tab) (with-current-buffer rexel-elate-named (ghostel-update-buffer-name)))"},
+    {"wait": "until", "pred": "(rexel-elate-buffer-name-p)"},
+    {"wait": "until", "pred": "(rexel-elate-prompt-p)"},
+
     {"group": "prefix-key", "comment": "a key vector set the way Customize does moves the prefix map to it and takes it off C-c C-r; the string form puts it back"},
     {"eval": "(customize-set-variable 'rexel-prefix-key [f5])"},
     {"assert": {"eval": "(and (eq (key-binding (kbd \"<f5> $\")) 'rexel-rename-session) (not (eq (key-binding (kbd \"C-c C-r $\")) 'rexel-rename-session)) (not (eq (lookup-key rexel-block-mode-map (kbd \"C-c C-r\")) rexel-prefix-map)))"}, "comment": "in the block buffer the new key reaches the map and the old one does not; the old key is not typed, as ghostel would send it to the shell"},

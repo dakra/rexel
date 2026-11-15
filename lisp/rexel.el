@@ -5,7 +5,7 @@
 ;; Author: Daniel Kraus <daniel@kraus.my>
 ;; URL: https://github.com/dakra/rexel
 ;; Version: 0.5.0
-;; Package-Requires: ((emacs "28.1") (ghostel "0.65.0") (websocket "1.15"))
+;; Package-Requires: ((emacs "28.1") (ghostel "0.66.0") (websocket "1.15"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
@@ -48,6 +48,7 @@
 (require 'rexel-transfer)
 
 (defvar ghostel-annotation-function)
+(defvar ghostel-buffer-name-function)
 
 
 ;;; Customization
@@ -84,6 +85,18 @@ host of the same label known to Rex."
 It receives the label, \"\" when none was given, in the buffer the
 command runs from.  An empty or nil result lets the server choose one."
   :type '(choice (const :tag "None" nil) function))
+
+(defcustom rexel-buffer-name-function #'rexel-buffer-name-by-tab
+  "Function returning the name of a block buffer.
+It is called in the buffer with one argument, the name of the block in
+its session: the label of the block's tab, or the tab's number when it
+has no label, and for a block that is not number 1 in its tab its number
+too, as in 2.3.  `rexel-session-label' and `rexel-host' return the
+session and its server, and `ghostel-title' and `default-directory' hold
+the terminal's title and directory.  The function is called with every
+view of the session and when the title or the directory changes.  A nil
+result keeps the name, and a buffer renamed by hand keeps its name too."
+  :type '(choice (function-item rexel-buffer-name-by-tab) function))
 
 (defcustom rexel-default-session "emacs"
   "Label of the session `rexel' shows."
@@ -205,6 +218,8 @@ REFRESH-TIMERS one to the timer of its pending view refresh.
 ATTACHING are the IDs of the sessions whose `session.attach' after a redial
 is unanswered: the server refuses their typing and sizing until then.
 BLOCKS maps a block ID to its buffer.
+NUMBERS is an alist from a session's ID to the numbers of its tabs and
+blocks, see `rexel--view-numbers'.
 
 PENDING maps a request ID to the callback for its response.
 CLOSING are the IDs of the blocks whose `block.close' is unanswered.
@@ -220,6 +235,7 @@ used for, see `rexel--connect-directory'."
   (sessions nil)
   (revisions nil)
   (blocks (make-hash-table :test #'equal))
+  (numbers nil)
   (on-ready nil)
   (refresh-timers nil))
 
@@ -887,6 +903,10 @@ handler does not, as it cannot return before the handler."
 (defvar-local rexel--block-id nil
   "ID of the Rex block shown in this buffer.")
 
+(defvar-local rexel--block-name nil
+  "Name of this buffer's block in its session, nil until a view has it.
+See `rexel--view-block-names'.")
+
 (cl-defstruct (rexel--stream (:constructor rexel--make-stream) (:copier nil))
   "One data connection streaming a block's terminal.
 WS is its WebSocket and MARKER the prefix of its control messages,
@@ -1106,7 +1126,8 @@ a tab of one block pops to it, and a tab without a layout to its focused block."
         (rexel--layout-windows conn sid view tab)
       (unless (rexel--pop-to-block conn (or (alist-get 'block_id layout)
                                             (rexel--tab-block tab)))
-        (message "rexel: Rex tab %s holds no terminal" (rexel--tab-name view tab))))))
+        (message "rexel: Rex tab %s holds no terminal"
+                 (rexel--tab-name (rexel--session-numbers conn sid view) tab))))))
 
 (defun rexel--tab-label (tab)
   "Return the label TAB was given, or nil.
@@ -1118,28 +1139,68 @@ The server labels a tab without one \"Window\" and the end of its ID."
                      (equal label (concat "Window " (substring id -8)))))
       label)))
 
-(defun rexel--tab-name (view tab)
-  "Return TAB's label, or for a tab without one its number in VIEW."
-  (or (rexel--tab-label tab)
-      (format "tab %d" (1+ (or (seq-position (alist-get 'windows view) tab #'eq)
-                               0)))))
+(defun rexel--tab-number (numbers tab)
+  "Return TAB's number in NUMBERS, those of `rexel--view-numbers'."
+  (cdr (assoc (alist-get 'window_id tab) numbers)))
 
-(defun rexel--view-block-names (view)
+(defun rexel--tab-name (numbers tab)
+  "Return TAB's label, or for a tab without one its number in NUMBERS."
+  (or (rexel--tab-label tab)
+      (format "tab %d" (rexel--tab-number numbers tab))))
+
+(defun rexel--number-ids (ids numbers)
+  "Return an (ID . NUMBER) for each of IDS, no two with the same number.
+An ID keeps its number in the alist NUMBERS.  The others get the lowest
+numbers left, from 1."
+  (let ((kept (mapcar (lambda (id) (cdr (assoc id numbers))) ids))
+        (n 0))
+    (cl-mapcar (lambda (id number)
+                 (cons id (or number
+                              (progn (while (memq (cl-incf n) kept))
+                                     n))))
+               ids kept)))
+
+(defun rexel--view-numbers (view numbers)
+  "Return the numbers of VIEW's tabs and terminal blocks.
+A tab has a (WINDOW-ID . NUMBER) among the tabs, and a block a
+\((WINDOW-ID . BLOCK-ID) . NUMBER) among the terminal blocks of its tab.
+NUMBERS are those of the session's view before: a tab keeps its number,
+and a block its number in its tab, see `rexel--number-ids'."
+  (let ((tabs (alist-get 'windows view)))
+    (append
+     (rexel--number-ids (seq-map (lambda (tab) (alist-get 'window_id tab)) tabs)
+                        numbers)
+     (seq-mapcat (lambda (tab)
+                   (rexel--number-ids
+                    (mapcar (lambda (entry)
+                              (cons (alist-get 'window_id tab)
+                                    (alist-get 'block_id (car entry))))
+                            (rexel--tab-terminal-blocks tab))
+                    numbers))
+                 tabs))))
+
+(defun rexel--session-numbers (conn sid view)
+  "Return the numbers of the tabs and blocks of session SID's VIEW on CONN.
+See `rexel--view-numbers'."
+  (rexel--view-numbers
+   view (alist-get sid (rexel--conn-numbers conn) nil nil #'equal)))
+
+(defun rexel--view-block-names (view numbers)
   "Return the (BLOCK-ID . NAME) of every terminal block in VIEW.
 NAME is the label of the block's tab, or for a tab without one its
-number.  A tab's blocks after its first get their number too, as in 2.3."
-  (let ((names nil))
-    (seq-do-indexed
-     (lambda (tab i)
-       (let ((name (or (rexel--tab-label tab) (number-to-string (1+ i))))
-             (n 0))
-         (pcase-dolist (`(,block . ,_) (rexel--tab-terminal-blocks tab))
-           (push (cons (alist-get 'block_id block)
-                       (if (zerop n) name (format "%s.%d" name (1+ n))))
-                 names)
-           (cl-incf n))))
-     (alist-get 'windows view))
-    (nreverse names)))
+number in NUMBERS, those `rexel--view-numbers' returns for VIEW.  A
+block that is not number 1 in its tab gets its number too, as in 2.3."
+  (seq-mapcat
+   (lambda (tab)
+     (let ((name (or (rexel--tab-label tab)
+                     (number-to-string (rexel--tab-number numbers tab)))))
+       (mapcar (lambda (entry)
+                 (let* ((bid (alist-get 'block_id (car entry)))
+                        (n (cdr (assoc (cons (alist-get 'window_id tab) bid)
+                                       numbers))))
+                   (cons bid (if (eql n 1) name (format "%s.%d" name n)))))
+               (rexel--tab-terminal-blocks tab))))
+   (alist-get 'windows view)))
 
 (defun rexel--home-relative (dir home)
   "Return DIR with a leading HOME directory written as ~."
@@ -1164,19 +1225,20 @@ named by the base name of the first of its script, argv0 and name."
               (when cwd
                 (concat " in " (rexel--home-relative cwd (alist-get 'home process))))))))
 
-(defun rexel--attach-choices (view processes)
+(defun rexel--attach-choices (view processes numbers)
   "Return VIEW's terminal blocks and tabs as (NAME . CHOICE).
 CHOICE is (block . BLOCK-ID) or (tab . TAB).  PROCESSES maps block IDs
-to their `terminal.process' reports, which describe the blocks.  The
+to their `terminal.process' reports, which describe the blocks, and
+NUMBERS are the tabs' numbers, those of `rexel--view-numbers'.  The
 active tab's focused block comes first, the tabs last.  A block above its
 tab's layout is marked floating or minimized.  A name that repeats gets
 its block's ID or its tab's number appended."
   (let ((focused (alist-get 'focused_block_id (rexel--active-tab view)))
         blocks tabs)
     ;; Each entry is (NAME SUFFIX . CHOICE) until the names are unique.
-    (seq-do-indexed
-     (lambda (tab i)
-       (let ((name (rexel--tab-name view tab)))
+    (seq-do
+     (lambda (tab)
+       (let ((name (rexel--tab-name numbers tab)))
          (pcase-dolist (`(,block . ,layer) (rexel--tab-terminal-blocks tab))
            (let ((bid (alist-get 'block_id block)))
              (push `(,(format "%s: %s%s" name
@@ -1185,7 +1247,8 @@ its block's ID or its tab's number appended."
                               (rexel--layer-note layer))
                      ,(substring bid -6) block . ,bid)
                    blocks)))
-         (push `(,(format "Layout of %s" name) ,(number-to-string (1+ i))
+         (push `(,(format "Layout of %s" name)
+                 ,(number-to-string (rexel--tab-number numbers tab))
                  tab . ,tab)
                tabs)))
      (alist-get 'windows view))
@@ -1258,7 +1321,9 @@ the session is detached."
           (lambda ()
             (let ((choice (funcall rexel-read-choice-function
                                    "Rex block or layout: "
-                                   (rexel--attach-choices view processes)
+                                   (rexel--attach-choices
+                                    view processes
+                                    (rexel--session-numbers conn sid view))
                                    conn sid view)))
               (when (and choice (funcall attached))
                 (funcall callback choice))))))))))
@@ -1352,6 +1417,7 @@ Without a focused terminal block, pop to VIEW's first terminal block."
   (setf (alist-get sid (rexel--conn-refresh-timers conn) nil t #'equal) nil
         (alist-get sid (rexel--conn-sessions conn) nil t #'equal) nil
         (alist-get sid (rexel--conn-revisions conn) nil t #'equal) nil
+        (alist-get sid (rexel--conn-numbers conn) nil t #'equal) nil
         (rexel--conn-attaching conn) (delete sid (rexel--conn-attaching conn)))
   (mapc #'rexel--discard-buffer (rexel--session-buffers sid)))
 
@@ -1399,7 +1465,10 @@ already applied is ignored."
   (let ((revision (alist-get 'revision view))
         (applied (alist-get sid (rexel--conn-revisions conn) nil nil #'equal)))
     (unless (and applied revision (< revision applied))
-      (let ((names (rexel--view-block-names view)))
+      (let* ((numbers (rexel--session-numbers conn sid view))
+             (names (rexel--view-block-names view numbers)))
+        (setf (alist-get sid (rexel--conn-numbers conn) nil nil #'equal)
+              numbers)
         (setf (alist-get sid (rexel--conn-revisions conn) nil nil #'equal)
               revision)
         (setf (alist-get sid (rexel--conn-sessions conn) nil nil #'equal)
@@ -1415,18 +1484,15 @@ already applied is ignored."
                                       view rexel--block-id))
                   (force-mode-line-update))
               (rexel--discard-buffer buf))))
-        ;; Tabs that moved up trade names: the first pass frees the
-        ;; names the second one gives.
+        ;; Buffers that trade names: the first pass frees the names the
+        ;; second one gives.
         (dotimes (_ 2)
           (pcase-dolist (`(,bid . ,name) names)
             (when-let* ((buf (gethash bid (rexel--conn-blocks conn)))
-                        ((buffer-live-p buf))
-                        (name (rexel--buffer-name conn sid name)))
+                        ((buffer-live-p buf)))
               (with-current-buffer buf
-                ;; A name another buffer keeps is taken as NAME<2>.
-                (unless (equal (buffer-name)
-                               (generate-new-buffer-name name (buffer-name)))
-                  (rename-buffer name t))))))))))
+                (setq rexel--block-name name)
+                (ghostel-update-buffer-name)))))))))
 
 (defun rexel--annotation ()
   "Return the state of this block's stream unless it is live.
@@ -1438,12 +1504,29 @@ already applied is ignored."
 
 (defun rexel--buffer-name (conn sid name)
   "Return the buffer name for the block called NAME in session SID on CONN.
-NAME is the block's name in its tab, see `rexel--view-block-names', or
-the end of its ID."
+NAME is the block's name in its session, see `rexel--view-block-names',
+or the end of its ID."
   (format "*rex:%s%s:%s*"
           (or (alist-get sid (rexel--conn-sessions conn) nil nil #'equal) "?")
           (if (rexel--conn-host conn) (concat "@" (rexel--conn-host conn)) "")
           name))
+
+(defun rexel-buffer-name-by-tab (tab)
+  "Return \"*rex:SESSION@HOST:TAB*\" for this block buffer.
+SESSION is the label of its session and HOST that of its server, left
+out with its @ for the server found on this machine.  TAB is the name
+of the block in its session.  A `rexel-buffer-name-function'."
+  (rexel--buffer-name rexel--conn rexel--session-id tab))
+
+(defun rexel--name-buffer (_title)
+  "Return this block buffer's name by `rexel-buffer-name-function'.
+Return nil until a view named the block, without a connection, and for
+a result that is no name.  A `ghostel-buffer-name-function'."
+  (when (and rexel--block-name rexel--conn)
+    ;; An error would end the view being applied or the output being read.
+    (let ((name (with-demoted-errors "rexel: rexel-buffer-name-function: %S"
+                  (funcall rexel-buffer-name-function rexel--block-name))))
+      (and (stringp name) (not (string-empty-p name)) name))))
 
 (defun rexel--stale-block-buffer (bid)
   "Return a block buffer for BID whose stream ended, on any connection."
@@ -1490,7 +1573,8 @@ BUFFER-OR-NAME is as for `ghostel-make-terminal'."
           rexel--requested-size nil
           rexel--size-take nil
           rexel--close-on-kill 'unasked)
-    (setq-local ghostel-annotation-function #'rexel--annotation)
+    (setq-local ghostel-annotation-function #'rexel--annotation
+                ghostel-buffer-name-function #'rexel--name-buffer)
     ;; A directory the shell reports itself is put under the prefix
     ;; `default-directory' has.
     (when-let* ((prefix (rexel--conn-prefix conn))
@@ -2689,9 +2773,14 @@ opens a tab labelled TAB-LABEL with a shell in CWD."
    conn sid
    (lambda (view)
      (let* ((tabs (alist-get 'windows view))
+            (numbers (rexel--session-numbers conn sid view))
             (bid (cond ((integerp arg)
-                        (and (<= 1 arg (length tabs))
-                             (rexel--tab-block (elt tabs (1- arg)))))
+                        (when-let* ((tab (seq-find
+                                          (lambda (tab)
+                                            (eql arg (rexel--tab-number
+                                                      numbers tab)))
+                                          tabs)))
+                          (rexel--tab-block tab)))
                        (arg nil)
                        ((rexel--recent-block conn sid))
                        (t (rexel--view-focused-block view)))))
@@ -2869,13 +2958,15 @@ A tab is what the Rex API calls a window."
 
 (defun rexel--read-tab (conn sid view)
   "Let the user pick one of the tabs of session SID's VIEW on CONN; return it."
-  (cdr (funcall rexel-read-choice-function "Rex tab: "
-                (seq-map-indexed
-                 (lambda (tab i)
-                   (cons (format "%d: %s" (1+ i) (alist-get 'label tab))
-                         (cons 'tab tab)))
-                 (alist-get 'windows view))
-                conn sid view)))
+  (let ((numbers (rexel--session-numbers conn sid view)))
+    (cdr (funcall rexel-read-choice-function "Rex tab: "
+                  (seq-map
+                   (lambda (tab)
+                     (cons (format "%d: %s" (rexel--tab-number numbers tab)
+                                   (alist-get 'label tab))
+                           (cons 'tab tab)))
+                   (alist-get 'windows view))
+                  conn sid view))))
 
 (defun rexel--show-layout (conn sid layout blocks window)
   "Show LAYOUT's blocks of session SID on CONN in WINDOW, splitting it.
@@ -2937,15 +3028,20 @@ empty shows its focused block alone."
   (let ((layout (rexel--tab-windows tab))
         (window (seq-find (lambda (w) (not (window-parameter w 'window-side)))
                           (window-list nil 'no-mini))))
-    (if (null layout)
-        (message "rexel: Rex tab %s holds no terminal" (rexel--tab-name view tab))
+    (cond
+     ((null tab)
+      (message "rexel: Rex session %s has no terminal" (alist-get 'label view)))
+     ((null layout)
+      (message "rexel: Rex tab %s holds no terminal"
+               (rexel--tab-name (rexel--session-numbers conn sid view) tab)))
+     (t
       (delete-other-windows window)
       (set-window-dedicated-p window nil)
       (rexel--show-layout conn sid layout (rexel--view-terminal-blocks view) window)
       (when-let* ((buf (gethash (alist-get 'focused_block_id tab)
                                 (rexel--conn-blocks conn)))
                   (w (get-buffer-window buf)))
-        (select-window w)))))
+        (select-window w))))))
 
 (defun rexel-close-block ()
   "Close the current block on the server, ending its program."
