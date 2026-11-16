@@ -300,6 +300,10 @@ In a block buffer =C-c C-r= (=rexel-prefix-key=) prefixes:
 | ~x~        | ~rexel-close-block~, ends the program        |
 | ~d~        | ~rexel-detach~, keeps the session running    |
 
+Each key works with Control held too: =C-c C-r C-d= detaches like
+=C-c C-r d=.  Some terminals send no Control variant of ~2~, ~3~, ~=~, ~$~ or
+~RET~.
+
 A split or tab's shell starts in the directory of the current block's
 shell.
 

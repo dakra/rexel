@@ -1245,6 +1245,16 @@ A tab of one tiled block shows that block, whatever floats above it."
         (should-not (rexel--conn-sessions conn))
         (should (equal "session.detach" (alist-get 'method (car sent))))))))
 
+(ert-deftest rexel-test-prefix-map-control-keys ()
+  "Every key of `rexel-prefix-map' is bound with Control too."
+  (dolist (keys '(("d" "C-d") ("c" "C-c") ("x" "C-x") ("u" "C-u") ("3" "C-3")
+                  ("=" "C-=") ("$" "C-$") ("<left>" "C-<left>")
+                  ("RET" "C-<return>")))
+    (let ((command (lookup-key rexel-prefix-map (kbd (car keys)))))
+      (should (commandp command))
+      (should (eq command (lookup-key rexel-prefix-map (kbd (cadr keys)))))))
+  (should-not (lookup-key rexel-prefix-map [return])))
+
 (ert-deftest rexel-test-prefix-key-rebinds ()
   "Customizing `rexel-prefix-key' moves the prefix map, also to a key vector."
   (let ((rexel-block-mode-map (make-sparse-keymap))
