@@ -464,6 +464,21 @@ Nushell emits OSC 7 and 133 itself; see ghostel's README for its
 =ghostel.nu=.  Sourcing the scripts is harmless when the block is shown in
 Rex.app, which uses the directory report and ignores the rest.
 
+** ssh from a block
+
+A shell on another machine needs the integration there.  From a block
+whose shell sources ghostel's script as above, =ghostel ssh HOST= pushes
+the integration to HOST and loads it for that session, without touching
+HOST's rc files.  =ghostel ssh-install HOST= hooks HOST's rc files
+instead, so that a plain =ssh HOST= loads it too; see "Remote shell
+integration" in ghostel's README.
+
+That hook recognizes a Rex terminal by =TERM=xterm-rex=.  Rex gives its
+terminals that name once =rex terminfo setup= has run, and ssh passes it
+on only to hosts recorded with =rex terminfo host install HOST=, which
+installs Rex's terminfo entry there; other hosts receive
+=xterm-256color=.  =rex terminfo status= shows what a new terminal gets.
+
 * For other packages
 
 A package finds the block buffers, and what each of them shows, with the
