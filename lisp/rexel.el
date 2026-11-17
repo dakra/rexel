@@ -3133,6 +3133,38 @@ Each key is also bound with Control.")
     map)
   "Keymap of `rexel-block-mode'; binds `rexel-prefix-key'.")
 
+(easy-menu-define rexel-menu rexel-block-mode-map
+  "Menu for `rexel-block-mode'."
+  '("Rex"
+    ("Split"
+     ["Where It Fits" rexel-split]
+     ["Right" rexel-split-right]
+     ["Below" rexel-split-below]
+     ["Left" rexel-split-left]
+     ["Above" rexel-split-above])
+    ["New Tab" rexel-new-tab]
+    ["Sync Layout" rexel-sync-layout
+     :help "Lay out the tab's blocks in windows as Rex shows them"]
+    ["Close Block" rexel-close-block :help "End the block's program"]
+    "--"
+    ["Attach to Session..." rexel-attach]
+    ["New Session..." rexel-new-session]
+    ["Rename Session..." rexel-rename-session]
+    ["Detach" rexel-detach :help "Kill the buffers, keep the session running"]
+    "--"
+    ["Upload File..." rexel-upload-file]
+    ["Cancel Upload" rexel-cancel-upload
+     :active (or rexel--uploads rexel--upload-queue)]
+    ["Download File..." rexel-download-file]
+    ["Cancel Download" rexel-cancel-download :active rexel--downloads]
+    "--"
+    ["Forward Port..." rexel-port-forward
+     :help "Forward a port of the block's machine to this one"]
+    ["Forward Port of This Machine..." rexel-port-forward-reverse]
+    ["Close Forward..." rexel-port-forward-close :active rexel--forwards]
+    "--"
+    ["Customize" (customize-group 'rexel)]))
+
 (define-minor-mode rexel-block-mode
   "Minor mode of ghostel buffers showing a Rex block."
   :lighter " Rex"
