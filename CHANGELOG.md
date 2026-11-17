@@ -4,12 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-11-17
+
 ### Added
+- `rexel-port-forward` (`C-c C-r f`) forwards a port of the machine a
+  block runs on to a port of this one, for servers on other machines.
+  A block that listens on one port has that port forwarded, with
+  several the command reads one, and without any or with a prefix
+  argument it reads a port, a `host:port` or a URL.  The forward
+  listens on 127.0.0.1, on the same port when that is free, and its URL
+  is shown and put in the kill ring.
+- `rexel-port-forward-reverse` (`C-c C-r F`) forwards a port of this
+  machine, or a `host:port` this machine reaches, to a port of the
+  machine a block runs on.  The server listens on 127.0.0.1 there, on
+  the same port when that is free.
+- `rexel-port-forward-close` closes a forward of either direction.
+- A link to localhost in a block buffer opens through a forward of its
+  port, made when needed; `rexel-port-forward-links` turns that off.
+- A port a block starts to listen on is named in the echo area, or
+  forwarded with `rexel-port-forward-new-ports` set to `t`.
+- A forward whose block stops listening on its port closes, and opens
+  again on the same local port once the block listens again;
+  `rexel-port-forward-when-port-closes` can be `close` or `keep`
+  instead.
+- Each key of the prefix map works with Control held too: `C-c C-r C-d`
+  detaches like `C-c C-r d`.
 - `rexel-buffer-name-function` names the block buffers.  It is called
   with the name of a block in its session when that name, the session's
   label or the terminal's title or directory changes.
 
 ### Changed
+- Requires Rex 0.1.0-preview.20 or later, for its API revision 16.
+- Requires ghostel 0.66.0.
 - A tab and a block keep their numbers: closing a tab no longer
   renumbers the buffers of the tabs after it, and a new tab takes the
   lowest number left.  `C-u N M-x rexel` and the prompts for a tab

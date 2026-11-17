@@ -4,7 +4,7 @@
 
 ;; Author: Daniel Kraus <daniel@kraus.my>
 ;; URL: https://github.com/dakra/rexel
-;; Version: 0.5.0
+;; Version: 0.6.0
 ;; Package-Requires: ((emacs "28.1") (ghostel "0.66.0") (websocket "1.15"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
