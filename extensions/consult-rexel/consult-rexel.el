@@ -451,12 +451,21 @@ NORECORD is passed on to `pop-to-buffer'."
   (pop-to-buffer buffer rexel--same-window norecord))
 
 (defun consult-rexel--sources (sources)
-  "Return SOURCES with each function replaced by the sources it returns."
-  (mapcan (lambda (source)
-            (if (and (symbolp source) (not (boundp source)) (fboundp source))
-                (copy-sequence (funcall source))
-              (list source)))
-          sources))
+  "Return SOURCES with each function replaced by the sources it returns.
+The sources that offer a new ghostel terminal come last."
+  (let* ((all (mapcan (lambda (source)
+                        (if (and (symbolp source) (not (boundp source))
+                                 (fboundp source))
+                            (copy-sequence (funcall source))
+                          (list source)))
+                      sources))
+         (new (seq-filter
+               (lambda (source)
+                 (eq 'ghostel-new
+                     (plist-get (if (symbolp source) (symbol-value source) source)
+                                :category)))
+               all)))
+    (append (seq-difference all new #'eq) new)))
 
 ;;;###autoload
 (defun consult-rexel (&optional arg)

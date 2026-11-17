@@ -474,11 +474,17 @@ A spec is (VAR CONN SESSION-ID); the buffers are made in that order."
       (let* ((consult-ghostel-project-sources
               `(( :name "Ghostel (Project)" :new ignore
                   :items ,(lambda () (list (cons "a" mine) (cons "b" other)
-                                           "plain")))))
+                                           "plain")))
+                ( :name "New" :category ghostel-new
+                  :items ("Create a new project Ghostel terminal"))))
              (sources (consult--multi-enabled-sources
                        (consult-rexel--sources consult-rexel-project-sources))))
-        (should (equal '("proj" "Ghostel (Project)" "New")
-                       (mapcar (lambda (s) (plist-get s :name)) sources)))
+        (should (equal '(("proj" . buffer) ("Ghostel (Project)" . nil)
+                         ("New" . rexel-new) ("New" . ghostel-new))
+                       (mapcar (lambda (s)
+                                 (cons (plist-get s :name)
+                                       (plist-get s :category)))
+                               sources)))
         (should (equal '("plain")
                        (funcall (plist-get (aref sources 1) :items))))
         (cl-letf (((symbol-function 'rexel--open-session)
