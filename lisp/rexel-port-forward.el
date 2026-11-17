@@ -9,9 +9,13 @@
 ;; `rexel-port-forward' listens on a local port and relays each
 ;; connection to it through a tunnel block: a block without a view that
 ;; the server keeps in the session and that connects to the target for
-;; every data stream its owner opens.  The server lists the ports the
-;; programs of a terminal listen on and says when they change;
-;; `rexel-port-forward-new-ports' and
+;; every data stream its owner opens.  `rexel-port-forward-reverse'
+;; forwards the other way: its tunnel block listens on a port of the
+;; server's machine and has its owner open a data stream for every
+;; connection, which rexel relays to a target this machine reaches.
+;;
+;; The server lists the ports the programs of a terminal listen on and
+;; says when they change; `rexel-port-forward-new-ports' and
 ;; `rexel-port-forward-when-port-closes' say what follows from that.  A
 ;; link to localhost in a block buffer opens through a forward, see
 ;; `rexel-port-forward-links'.  rexel.el loads this file.
@@ -33,6 +37,7 @@
 
 (declare-function rexel--conn-host "rexel" (cl-x) t)
 (declare-function rexel--conn-attaching "rexel" (cl-x) t)
+(declare-function rexel--conn-client-id "rexel" (cl-x) t)
 (declare-function rexel--conn-name "rexel" (conn))
 (declare-function rexel--ready-p "rexel" (conn))
 (declare-function rexel--request "rexel" (conn method payload &optional callback))
@@ -81,33 +86,39 @@ server on another machine forwards the link's port, as
 
 (cl-defstruct (rexel--forward (:constructor rexel--make-forward) (:copier nil))
   "A local port forwarded to PORT on HOST, as the server of CONN reaches it.
-BUFFER is the block buffer it was opened from and SESSION that block's
-session, which holds the tunnel block BLOCK, nil until the server made
-it.  MAKING is the mark of the request for BLOCK while it is unanswered,
-THEN what to call once a forward closed meanwhile has closed the block
-it gets, and TAKING non-nil while BLOCK is taken back after a redial.
-LISTENER is the process listening on LOCAL-PORT and RELAYS are the
-connections it accepted."
-  buffer conn session host port listener local-port block making then taking
-  relays)
+With REVERSE it is a port of the server's machine, forwarded to PORT on
+HOST as this machine reaches it.  BUFFER is the block buffer it was
+opened from and SESSION that block's session, which holds the tunnel
+block BLOCK, nil until the server made it.  MAKING is the mark of the
+request for BLOCK while it is unanswered, THEN what to call once a
+forward closed meanwhile has closed the block it gets, and TAKING
+non-nil while BLOCK is taken back after a redial.  LISTENER is the
+process listening on LISTEN-PORT and RELAYS are the connections it
+accepted.  A reverse forward has no LISTENER: BLOCK listens on
+LISTEN-PORT, nil until the server said that it does."
+  buffer conn session reverse host port listener listen-port block making then
+  taking relays)
 
 (cl-defstruct (rexel--relay (:constructor rexel--make-relay) (:copier nil))
-  "One connection to the local port of FORWARD, relayed over a data stream.
+  "One connection to the port of FORWARD, relayed over a data stream.
 CLIENT is the process of the local connection and WS the WebSocket of
-the stream.  STATE is nil until the tunnel block exists, `begin' while
+the stream.  A reverse forward makes CLIENT, to its target, for the
+connection REF that its tunnel block accepted; CLIENT is nil when that
+failed.  STATE is nil until the tunnel block exists, `begin' while
 the ticket is requested, `welcome' until the server answers the HELLO,
 then `open' and at last `closed'.  OUT holds what waits to be written to
 the stream and IN what waits for CLIENT, oldest first, each item bytes
 or the symbol `eof'.  BACKLOG is the bytes CLIENT sent that are not
 written yet.  BUSY has `out' or `in' while that side is written or a
 timer is about to write it."
-  forward client ws state out in (backlog 0) busy)
+  forward client ref ws state out in (backlog 0) busy)
 
 (defconst rexel--relay-backlog-bytes (* 1024 1024)
   "Bytes a relay holds for its stream before it stops reading its connection.")
 
 (defconst rexel--relays-max 100
   "Connections a forward relays at a time; one more is refused.
+A reverse forward leaves it unanswered, and the server resets it.
 A forward whose target is its own local port, as one to a free port of a
 server on this machine is, would relay each connection into the next.")
 
@@ -124,17 +135,26 @@ One is opened again when the block listens on its port again.")
 (defconst rexel--loopback-addresses '("127.0.0.1" "::1" "0.0.0.0" "::")
   "Addresses a port is bound to when the machine's localhost reaches it.")
 
-(defun rexel--forward-find (conn host port)
-  "Return the forward to PORT on HOST through CONN, or nil."
+(defun rexel--forward-find (conn host port &optional reverse)
+  "Return the forward to PORT on HOST through CONN, or nil.
+With REVERSE it is the reverse forward to there."
   (seq-find (lambda (forward)
               (and (eq conn (rexel--forward-conn forward))
                    (eql port (rexel--forward-port forward))
-                   (equal host (rexel--forward-host forward))))
+                   (equal host (rexel--forward-host forward))
+                   (eq (not reverse) (not (rexel--forward-reverse forward)))))
+            rexel--forwards))
+
+(defun rexel--forward-of-block (conn bid)
+  "Return the forward on CONN whose tunnel block is BID, or nil."
+  (seq-find (lambda (forward)
+              (and (eq conn (rexel--forward-conn forward))
+                   (equal bid (rexel--forward-block forward))))
             rexel--forwards))
 
 (defun rexel--forward-url (forward)
-  "Return the URL of the local port of FORWARD."
-  (format "http://localhost:%d/" (rexel--forward-local-port forward)))
+  "Return the URL of the port FORWARD listens on, on the machine it does."
+  (format "http://localhost:%d/" (rexel--forward-listen-port forward)))
 
 (defun rexel--forward-target (forward)
   "Return the target of FORWARD as \"port N\", or \"HOST:N\" on another host."
@@ -142,24 +162,47 @@ One is opened again when the block listens on its port again.")
       (format "port %d" (rexel--forward-port forward))
     (format "%s:%d" (rexel--forward-host forward) (rexel--forward-port forward))))
 
-(defun rexel--forward-describe (forward)
-  "Return a line saying what FORWARD forwards."
-  (format "%s forwards to %s on %s"
-          (rexel--forward-url forward) (rexel--forward-target forward)
+(defun rexel--forward-remote (forward)
+  "Return the end of FORWARD on its server's machine, as \"port N on NAME\".
+It is the target, or the port a reverse forward listens on."
+  (format "%s on %s"
+          (cond ((not (rexel--forward-reverse forward))
+                 (rexel--forward-target forward))
+                ((rexel--forward-listen-port forward)
+                 (format "port %d" (rexel--forward-listen-port forward)))
+                (t "a port"))
           (rexel--conn-name (rexel--forward-conn forward))))
 
-(defun rexel--forward-label (forward)
-  "Return the label of the tunnel block of FORWARD.
+(defun rexel--forward-name (forward)
+  "Return what a message calls FORWARD, as \"forward to port N on NAME\"."
+  (format (if (rexel--forward-reverse forward)
+              "reverse forward from %s"
+            "forward to %s")
+          (rexel--forward-remote forward)))
+
+(defun rexel--forward-describe (forward)
+  "Return a line saying what FORWARD forwards."
+  (if (rexel--forward-reverse forward)
+      (format "%s forwards to %s%s" (rexel--forward-remote forward)
+              (rexel--forward-target forward)
+              (if (equal (rexel--forward-host forward) "localhost") " here" ""))
+    (format "%s forwards to %s"
+            (rexel--forward-url forward) (rexel--forward-remote forward))))
+
+(defun rexel--forward-label (forward port)
+  "Return the label of the tunnel block of FORWARD, which listens on PORT.
+It reads as the argument of ssh's -L, and after -R for a reverse forward.
 `rexel--forward-close-leftovers' knows a block of rexel by its start."
-  (format "rexel %d:%s:%d" (rexel--forward-local-port forward)
-          (rexel--forward-host forward) (rexel--forward-port forward)))
+  (format "rexel %s%d:%s:%d" (if (rexel--forward-reverse forward) "-R " "")
+          port (rexel--forward-host forward) (rexel--forward-port forward)))
 
 (defun rexel--forward-port-free-p (port)
   "Return non-nil if nothing accepts connections on PORT of this machine."
   (not (or
         ;; A forward would relay a connection to its port.
         (seq-some (lambda (forward)
-                    (eql port (rexel--forward-local-port forward)))
+                    (and (not (rexel--forward-reverse forward))
+                         (eql port (rexel--forward-listen-port forward))))
                   rexel--forwards)
         ;; Emacs binds with SO_REUSEADDR: a listener on 127.0.0.1 takes the
         ;; connections of one on every address, and a program on ::1 alone
@@ -188,41 +231,55 @@ It listens on port PREFERRED, or on a free port when that one is taken."
              (ignore-errors (listen preferred)))
         (listen t))))
 
-(defun rexel--forward-open (host port &optional local)
+(defun rexel--forward-open (host port &optional local reverse)
   "Forward a port of this machine to PORT on HOST; return the forward.
 HOST is as the server of this buffer's block reaches it.  The local port
-is LOCAL, by default PORT, or a free one when that is taken.  A forward
-the connection has to the target already is returned as it is."
-  (or (rexel--forward-find rexel--conn host port)
-      (let* ((forward (rexel--make-forward
-                       :buffer (current-buffer) :conn rexel--conn
-                       :session rexel--session-id :host host :port port))
-             (listener (rexel--forward-listen forward (or local port))))
-        (setf (rexel--forward-listener forward) listener
-              (rexel--forward-local-port forward)
-              (process-contact listener :service))
+is LOCAL, by default PORT, or a free one when that is taken.  With
+REVERSE, forward a port of the server's machine to PORT on HOST as this
+machine reaches it.  A forward the connection has to the target already
+is returned as it is."
+  (or (rexel--forward-find rexel--conn host port reverse)
+      (let ((forward (rexel--make-forward
+                      :buffer (current-buffer) :conn rexel--conn
+                      :session rexel--session-id :reverse reverse
+                      :host host :port port)))
+        (unless reverse
+          (let ((listener (rexel--forward-listen forward (or local port))))
+            (setf (rexel--forward-listener forward) listener
+                  (rexel--forward-listen-port forward)
+                  (process-contact listener :service))))
         (push forward rexel--forwards)
         (rexel--forward-make-block forward)
         forward)))
 
-(defun rexel--forward-make-block (forward)
+(defun rexel--forward-make-block (forward &optional any-port)
   "Have the server make the tunnel block of FORWARD.
-The connections accepted meanwhile are relayed once it exists."
-  (let ((conn (rexel--forward-conn forward))
-        (sid (rexel--forward-session forward))
-        (mark (list nil)))
+The connections accepted meanwhile are relayed once it exists.  The
+block of a reverse forward listens on 127.0.0.1, on the port the forward
+had or else its target's number, and on one the server picks when that
+is taken or with ANY-PORT."
+  (let* ((conn (rexel--forward-conn forward))
+         (sid (rexel--forward-session forward))
+         (reverse (rexel--forward-reverse forward))
+         (host (rexel--forward-host forward))
+         (port (rexel--forward-port forward))
+         (listen (cond ((not reverse) (rexel--forward-listen-port forward))
+                       (any-port 0)
+                       (t (or (rexel--forward-listen-port forward) port))))
+         (mark (list nil)))
     (setf (rexel--forward-block forward) nil
           (rexel--forward-taking forward) nil
           (rexel--forward-making forward) mark)
     (rexel--request
      conn "session.new_block"
      `((session_id . ,sid)
-       (flavor . ,(concat rexel--tunnel-creator ".dial"))
-       (options . ((host . ,(rexel--forward-host forward))
-                   (port . ,(rexel--forward-port forward))
-                   (client_address
-                    . ,(format "127.0.0.1:%d" (rexel--forward-local-port forward)))))
-       (label . ,(rexel--forward-label forward)))
+       (flavor . ,(concat rexel--tunnel-creator (if reverse ".listen" ".dial")))
+       (options . ,(if reverse
+                       `((port . ,listen)
+                         (client_target . ,(format "%s:%d" host port)))
+                     `((host . ,host) (port . ,port)
+                       (client_address . ,(format "127.0.0.1:%d" listen)))))
+       (label . ,(rexel--forward-label forward listen)))
      (lambda (result err)
        (let ((bid (alist-get 'block_id result))
              (current (eq mark (rexel--forward-making forward))))
@@ -235,13 +292,43 @@ The connections accepted meanwhile are relayed once it exists."
                             (cl-shiftf (rexel--forward-then forward) nil))))
              (cond (bid (rexel--forward-close-block conn sid bid then))
                    (then (funcall then)))))
+          ;; The port is taken on the server's machine.
+          ((and reverse (not any-port) (equal (alist-get 'code err) "conflict"))
+           (rexel--forward-make-block forward t))
           (err
-           (message "rexel: cannot forward to %s: %s"
-                    (rexel--forward-target forward) (rexel--error-string err))
+           (message "rexel: cannot open the %s: %s"
+                    (rexel--forward-name forward) (rexel--error-string err))
            (rexel--forward-close forward))
           (t
            (setf (rexel--forward-block forward) bid)
-           (rexel--forward-start-relays forward))))))))
+           (rexel--forward-start-relays forward)
+           (when reverse
+             (if any-port
+                 (rexel--forward-ask-port forward)
+               (rexel--forward-listens forward listen))))))))))
+
+(defun rexel--forward-ask-port (forward)
+  "Ask the server for the port the block of the reverse FORWARD listens on."
+  (let ((bid (rexel--forward-block forward)))
+    (rexel--request
+     (rexel--forward-conn forward) (concat rexel--tunnel-creator ".info")
+     `((session_id . ,(rexel--forward-session forward)) (block_id . ,bid))
+     (lambda (result err)
+       (when (and (memq forward rexel--forwards)
+                  (equal bid (rexel--forward-block forward)))
+         (let ((address (alist-get 'address result)))
+           (if (and address (string-match ":\\([0-9]+\\)\\'" address))
+               (rexel--forward-listens
+                forward (string-to-number (match-string 1 address)))
+             (message "rexel: cannot open the %s: %s" (rexel--forward-name forward)
+                      (if err (rexel--error-string err) "the server names no port"))
+             (rexel--forward-close forward))))))))
+
+(defun rexel--forward-listens (forward port)
+  "Note that the block of the reverse FORWARD listens on PORT.
+Show the forward when it did not before."
+  (unless (eql port (cl-shiftf (rexel--forward-listen-port forward) port))
+    (rexel--forward-show forward)))
 
 (defun rexel--forward-ready-p (forward)
   "Return non-nil when a stream of FORWARD can be opened.
@@ -315,15 +402,11 @@ still being made is closed when it arrives, and THEN called after that."
 
 (defun rexel--forward-block-closed (conn bid)
   "Close the forward on CONN whose tunnel block BID closed on the server."
-  (when-let* ((forward (seq-find
-                        (lambda (forward)
-                          (and (eq conn (rexel--forward-conn forward))
-                               (equal bid (rexel--forward-block forward))))
-                        rexel--forwards)))
+  (when-let* ((forward (rexel--forward-of-block conn bid)))
     (setf (rexel--forward-block forward) nil)
     (rexel--forward-close forward)
-    (message "rexel: the forward to %s on %s was closed on the server"
-             (rexel--forward-target forward) (rexel--conn-name conn))))
+    (message "rexel: the %s was closed on the server"
+             (rexel--forward-name forward))))
 
 (defun rexel--forwards-resume (conn sid)
   "Take back the tunnel blocks of session SID on CONN after a redial.
@@ -346,10 +429,14 @@ relays whose ticket was requested on the dropped connection ask again."
              (when (and (memq forward rexel--forwards)
                         (equal bid (rexel--forward-block forward)))
                (setf (rexel--forward-taking forward) nil)
-               (if (not err)
-                   (rexel--forward-start-relays forward)
-                 (rexel--forward-close-block conn sid bid)
-                 (rexel--forward-make-block forward))))))
+               (if err
+                   (progn (rexel--forward-close-block conn sid bid)
+                          (rexel--forward-make-block forward))
+                 (rexel--forward-start-relays forward)
+                 ;; The answer naming its port went with the connection.
+                 (when (and (rexel--forward-reverse forward)
+                            (not (rexel--forward-listen-port forward)))
+                   (rexel--forward-ask-port forward)))))))
       (rexel--forward-make-block forward))))
 
 (defun rexel--forward-close-leftovers (conn sid)
@@ -405,12 +492,15 @@ that otherwise.  A connection to a forward that closed, or that relays
 
 (defun rexel--relay-sentinel (process _change)
   "Start the relay of an accepted PROCESS and end the one of a closed one.
-Emacs closes a connection whose peer ends its side, so what the target
-still sends then is lost."
+A connection made for a reverse forward gets what waited for it to open.
+Emacs closes a connection whose peer ends its side, so what the other
+side of the stream still sends then is lost."
   (when-let* ((forward (process-get process :forward))
               ((not (eq process (rexel--forward-listener forward)))))
     (if (process-live-p process)
-        (rexel--relay-of process)
+        (when-let* ((relay (rexel--relay-of process))
+                    ((rexel--relay-in relay)))
+          (rexel--relay-later relay 'in))
       (when-let* ((relay (process-get process :relay)))
         (rexel--relay-queue relay 'out 'eof)))))
 
@@ -425,6 +515,36 @@ far ahead of its stream is not read until the stream has caught up."
     (apply #'rexel--relay-queue relay 'out
            (seq-partition bytes rexel--upload-chunk-bytes))))
 
+(defun rexel--forward-requested (conn bid event)
+  "Relay the connection the tunnel block BID on CONN accepted to its target.
+EVENT is the payload of the block's `connection_requested' event.
+One that names another client is ignored."
+  (when-let* ((forward (rexel--forward-of-block conn bid))
+              ;; Every client of the session gets the event, and only the one it
+              ;; names may open the connection's stream.
+              ((equal (alist-get 'client event) (rexel--conn-client-id conn)))
+              ((< (length (rexel--forward-relays forward)) rexel--relays-max)))
+    (let ((relay (rexel--make-relay :forward forward
+                                    :ref (alist-get 'ref event))))
+      (push relay (rexel--forward-relays forward))
+      (setf (rexel--relay-client relay)
+            (ignore-errors
+              (make-network-process
+               :name (format "rexel forward %s:%d" (rexel--forward-host forward)
+                             (rexel--forward-port forward))
+               :host (rexel--forward-host forward)
+               :service (rexel--forward-port forward)
+               :nowait t :coding 'binary :noquery t
+               :plist (list :forward forward :relay relay)
+               :filter #'rexel--relay-filter
+               :sentinel #'rexel--relay-sentinel)))
+      ;; The server resets a connection whose stream is not opened within
+      ;; 30 s, so the stream does not wait for the target.  One to a target
+      ;; that cannot be reached is opened too, and ended at once.
+      (rexel--relay-start relay)
+      (unless (rexel--relay-client relay)
+        (rexel--relay-queue relay 'out 'eof)))))
+
 (defun rexel--relay-start (relay)
   "Ask for the data stream of RELAY and connect it."
   (let ((forward (rexel--relay-forward relay)))
@@ -434,14 +554,15 @@ far ahead of its stream is not read until the stream has caught up."
          (rexel--forward-conn forward) "data.connect"
          `((session_id . ,(rexel--forward-session forward))
            (block_id . ,(rexel--forward-block forward))
-           (data_ref_id . ,(concat "conn:" (rexel--uuid)))
+           (data_ref_id . ,(or (rexel--relay-ref relay)
+                               (concat "conn:" (rexel--uuid))))
            (subprotocol . "rex.data.bytes.v1"))
          (lambda (result err)
            (cond
             ((eq (rexel--relay-state relay) 'closed))
             (err
-             (message "rexel: forward to %s: %s"
-                      (rexel--forward-target forward) (rexel--error-string err))
+             (message "rexel: %s: %s"
+                      (rexel--forward-name forward) (rexel--error-string err))
              (rexel--relay-close relay))
             (t
              (condition-case nil
@@ -463,7 +584,7 @@ far ahead of its stream is not read until the stream has caught up."
 (defun rexel--on-relay-message (relay bytes)
   "Handle BYTES, one message of the data stream of RELAY.
 After the WELCOME every message is for the local connection, and an
-empty one says that the target sends no more."
+empty one says that the other side sends no more."
   (pcase (rexel--relay-state relay)
     ('welcome
      (if (eq (rexel--handshake bytes) 'welcome)
@@ -541,12 +662,19 @@ socket.  At `eof' the local connection is gone, and the stream is ended."
           (when (rexel--relay-out relay)
             (rexel--relay-later relay 'out (rexel--upload-pause process))))))))
 
+(defun rexel--relay-connecting-p (relay)
+  "Return non-nil while the local connection of RELAY is being made."
+  (when-let* ((client (rexel--relay-client relay)))
+    (eq (process-status client) 'connect)))
+
 (defun rexel--relay-deliver (relay)
   "Write the items queued for the local connection of RELAY, oldest first.
 At `eof' the connection is told that no more follows; it stays open for
-what it still sends."
+what it still sends.  A connection that is still being made takes
+nothing yet."
   (when (and (eq (rexel--relay-state relay) 'open)
-             (not (memq 'in (rexel--relay-busy relay))))
+             (not (memq 'in (rexel--relay-busy relay)))
+             (not (rexel--relay-connecting-p relay)))
     (let* ((client (rexel--relay-client relay))
            (stream (websocket-conn (rexel--relay-ws relay)))
            (filter (process-filter stream))
@@ -677,11 +805,12 @@ in it, as `rexel-port-forward-when-port-closes' and
         (dolist (forward (rexel--buffer-forwards (current-buffer)))
           (let ((port (rexel--forward-port forward))
                 (host (rexel--forward-host forward)))
-            (when (and (equal host (nth 1 (assq port old)))
+            (when (and (not (rexel--forward-reverse forward))
+                       (equal host (nth 1 (assq port old)))
                        (not (equal host (nth 1 (assq port ports)))))
               (when (eq rexel-port-forward-when-port-closes 'remember)
                 (setf (alist-get port rexel--forward-remembered)
-                      (rexel--forward-local-port forward)))
+                      (rexel--forward-listen-port forward)))
               (rexel--forward-close forward)
               (message "rexel: %s: port %d closed, and its forward"
                        (buffer-name) port)))))
@@ -726,7 +855,7 @@ first and open the link on the local port; see `rexel-port-forward-links'."
            (forward (rexel--forward-open "localhost" (url-port parsed))))
       (unless (member (url-host parsed) '("localhost" "127.0.0.1"))
         (setf (url-host parsed) "127.0.0.1"))
-      (setf (url-portspec parsed) (rexel--forward-local-port forward))
+      (setf (url-portspec parsed) (rexel--forward-listen-port forward))
       (setq url (url-recreate-url parsed))
       (message "rexel: %s" (rexel--forward-describe forward))))
   (let ((browse-url-handlers (remq rexel--forward-handler browse-url-handlers)))
@@ -762,11 +891,15 @@ A port alone, and a name or address of the machine itself, give the host
       (cons (if (member host rexel--loopback-addresses) "localhost" host)
             port))))
 
-(defun rexel--forward-read-target ()
-  "Read the target of a forward on this block's server; return (HOST . PORT)."
+(defun rexel--forward-read-target (&optional reverse)
+  "Read the target of a forward on this block's server; return (HOST . PORT).
+With REVERSE, read the target of a reverse forward from there."
   (let ((string (string-trim
-                 (read-string (format "Forward port, host:port or URL on %s: "
-                                      (rexel--conn-name rexel--conn))))))
+                 (read-string
+                  (format (if reverse
+                              "Forward from %s to port, host:port or URL: "
+                            "Forward port, host:port or URL on %s: ")
+                          (rexel--conn-name rexel--conn))))))
     (or (rexel--forward-parse-target string)
         (user-error "Not a port, a host:port or a URL: %s" string))))
 
@@ -839,8 +972,30 @@ listening on the port."
   (when (member rexel--session-id (rexel--conn-attaching rexel--conn))
     (user-error "The session is still being reattached")))
 
+(defun rexel-port-forward-reverse (port &optional host)
+  "Forward PORT of this machine to a port of the current block's machine.
+HOST is another host this machine reaches PORT on.  Interactively, read
+a port, a HOST:PORT or a URL.
+
+The block's server listens on the same port of its machine, or on
+another one when that is taken, and Emacs connects each connection to
+PORT.  The server listens on 127.0.0.1, where every user and program of
+its machine reaches the port.  The port's URL there is shown and put in
+the kill ring.  The forward ends with `rexel-port-forward-close' and
+with its block."
+  (interactive
+   (progn
+     (rexel--forward-ensure-context)
+     (let ((target (rexel--forward-read-target t)))
+       (list (cdr target) (car target)))))
+  (rexel--forward-ensure-context)
+  (let ((forward (rexel--forward-open (or host "localhost") port nil t)))
+    ;; A new one is shown once the server says where it listens.
+    (when (rexel--forward-listen-port forward)
+      (rexel--forward-show forward))))
+
 (defun rexel-port-forward-close (forward)
-  "Close FORWARD, a forward of `rexel-port-forward'.
+  "Close FORWARD, one of `rexel-port-forward' or `rexel-port-forward-reverse'.
 Interactively, read one of the open forwards.
 Only one is closed without asking."
   (interactive
@@ -851,9 +1006,7 @@ Only one is closed without asking."
                       rexel--forwards)
               (user-error "No port is forwarded")))))
   (rexel--forward-close forward)
-  (message "rexel: closed the forward to %s on %s"
-           (rexel--forward-target forward)
-           (rexel--conn-name (rexel--forward-conn forward))))
+  (message "rexel: closed the %s" (rexel--forward-name forward)))
 
 (provide 'rexel-port-forward)
 ;;; rexel-port-forward.el ends here

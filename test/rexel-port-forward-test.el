@@ -215,7 +215,7 @@ Return the entry of `rexel-test--opened' for the connection this opens."
                      (alist-get 'options payload)))
       (should (equal (format "rexel %d:localhost:%d" port port)
                      (alist-get 'label payload)))
-      (should (= port (rexel--forward-local-port forward)))
+      (should (= port (rexel--forward-listen-port forward)))
       (should (process-live-p (rexel--forward-listener forward)))
       (should-not (rexel--forward-block forward))
       ;; The target has one forward.
@@ -232,7 +232,7 @@ Return the entry of `rexel-test--opened' for the connection this opens."
            (port (process-contact holder :service)))
       (unwind-protect
           (let ((forward (rexel--forward-open "localhost" port)))
-            (should-not (= port (rexel--forward-local-port forward)))
+            (should-not (= port (rexel--forward-listen-port forward)))
             (should (equal port (alist-get 'port (alist-get 'options
                                                              (alist-get 'payload (car sent)))))))
         (delete-process holder)))))
@@ -265,7 +265,7 @@ Return the entry of `rexel-test--opened' for the connection this opens."
   (rexel-test--with-forwards sent buf
     (let ((forward (rexel--forward-open "localhost" (rexel-test--free-port))))
       (rexel-test--tunnel rexel--conn sent)
-      (should-not (rexel--forward-port-free-p (rexel--forward-local-port forward)))
+      (should-not (rexel--forward-port-free-p (rexel--forward-listen-port forward)))
       (dotimes (_ 5) (accept-process-output nil 0.01))
       (should-not (rexel--forward-relays forward))
       (should-not (rexel-test--find "data.connect" sent)))))
@@ -482,7 +482,7 @@ Return the entry of `rexel-test--opened' for the connection this opens."
   (rexel-test--with-forwards sent buf
     (let* ((conn rexel--conn)
            (forward (rexel--forward-open "localhost" (rexel-test--free-port)))
-           (client (rexel-test--client (rexel--forward-local-port forward))))
+           (client (rexel-test--client (rexel--forward-listen-port forward))))
       (process-send-string client "early ")
       (rexel-test--until (lambda () (rexel--forward-relays forward)))
       ;; Nothing is asked for before the tunnel block exists.
@@ -523,7 +523,7 @@ Return the entry of `rexel-test--opened' for the connection this opens."
   (rexel-test--with-forwards sent buf
     (let* ((conn rexel--conn)
            (forward (rexel--forward-open "localhost" (rexel-test--free-port)))
-           (client (rexel-test--client (rexel--forward-local-port forward)))
+           (client (rexel-test--client (rexel--forward-listen-port forward)))
            (bytes (apply #'unibyte-string
                          (mapcar (lambda (i) (% i 251)) (number-sequence 1 10000)))))
       (rexel-test--tunnel conn sent)
@@ -543,7 +543,7 @@ Return the entry of `rexel-test--opened' for the connection this opens."
   (rexel-test--with-forwards sent buf
     (let* ((conn rexel--conn)
            (forward (rexel--forward-open "localhost" (rexel-test--free-port)))
-           (client (rexel-test--client (rexel--forward-local-port forward))))
+           (client (rexel-test--client (rexel--forward-listen-port forward))))
       (process-send-string client "one shot")
       (rexel-test--until (lambda () (rexel--forward-relays forward)))
       (rexel-test--until
@@ -565,7 +565,7 @@ Return the entry of `rexel-test--opened' for the connection this opens."
     (rexel-test--with-forwards sent buf
       (let* ((conn rexel--conn)
              (forward (rexel--forward-open "localhost" (rexel-test--free-port)))
-             (client (rexel-test--client (rexel--forward-local-port forward))))
+             (client (rexel-test--client (rexel--forward-listen-port forward))))
         (rexel-test--tunnel conn sent)
         (rexel-test--until (lambda () (rexel-test--find "data.connect" sent)))
         (pcase failure
@@ -588,7 +588,7 @@ Return the entry of `rexel-test--opened' for the connection this opens."
   (rexel-test--with-forwards sent buf
     (let* ((conn rexel--conn)
            (forward (rexel--forward-open "localhost" (rexel-test--free-port)))
-           (client (rexel-test--client (rexel--forward-local-port forward))))
+           (client (rexel-test--client (rexel--forward-listen-port forward))))
       (rexel-test--tunnel conn sent)
       (rexel-test--until (lambda () (rexel-test--find "data.connect" sent)))
       (clrhash (rexel--conn-pending conn))
@@ -610,7 +610,7 @@ Return the entry of `rexel-test--opened' for the connection this opens."
       (setq sent nil)
       (cl-flet ((connect ()
                   (let ((count (length (rexel--forward-relays forward))))
-                    (push (rexel-test--client (rexel--forward-local-port forward))
+                    (push (rexel-test--client (rexel--forward-listen-port forward))
                           clients)
                     (rexel-test--until
                      (lambda () (< count (length (rexel--forward-relays forward))))))))
@@ -646,7 +646,7 @@ Return the entry of `rexel-test--opened' for the connection this opens."
     (let* ((rexel--relays-max 2)
            (forward (rexel--forward-open "localhost" (rexel-test--free-port)))
            (clients (mapcar (lambda (_)
-                              (rexel-test--client (rexel--forward-local-port forward)))
+                              (rexel-test--client (rexel--forward-listen-port forward)))
                             (list 1 2 3))))
       (rexel-test--until
        (lambda () (= 1 (seq-count (lambda (client) (process-get client :closed))
@@ -659,7 +659,7 @@ Return the entry of `rexel-test--opened' for the connection this opens."
     (let* ((conn rexel--conn)
            (rexel--relay-backlog-bytes 10000)
            (forward (rexel--forward-open "localhost" (rexel-test--free-port)))
-           (client (rexel-test--client (rexel--forward-local-port forward)))
+           (client (rexel-test--client (rexel--forward-listen-port forward)))
            (bytes (make-string 30000 ?x)))
       (rexel-test--tunnel conn sent)
       (rexel-test--until (lambda () (rexel-test--find "data.connect" sent)))
@@ -677,6 +677,404 @@ Return the entry of `rexel-test--opened' for the connection this opens."
           (should (= 0 (rexel--relay-backlog relay)))
           (should (eq #'rexel--relay-filter
                       (process-filter (rexel--relay-client relay)))))))))
+
+;;; Reverse forwards
+
+(defun rexel-test--target ()
+  "Return a process listening on a free port of this machine.
+The connections it accepts collect under its `:accepted', newest first.
+What one receives collects under that one's `:got', and its `:closed' is
+set at its end."
+  (let (server)
+    (setq server
+          (make-network-process
+           :name "rexel-test-target" :server t :host "127.0.0.1" :service t
+           :family 'ipv4 :coding 'binary :noquery t
+           :filter (lambda (process string)
+                     (process-put process :got
+                                  (concat (process-get process :got) string)))
+           :sentinel (lambda (process _change)
+                       (if (process-live-p process)
+                           (process-put server :accepted
+                                        (cons process (process-get server :accepted)))
+                         (process-put process :closed t)))))))
+
+(defun rexel-test--target-delete (target)
+  "Delete TARGET, a process of `rexel-test--target', and its connections."
+  (mapc #'delete-process (process-get target :accepted))
+  (delete-process target))
+
+(defmacro rexel-test--reverse (conn sent port &optional listen)
+  "Return a reverse forward to PORT of this machine through CONN.
+CONN becomes the client \"client:me\".  The requests, which collect in
+SENT, are answered so that the server listens on port LISTEN, by default
+on PORT."
+  `(let ((inhibit-message t)
+         (kill-ring nil)
+         (listen ,listen)
+         (forward (progn (setf (rexel--conn-client-id ,conn) "client:me")
+                         (rexel--forward-open "localhost" ,port nil t))))
+     (when listen
+       (rexel-test--respond ,conn (rexel-test--find "session.new_block" ,sent) nil
+                            '((code . "conflict")
+                              (message . "address already in use"))))
+     (rexel-test--tunnel ,conn ,sent)
+     (when listen
+       (rexel-test--respond
+        ,conn (rexel-test--find "com.superlogical.tunnel.info" ,sent)
+        `((flavor . "listen") (connections . 0)
+          (address . ,(format "127.0.0.1:%d" listen)))))
+     forward))
+
+(defun rexel-test--requested (conn ref &optional client bid)
+  "Hand CONN the event of a connection REF that tunnel block BID accepted.
+The event names CLIENT, by default \"client:me\", and BID is by default
+\"block:tunnel\"."
+  (rexel--on-event
+   conn
+   `((type . "session_event")
+     (payload . ((session_id . "k")
+                 (event . ((type . "block_event")
+                           (payload . ((block_id . ,(or bid "block:tunnel"))
+                                       (creator_name . "com.superlogical.tunnel")
+                                       (name . "connection_requested")
+                                       (payload . ((ref . ,ref)
+                                                   (peer . "127.0.0.1:50000")
+                                                   (client . ,(or client "client:me")))))))))))))
+
+(ert-deftest rexel-test-reverse-forward-makes-a-listen-tunnel ()
+  "A reverse forward asks for a listen tunnel on its target's port number."
+  (rexel-test--with-forwards sent buf
+    (let* ((conn rexel--conn)
+           (kill-ring nil)
+           (port (rexel-test--free-port))
+           messages
+           (forward (rexel--forward-open "localhost" port nil t))
+           (payload (alist-get 'payload (car sent))))
+      (should (= 1 (length sent)))
+      (should (equal "com.superlogical.tunnel.listen" (alist-get 'flavor payload)))
+      (should (equal `((port . ,port) (client_target . ,(format "localhost:%d" port)))
+                     (alist-get 'options payload)))
+      (should (equal (format "rexel -R %d:localhost:%d" port port)
+                     (alist-get 'label payload)))
+      (should-not (rexel--forward-listener forward))
+      (should-not (rexel--forward-listen-port forward))
+      ;; Nothing listens on this machine for it.
+      (should (rexel--forward-port-free-p port))
+      (should (eq forward (rexel--forward-open "localhost" port nil t)))
+      (should (= 1 (length sent)))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format &rest args)
+                   (push (apply #'format format args) messages))))
+        (rexel-test--tunnel conn sent))
+      (should (equal "block:tunnel" (rexel--forward-block forward)))
+      (should (= port (rexel--forward-listen-port forward)))
+      (should (equal (list (format "rexel: port %d on studio forwards to port %d here"
+                                   port port))
+                     messages))
+      (should (equal (format "http://localhost:%d/" port) (car kill-ring)))
+      (should-not (rexel-test--find "com.superlogical.tunnel.info" sent))
+      ;; A forward to the same target is another one.
+      (let ((inhibit-message t))
+        (should-not (eq forward (rexel--forward-open "localhost" port))))
+      (should (= 2 (length rexel--forwards))))))
+
+(ert-deftest rexel-test-reverse-forward-takes-a-port-the-server-picks ()
+  "When its port is taken on the server's machine, the server picks one."
+  (rexel-test--with-forwards sent buf
+    (let* ((conn rexel--conn)
+           (inhibit-message t)
+           (kill-ring nil)
+           (forward (rexel--forward-open "db.internal" 5432 nil t)))
+      (rexel-test--respond conn (car sent) nil
+                           '((code . "conflict") (message . "address already in use")))
+      (should (memq forward rexel--forwards))
+      (should (= 2 (rexel-test--count "session.new_block" sent)))
+      (let ((payload (alist-get 'payload (car sent))))
+        (should (equal '((port . 0) (client_target . "db.internal:5432"))
+                       (alist-get 'options payload)))
+        (should (equal "rexel -R 0:db.internal:5432" (alist-get 'label payload))))
+      (rexel-test--tunnel conn sent)
+      (should (equal '((session_id . "k") (block_id . "block:tunnel"))
+                     (alist-get 'payload (car sent))))
+      (should-not kill-ring)
+      (rexel-test--respond conn (car sent)
+                           '((flavor . "listen") (connections . 0)
+                             (address . "127.0.0.1:57836")))
+      (should (= 57836 (rexel--forward-listen-port forward)))
+      (should (equal "http://localhost:57836/" (car kill-ring)))
+      (should (equal "port 57836 on studio forwards to db.internal:5432"
+                     (rexel--forward-describe forward))))))
+
+(ert-deftest rexel-test-reverse-forward-refused-by-the-server-closes ()
+  "A port the server cannot pick either, or cannot name, leaves no forward."
+  (rexel-test--with-forwards sent buf
+    (let ((conn rexel--conn)
+          (inhibit-message t))
+      (rexel--forward-open "localhost" 5173 nil t)
+      (dotimes (_ 2)
+        (rexel-test--respond conn (car sent) nil
+                             '((code . "conflict") (message . "not attached"))))
+      (should-not rexel--forwards)
+      (should (= 2 (length sent)))
+      ;; A privileged port is not asked for again.
+      (rexel--forward-open "localhost" 80 nil t)
+      (rexel-test--respond conn (car sent) nil
+                           '((code . "bad_request") (message . "permission denied")))
+      (should-not rexel--forwards)
+      (should (= 3 (length sent)))
+      (rexel--forward-open "localhost" 5173 nil t)
+      (rexel-test--respond conn (car sent) nil
+                           '((code . "conflict") (message . "address already in use")))
+      (rexel-test--tunnel conn sent)
+      (rexel-test--respond conn (car sent) nil
+                           '((code . "not_found") (message . "no such block")))
+      (should-not rexel--forwards)
+      (should (equal "block:tunnel" (rexel-test--closed-block sent))))))
+
+(ert-deftest rexel-test-reverse-relay-carries-a-connection-both-ways ()
+  "A connection the tunnel accepted gets its stream and one to the target."
+  (rexel-test--with-forwards sent buf
+    (let* ((conn rexel--conn)
+           (target (rexel-test--target))
+           (forward (rexel-test--reverse conn sent (process-contact target :service))))
+      (unwind-protect
+          (progn
+            (rexel-test--requested conn "conn:42")
+            (should (equal '((session_id . "k") (block_id . "block:tunnel")
+                             (data_ref_id . "conn:42")
+                             (subprotocol . "rex.data.bytes.v1"))
+                           (alist-get 'payload (car sent))))
+            (let* ((open (rexel-test--relay-welcome conn sent))
+                   (ws (car open))
+                   accepted)
+              ;; What the server's side sends.
+              (rexel-test--relay-message open "requ")
+              (rexel-test--relay-message open "est")
+              (rexel-test--until (lambda () (process-get target :accepted)))
+              (setq accepted (car (process-get target :accepted)))
+              (rexel-test--until
+               (lambda () (equal "request" (process-get accepted :got))))
+              ;; What the target answers.
+              (process-send-string accepted "reply")
+              (rexel-test--until
+               (lambda () (equal '((binary "reply")) (cdr (rexel-test--sent-on ws)))))
+              (should (= 1 (length (rexel--forward-relays forward))))
+              ;; The end of the server's side reaches the target, which
+              ;; closes: the stream's end.
+              (rexel-test--relay-message open "")
+              (rexel-test--until (lambda () (process-get accepted :closed)))
+              (rexel-test--until
+               (lambda ()
+                 (equal '((binary "reply") (binary "") (close "\x03\xe8"))
+                        (cdr (rexel-test--sent-on ws)))))
+              (funcall (nth 3 open) ws)
+              (should-not (rexel--forward-relays forward))))
+        (rexel-test--target-delete target)))))
+
+(ert-deftest rexel-test-reverse-relay-keeps-bytes-for-a-connection-being-made ()
+  "What the stream delivers waits until the connection to the target is open."
+  (rexel-test--with-forwards sent buf
+    (let* ((conn rexel--conn)
+           (target (rexel-test--target))
+           (forward (rexel-test--reverse conn sent (process-contact target :service)))
+           (status (symbol-function 'process-status))
+           (connecting t))
+      (unwind-protect
+          (progn
+            (rexel-test--requested conn "conn:1")
+            (let* ((relay (car (rexel--forward-relays forward)))
+                   (client (rexel--relay-client relay))
+                   (open (rexel-test--relay-welcome conn sent)))
+              (cl-letf (((symbol-function 'process-status)
+                         (lambda (process)
+                           (if (and connecting (eq process client))
+                               'connect
+                             (funcall status process)))))
+                (rexel-test--relay-message open "early")
+                (rexel-test--relay-message open "")
+                (dotimes (_ 5) (accept-process-output nil 0.01))
+                (should (equal '("early" eof) (rexel--relay-in relay)))
+                (setq connecting nil)
+                (rexel--relay-sentinel client "open\n")
+                (rexel-test--until (lambda () (process-get target :accepted)))
+                (rexel-test--until
+                 (lambda ()
+                   (let ((accepted (car (process-get target :accepted))))
+                     (and (equal "early" (process-get accepted :got))
+                          (process-get accepted :closed))))))))
+        (rexel-test--target-delete target)))))
+
+(ert-deftest rexel-test-reverse-relay-to-a-target-that-refuses-ends-the-stream ()
+  "The stream of a connection whose target cannot be reached is ended."
+  (rexel-test--with-forwards sent buf
+    (let* ((conn rexel--conn)
+           (forward (rexel-test--reverse conn sent (rexel-test--free-port))))
+      (rexel-test--requested conn "conn:1")
+      (let* ((open (rexel-test--relay-welcome conn sent))
+             (ws (car open)))
+        (rexel-test--relay-message open "request")
+        (rexel-test--until
+         (lambda ()
+           (equal '((binary "") (close "\x03\xe8")) (cdr (rexel-test--sent-on ws)))))
+        (funcall (nth 3 open) ws)
+        (should-not (rexel--forward-relays forward))
+        (should (memq forward rexel--forwards)))
+      ;; So it is when the connection cannot even be started.
+      (cl-letf (((symbol-function 'make-network-process)
+                 (lambda (&rest _) (error "No such host"))))
+        (rexel-test--requested conn "conn:2"))
+      (let ((ws (car (rexel-test--relay-welcome conn sent))))
+        (rexel-test--until
+         (lambda ()
+           (equal '((binary "") (close "\x03\xe8")) (cdr (rexel-test--sent-on ws)))))))))
+
+(ert-deftest rexel-test-reverse-relay-ignores-events-of-others ()
+  "An event naming another client, block or forward opens nothing."
+  (rexel-test--with-forwards sent buf
+    (let* ((conn rexel--conn)
+           (target (rexel-test--target))
+           (rexel--relays-max 1)
+           (forward (rexel-test--reverse conn sent (process-contact target :service))))
+      (unwind-protect
+          (progn
+            (setq sent nil)
+            (rexel-test--requested conn "conn:1" "client:other")
+            (rexel-test--requested conn "conn:2" nil "block:unknown")
+            (should-not sent)
+            (should-not (rexel--forward-relays forward))
+            (rexel-test--requested conn "conn:3")
+            (should (= 1 (length sent)))
+            ;; One more than `rexel--relays-max' is not answered.
+            (rexel-test--requested conn "conn:4")
+            (should (= 1 (length sent)))
+            (should (= 1 (length (rexel--forward-relays forward))))
+            (rexel-test--until (lambda () (process-get target :accepted)))
+            (dotimes (_ 5) (accept-process-output nil 0.01))
+            (should (= 1 (length (process-get target :accepted)))))
+        (rexel-test--target-delete target)))))
+
+(ert-deftest rexel-test-reverse-forward-closes-with-its-connections ()
+  (rexel-test--with-forwards sent buf
+    (let* ((conn rexel--conn)
+           (target (rexel-test--target))
+           (forward (rexel-test--reverse conn sent (process-contact target :service))))
+      (unwind-protect
+          (progn
+            (rexel-test--requested conn "conn:1")
+            (rexel-test--relay-welcome conn sent)
+            (rexel-test--until (lambda () (process-get target :accepted)))
+            (rexel--forward-close forward)
+            (should-not rexel--forwards)
+            (should (equal "block:tunnel" (rexel-test--closed-block sent)))
+            (rexel-test--until
+             (lambda () (process-get (car (process-get target :accepted)) :closed)))
+            ;; A connection the block accepted before it closed.
+            (setq sent nil)
+            (rexel-test--requested conn "conn:2")
+            (should-not sent))
+        (rexel-test--target-delete target)))))
+
+(ert-deftest rexel-test-reverse-forward-is-taken-back-after-a-redial ()
+  "A reverse forward keeps its port, and says so when it gets another."
+  (rexel-test--with-forwards sent buf
+    (let* ((conn rexel--conn)
+           (forward (rexel-test--reverse conn sent 5173 40001))
+           messages)
+      (setq sent nil)
+      (rexel--forwards-resume conn "k")
+      (rexel-test--respond conn (rexel-test--find "session.own_block" sent)
+                           '((blocks . [])))
+      (should-not (rexel-test--find "session.new_block" sent))
+      ;; A block that is gone is made again, on the port it had.
+      (rexel--forwards-resume conn "k")
+      (rexel-test--respond conn (rexel-test--find "session.own_block" sent) nil
+                           '((code . "not_found") (message . "no such block")))
+      (should (equal 40001 (alist-get 'port
+                                      (alist-get 'options
+                                                 (alist-get 'payload (car sent))))))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format &rest args)
+                   (push (apply #'format format args) messages))))
+        (rexel-test--tunnel conn sent "block:again")
+        (should-not messages)
+        ;; And on another one when that port is taken by then.
+        (rexel--forwards-resume conn "k")
+        (rexel-test--respond conn (rexel-test--find "session.own_block" sent) nil
+                             '((code . "not_found") (message . "no such block")))
+        (rexel-test--respond conn (rexel-test--find "session.new_block" sent) nil
+                             '((code . "conflict") (message . "address already in use")))
+        (rexel-test--tunnel conn sent "block:third")
+        (rexel-test--respond conn (rexel-test--find "com.superlogical.tunnel.info" sent)
+                             '((flavor . "listen") (connections . 0)
+                               (address . "127.0.0.1:40002"))))
+      (should (equal '("rexel: port 40002 on studio forwards to port 5173 here")
+                     messages))
+      (should (equal "block:third" (rexel--forward-block forward))))))
+
+(ert-deftest rexel-test-reverse-forward-asks-for-its-port-again-after-a-redial ()
+  "A port whose answer went with the connection is asked for again."
+  (rexel-test--with-forwards sent buf
+    (let* ((conn rexel--conn)
+           (inhibit-message t)
+           (kill-ring nil)
+           (forward (rexel--forward-open "localhost" 5173 nil t)))
+      (rexel-test--respond conn (car sent) nil
+                           '((code . "conflict") (message . "address already in use")))
+      (rexel-test--tunnel conn sent)
+      (should (equal "com.superlogical.tunnel.info" (alist-get 'method (car sent))))
+      (clrhash (rexel--conn-pending conn))
+      (setq sent nil)
+      (rexel--forwards-resume conn "k")
+      (rexel-test--respond conn (rexel-test--find "session.own_block" sent)
+                           '((blocks . [])))
+      (rexel-test--respond conn (rexel-test--find "com.superlogical.tunnel.info" sent)
+                           '((flavor . "listen") (connections . 0)
+                             (address . "127.0.0.1:40001")))
+      (should (= 40001 (rexel--forward-listen-port forward)))
+      (should (equal '("http://localhost:40001/") kill-ring)))))
+
+(ert-deftest rexel-test-reverse-relay-of-a-lost-request-ends ()
+  "A stream asked for on a dropped connection is asked for again, and refused.
+So it is when the block had to be made again, and when its port was not
+known yet."
+  (dolist (case '(taken remade unnamed))
+    (rexel-test--with-forwards sent buf
+      (let* ((conn rexel--conn)
+             (inhibit-message t)
+             (kill-ring nil)
+             (target (rexel-test--target))
+             (port (process-contact target :service))
+             (forward (if (eq case 'unnamed)
+                          (progn (setf (rexel--conn-client-id conn) "client:me")
+                                 (rexel--forward-open "localhost" port nil t))
+                        (rexel-test--reverse conn sent port))))
+        (unwind-protect
+            (progn
+              (when (eq case 'unnamed)
+                (rexel-test--respond conn (car sent) nil
+                                     '((code . "conflict")
+                                       (message . "address already in use")))
+                (rexel-test--tunnel conn sent))
+              (rexel-test--requested conn "conn:1")
+              (clrhash (rexel--conn-pending conn))
+              (setq sent nil)
+              (rexel--forwards-resume conn "k")
+              (if (not (eq case 'remade))
+                  (rexel-test--respond conn (rexel-test--find "session.own_block" sent)
+                                       '((blocks . [])))
+                (rexel-test--respond conn (rexel-test--find "session.own_block" sent) nil
+                                     '((code . "not_found") (message . "no such block")))
+                (rexel-test--tunnel conn sent "block:again"))
+              (let ((payload (alist-get 'payload (rexel-test--find "data.connect" sent))))
+                (should (equal "conn:1" (alist-get 'data_ref_id payload)))
+                (should (equal (if (eq case 'remade) "block:again" "block:tunnel")
+                               (alist-get 'block_id payload))))
+              ;; The server closes the stream of a ref it does not have.
+              (let ((open (rexel-test--relay-welcome conn sent)))
+                (funcall (nth 3 open) (car open)))
+              (should-not (rexel--forward-relays forward)))
+          (rexel-test--target-delete target))))))
 
 ;;; Following the ports
 
@@ -713,7 +1111,7 @@ Return the entry of `rexel-test--opened' for the connection this opens."
              local)
         (rexel--ports-update (rexel-test--ports (list port)))
         (let ((forward (rexel--forward-open "localhost" port)))
-          (setq local (rexel--forward-local-port forward))
+          (setq local (rexel--forward-listen-port forward))
           (rexel-test--tunnel rexel--conn sent)
           ;; A list that may leave out ports closes nothing.
           (rexel--ports-update '((status . "partial") (ports . [])))
@@ -725,7 +1123,7 @@ Return the entry of `rexel-test--opened' for the connection this opens."
         (if (not again)
             (should (eq (not closed) (and rexel--forwards t)))
           (should (= 1 (length rexel--forwards)))
-          (should (= local (rexel--forward-local-port (car rexel--forwards))))
+          (should (= local (rexel--forward-listen-port (car rexel--forwards))))
           (should-not rexel--forward-remembered))))))
 
 (ert-deftest rexel-test-ports-update-leaves-other-forwards ()
@@ -739,6 +1137,22 @@ Return the entry of `rexel-test--opened' for the connection this opens."
       (rexel--ports-update (rexel-test--ports '(5432)))
       (rexel--ports-update (rexel-test--ports))
       (should (= 2 (length rexel--forwards))))))
+
+(ert-deftest rexel-test-ports-update-leaves-reverse-forwards ()
+  "A reverse forward to a port stays when the block stops listening on that port."
+  (rexel-test--with-forwards sent buf
+    (let* ((port (rexel-test--free-port))
+           (inhibit-message t)
+           (reverse (rexel-test--reverse rexel--conn sent port)))
+      (rexel--ports-update (rexel-test--ports (list port)))
+      (rexel--ports-update (rexel-test--ports))
+      (should (equal (list reverse) rexel--forwards))
+      (should-not rexel--forward-remembered)
+      ;; Nor does it count as the forward of the block's port.
+      (let ((rexel-port-forward-new-ports t))
+        (rexel--ports-update (rexel-test--ports (list port))))
+      (should (= 2 (length rexel--forwards)))
+      (should (memq reverse rexel--forwards)))))
 
 (ert-deftest rexel-test-ports-of-this-machines-server-are-not-followed ()
   (rexel-test--with-forwards sent buf
@@ -792,7 +1206,7 @@ Return the entry of `rexel-test--opened' for the connection this opens."
       (setq sent nil)
       (browse-url (format "http://localhost:%d/app?q=1#top" port))
       (should (= 1 (length rexel--forwards)))
-      (let ((local (rexel--forward-local-port (car rexel--forwards))))
+      (let ((local (rexel--forward-listen-port (car rexel--forwards))))
         (should (equal (list (format "http://localhost:%d/app?q=1#top" local))
                        opened-urls))
         (should (equal "localhost" (rexel--forward-host (car rexel--forwards))))
@@ -904,6 +1318,60 @@ Return the entry of `rexel-test--opened' for the connection this opens."
       (rexel--forward-open "localhost" (rexel-test--free-port))
       (call-interactively #'rexel-port-forward-close)
       (should-not rexel--forwards))))
+
+(ert-deftest rexel-test-port-forward-close-command-reads-both-directions ()
+  (rexel-test--with-forwards sent buf
+    (let* ((port (rexel-test--free-port))
+           (forward (let ((inhibit-message t)) (rexel--forward-open "localhost" port)))
+           (reverse (rexel-test--reverse rexel--conn sent 3000 40001))
+           messages asked)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt choices &rest _)
+                   (setq asked (mapcar #'car choices))
+                   (car asked)))
+                ((symbol-function 'message)
+                 (lambda (format &rest args)
+                   (push (apply #'format format args) messages))))
+        (call-interactively #'rexel-port-forward-close))
+      (should (equal (list "port 40001 on studio forwards to port 3000 here"
+                           (format "http://localhost:%d/ forwards to port %d on studio"
+                                   (rexel--forward-listen-port forward) port))
+                     asked))
+      (should (equal '("rexel: closed the reverse forward from port 40001 on studio")
+                     messages))
+      (should (equal (list forward) rexel--forwards))
+      (should-not (memq reverse rexel--forwards)))))
+
+(ert-deftest rexel-test-port-forward-reverse-command ()
+  "The command reads a target and shows the forward once the server listens."
+  (rexel-test--with-forwards sent buf
+    (let ((inhibit-message t)
+          (kill-ring nil)
+          prompt)
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (string &rest _) (setq prompt string) "http://127.0.0.1:3000/app")))
+        (call-interactively #'rexel-port-forward-reverse))
+      (should (equal "Forward from studio to port, host:port or URL: " prompt))
+      (let ((forward (car rexel--forwards)))
+        (should (rexel--forward-reverse forward))
+        (should (equal '("localhost" . 3000)
+                       (cons (rexel--forward-host forward) (rexel--forward-port forward))))
+        (should-not kill-ring)
+        (rexel-test--tunnel rexel--conn sent)
+        (should (equal '("http://localhost:3000/") kill-ring))
+        ;; Again: the forward it has is shown.
+        (setq kill-ring nil)
+        (rexel-port-forward-reverse 3000)
+        (should (equal '("http://localhost:3000/") kill-ring))
+        (should (equal (list forward) rexel--forwards)))
+      ;; This machine's server needs none, and a session being reattached
+      ;; takes none.
+      (setf (rexel--conn-attaching rexel--conn) (list "k"))
+      (should-error (rexel-port-forward-reverse 3001) :type 'user-error)
+      (setf (rexel--conn-attaching rexel--conn) nil
+            (rexel--conn-host rexel--conn) nil)
+      (should-error (rexel-port-forward-reverse 3001) :type 'user-error)
+      (should (= 1 (length rexel--forwards))))))
 
 (provide 'rexel-port-forward-test)
 ;;; rexel-port-forward-test.el ends here

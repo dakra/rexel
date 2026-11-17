@@ -938,16 +938,50 @@ It runs as a background job of the block's shell."
   (with-current-buffer (rexel-elate-block)
     (and (listp rexel--ports) (assq port rexel--ports) t)))
 
-(defun rexel-elate-forward (port)
-  "Return the forward to PORT of the block's machine once its tunnel exists."
+(defun rexel-elate-forward (port &optional reverse)
+  "Return the forward to PORT of the block's machine once its tunnel exists.
+With REVERSE, return the reverse forward to PORT of this machine once
+the server listens for it."
   (seq-find (lambda (forward)
               (and (eql port (rexel--forward-port forward))
-                   (rexel--forward-block forward)))
+                   (rexel--forward-block forward)
+                   (if reverse
+                       (and (rexel--forward-reverse forward)
+                            (rexel--forward-listen-port forward))
+                     (not (rexel--forward-reverse forward)))))
             rexel--forwards))
 
 (defun rexel-elate-local (port)
   "Return the local port of the forward to PORT."
-  (rexel--forward-local-port (rexel-elate-forward port)))
+  (rexel--forward-listen-port (rexel-elate-forward port)))
+
+(defun rexel-elate-remote (port)
+  "Return the port the server listens on for the reverse forward to PORT."
+  (rexel--forward-listen-port (rexel-elate-forward port t)))
+
+(defun rexel-elate-serve-here (port)
+  "Start the HTTP server of `rexel-elate-server-file' on PORT, run by Emacs."
+  (make-process :name (format "rexel-elate-serve-%d" port) :noquery t
+                :command (list "python3" (rexel-elate-server-file)
+                               (number-to-string port))))
+
+(defun rexel-elate-serve-here-stop (port)
+  "Stop the HTTP server Emacs runs on PORT."
+  (delete-process (format "rexel-elate-serve-%d" port)))
+
+(defun rexel-elate-listening-p (port)
+  "Return non-nil when a program accepts connections on PORT of this machine."
+  (ignore-errors
+    (delete-process (make-network-process :name "rexel-elate-probe" :noquery t
+                                          :host "127.0.0.1" :service port))
+    t))
+
+(defun rexel-elate-block-curl (tag port path &rest args)
+  "Type a curl of PATH on PORT of the block's machine, with ARGS, into the block.
+The terminal shows curl's output and then \"TAG=\" and its exit status."
+  (rexel-elate-send
+   (format "curl -s -m 60 %s http://127.0.0.1:%d%s; echo %s=$?\n"
+           (mapconcat #'shell-quote-argument args " ") port path tag)))
 
 (defun rexel-elate-tunnels ()
   "Return the (LABEL . OWNER) of the tunnel blocks in the block's session."

@@ -1249,11 +1249,14 @@ A tab of one tiled block shows that block, whatever floats above it."
   "Every key of `rexel-prefix-map' is bound with Control too."
   (dolist (keys '(("d" "C-d") ("c" "C-c") ("x" "C-x") ("u" "C-u") ("3" "C-3")
                   ("=" "C-=") ("$" "C-$") ("<left>" "C-<left>")
-                  ("RET" "C-<return>")))
+                  ("RET" "C-<return>") ("F" "C-S-f")))
     (let ((command (lookup-key rexel-prefix-map (kbd (car keys)))))
       (should (commandp command))
       (should (eq command (lookup-key rexel-prefix-map (kbd (cadr keys)))))))
-  (should-not (lookup-key rexel-prefix-map [return])))
+  (should-not (lookup-key rexel-prefix-map [return]))
+  ;; A terminal sends C-S-f as C-f, which stays the key of f.
+  (should (eq #'rexel-port-forward (lookup-key rexel-prefix-map (kbd "C-f"))))
+  (should (eq #'rexel-port-forward-reverse (lookup-key rexel-prefix-map "F"))))
 
 (ert-deftest rexel-test-prefix-key-rebinds ()
   "Customizing `rexel-prefix-key' moves the prefix map, also to a key vector."

@@ -82,7 +82,7 @@ it again.
 | `reconnect.json` | unix, tcp | `stream-drop`, `control-drop`, `write-in-flight`, `upload-redial`, `relay-restart`, `half-open`, `upload-stall`, `upload-cut`, `lost-connect`, `refused-hello`, `attach-hold`, `upload-while-attaching`, `detach-while-attaching` |
 | `upload.json` | unix, tcp, tls | `upload-file`, `several`, `empty`, `boundaries`, `symlink`, `names`, `compressed`, `dnd`, `drop`, `yank-media`, `dired`, `seventeen`, `remote-file`, `not-a-file`, `too-large`, `stays-usable`, `slow`, `file-changes`, `cancel`, `after-cancel`, `cancel-idle`, `two-blocks`, `kill-buffer` |
 | `download.json` | local, unix, tcp, tls | `download-file`, `overwrite`, `sizes`, `names`, `compressed`, `relative`, `complete`, `refusals`, `large`, `cancel`, `visit` |
-| `forward.json` | unix, tcp | `new-port`, `forward`, `transfer`, `several`, `target`, `close`, `link`, `click`, `port-closes`, `port-closes-options`, `forward-new-ports`, `redial`, `relay-restart`, `detach`, `exit`, `kill-buffer` |
+| `forward.json` | unix, tcp | `new-port`, `forward`, `transfer`, `several`, `target`, `close`, `link`, `click`, `port-closes`, `port-closes-options`, `forward-new-ports`, `reverse`, `reverse-transfer`, `reverse-target`, `redial`, `relay-restart`, `reverse-redial`, `reverse-close`, `detach`, `exit`, `kill-buffer` |
 | `local.json` | — | `directory`, `command-running`, `upload-file`, `remote-file`, `drop`, `yank-media`, `exec-shell`, `port-forward` |
 
 Each scenario's `comment` and its groups' comments say what is checked.
@@ -120,6 +120,10 @@ Each scenario's `comment` and its groups' comments say what is checked.
   (`rexel-elate-get`).  The server's machine is this one, so the forwarded port is
   taken here and the forward listens on another.  `rexel-elate-tunnels` lists the
   tunnel blocks the server has.
+- Reverse forwards are checked the other way round: Emacs runs the HTTP server
+  (`rexel-elate-serve-here`) and `curl` is typed into the block
+  (`rexel-elate-block-curl`), which prints its exit status after a tag.  The target
+  holds its port on the server's machine too, so the server always picks another one.
 - A terminal Emacs has no drops and no image clipboard.  `rexel-elate-dnd` calls the
   `dnd` dispatch of X11 and pgtk, `rexel-elate-drop` queues the `drag-n-drop` event of
   NS and w32, and `rexel-elate-yank-media` calls the handler `yank-media` registered.

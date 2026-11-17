@@ -20,7 +20,8 @@ same session at the same time.
 - Drop or paste files onto a terminal to send them to the server's machine,
   and copy files from there.
 - Forward a port of the server's machine, such as a development server's,
-  and open links to localhost through the forward.
+  and open links to localhost through the forward; or forward a port of
+  this machine to the server's.
 - Directory tracking and command state from the processes Rex reports.
 - Your ghostel key bindings and settings apply in every block buffer.
 - Optional pickers with previews and Embark actions, see [[*Consult and Embark][Consult and Embark]].
@@ -300,12 +301,13 @@ In a block buffer =C-c C-r= (=rexel-prefix-key=) prefixes:
 | ~$~        | ~rexel-rename-session~                       |
 | ~u~        | ~rexel-upload-file~, see [[*Uploading files][Uploading files]]       |
 | ~f~        | ~rexel-port-forward~, see [[*Forwarding ports][Forwarding ports]]     |
+| ~F~        | ~rexel-port-forward-reverse~                 |
 | ~x~        | ~rexel-close-block~, ends the program        |
 | ~d~        | ~rexel-detach~, keeps the session running    |
 
 Each key works with Control held too: =C-c C-r C-d= detaches like
 =C-c C-r d=.  Some terminals send no Control variant of ~2~, ~3~, ~=~, ~$~ or
-~RET~.
+~RET~, and send the one of ~F~ as that of ~f~.
 
 A split or tab's shell starts in the directory of the current block's
 shell.
@@ -485,9 +487,20 @@ such a port, or to another host, stays until
 =M-x rexel-port-forward-close=, which reads one of the open forwards, or
 until its block closes or the session is detached.
 
+~rexel-port-forward-reverse~ (=C-c C-r F=) forwards the other way.  It
+reads a port of this machine, a =host:port= this machine reaches, or a
+URL, and the block's server listens on the same port of its machine, or
+on one it picks when that port is taken.  Emacs relays each connection
+to that port to the target.  The server listens on 127.0.0.1 only, where
+every user and program of its machine reaches the port.  The port's URL
+there is shown and put in the kill ring.  It stays until
+=M-x rexel-port-forward-close=, the end of its block or a detach.
+
 A connection whose program on this machine ends its sending side, as
 =nc= does at the end of its input, is closed as a whole; what the other
-side still sends is lost.  Browsers and =curl= keep theirs open.  While
+side still sends is lost.  Browsers and =curl= keep theirs open.  So it
+is with the target of a reverse forward that ends its sending side
+before the program on the server's machine has sent everything.  While
 a program on this machine takes what a forward delivers more slowly than
 it arrives, Emacs waits for it, and gives the connection up after ten
 seconds without progress.

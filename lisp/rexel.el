@@ -34,7 +34,8 @@
 ;;
 ;; `rexel-port-forward' forwards a port of the block's machine to this
 ;; one, and a link to localhost in a block buffer opens through such a
-;; forward.  That is in rexel-port-forward.el.
+;; forward.  `rexel-port-forward-reverse' forwards a port of this machine
+;; to the block's.  That is in rexel-port-forward.el.
 ;;
 ;; Both connections are WebSockets, on a server's Unix socket or on its
 ;; network address, such as the one Rex's built-in Tailscale gives it.
@@ -1786,16 +1787,22 @@ Typing while a write is unanswered probes the block's connections."
 (defun rexel--on-block-event (conn payload)
   "Handle the block event PAYLOAD of a session on CONN.
 A terminal's `process_changed' event names its foreground process and
-its `ports_changed' event lists the ports its programs listen on."
-  (when-let* ((buf (gethash (alist-get 'block_id payload)
-                            (rexel--conn-blocks conn)))
-              ((buffer-live-p buf))
-              ((equal (alist-get 'creator_name payload) rexel--terminal-creator)))
-    (let ((event (alist-get 'payload payload)))
-      (with-current-buffer buf
-        (pcase (alist-get 'name payload)
-          ("process_changed" (rexel--on-process-changed conn event))
-          ("ports_changed" (rexel--ports-update event)))))))
+its `ports_changed' event lists the ports its programs listen on.  A
+tunnel's `connection_requested' event names a connection it accepted."
+  (let ((bid (alist-get 'block_id payload))
+        (name (alist-get 'name payload))
+        (event (alist-get 'payload payload)))
+    (pcase (alist-get 'creator_name payload)
+      ((pred (equal rexel--terminal-creator))
+       (when-let* ((buf (gethash bid (rexel--conn-blocks conn)))
+                   ((buffer-live-p buf)))
+         (with-current-buffer buf
+           (pcase name
+             ("process_changed" (rexel--on-process-changed conn event))
+             ("ports_changed" (rexel--ports-update event))))))
+      ((pred (equal rexel--tunnel-creator))
+       (when (equal name "connection_requested")
+         (rexel--forward-requested conn bid event))))))
 
 (defun rexel--on-process-changed (conn event)
   "Follow EVENT, which names the foreground process of this buffer's block.
@@ -3113,6 +3120,9 @@ empty shows its focused block alone."
       (define-key map (kbd (concat "C-" key)) command))
     (define-key map (kbd "RET") #'rexel-split)
     (define-key map [C-return] #'rexel-split)
+    ;; "C-F" names C-f.
+    (define-key map (kbd "F") #'rexel-port-forward-reverse)
+    (define-key map (kbd "C-S-f") #'rexel-port-forward-reverse)
     map)
   "Commands available behind `rexel-prefix-key' in block buffers.
 Each key is also bound with Control.")
