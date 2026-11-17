@@ -1,6 +1,6 @@
 {
   "name": "local",
-  "comment": "What holds only for this machine's server: default-directory follows the shell, a running command is known from the processes Rex reports, and a local file given to the block has its own path typed instead of being copied.",
+  "comment": "What holds only for this machine's server: default-directory follows the shell, a running command is known from the processes Rex reports, a local file given to the block has its own path typed instead of being copied, and no port is forwarded.",
   "defaults": {"timeout": 15},
   "session": {"ui": "tty", "size": "120x36", "eval_file": ["../lib/rexel-setup.el"]},
   "steps": [
@@ -90,6 +90,15 @@
     {"keys": "RET"},
     {"wait": "until", "pred": "(rexel-elate-in-order-p \"^\\\\$ sleep 3$\" \"^\\\\$ ?$\")", "comment": "the command ended"},
     {"wait": "until", "pred": "(not ghostel--command-running)", "timeout": 10},
+
+    {"group": "port-forward", "comment": "the block's ports are this machine's own: nothing is forwarded, listed or rewritten"},
+    {"assert": {"eval": "(eq 'unknown rexel--ports)"}, "comment": "the server is not asked for the block's ports"},
+    {"assert": {"eval": "(string-match-p \"runs on this machine\" (condition-case err (progn (rexel-port-forward) \"\") (user-error (error-message-string err))))"}},
+    {"eval": "(setq rexel-elate-browsed nil)"},
+    {"eval": "(rexel-elate-send \"echo http://localhost:9/local-$((6*7))\\n\")"},
+    {"wait": "until", "pred": "(rexel-elate-link \"/local-42\")"},
+    {"eval": "(rexel-elate-open-link \"/local-42\")"},
+    {"assert": {"eval": "(and (equal rexel-elate-browsed (list \"http://localhost:9/local-42\")) (null rexel--forwards))"}},
 
     {"group": "cleanup"},
     {"eval": "(rexel-elate-cleanup)"}

@@ -17,8 +17,8 @@ ELATE_FORMAT=json test/elate/run.sh -v local test/elate/matrix/session.json
 
 `run.sh` runs each scenario once per variant with `elate run --keep-going`, so every
 group reports, and exits non-zero when one failed.  It needs `uvx` (or `ELATE` naming
-the elate command, 0.16 or later), `socat`, `python3` and a running Rex server on this
-machine.  A single run without it works too:
+the elate command, 0.16 or later), `socat`, `python3`, for `forward.json` also `curl`,
+and a running Rex server on this machine.  A single run without it works too:
 
 ```sh
 uvx elate run --keep-going --variant unix test/elate/matrix/typing.json
@@ -82,7 +82,8 @@ it again.
 | `reconnect.json` | unix, tcp | `stream-drop`, `control-drop`, `write-in-flight`, `upload-redial`, `relay-restart`, `half-open`, `upload-stall`, `upload-cut`, `lost-connect`, `refused-hello`, `attach-hold`, `upload-while-attaching`, `detach-while-attaching` |
 | `upload.json` | unix, tcp, tls | `upload-file`, `several`, `empty`, `boundaries`, `symlink`, `names`, `compressed`, `dnd`, `drop`, `yank-media`, `dired`, `seventeen`, `remote-file`, `not-a-file`, `too-large`, `stays-usable`, `slow`, `file-changes`, `cancel`, `after-cancel`, `cancel-idle`, `two-blocks`, `kill-buffer` |
 | `download.json` | local, unix, tcp, tls | `download-file`, `overwrite`, `sizes`, `names`, `compressed`, `relative`, `complete`, `refusals`, `large`, `cancel`, `visit` |
-| `local.json` | — | `directory`, `command-running`, `upload-file`, `remote-file`, `drop`, `yank-media`, `exec-shell` |
+| `forward.json` | unix, tcp | `new-port`, `forward`, `transfer`, `several`, `target`, `close`, `link`, `click`, `port-closes`, `port-closes-options`, `forward-new-ports`, `redial`, `relay-restart`, `detach`, `exit`, `kill-buffer` |
+| `local.json` | — | `directory`, `command-running`, `upload-file`, `remote-file`, `drop`, `yank-media`, `exec-shell`, `port-forward` |
 
 Each scenario's `comment` and its groups' comments say what is checked.
 
@@ -114,6 +115,11 @@ Each scenario's `comment` and its groups' comments say what is checked.
   has to see it halfway through a file.
 - Downloads are checked with `rexel-elate-copied-p`, the `cksum` of a file against
   that of its copy.
+- Forwards are checked with a small HTTP server in the block
+  (`rexel-elate-serve`), which answers with its port, and `curl` on the local port
+  (`rexel-elate-get`).  The server's machine is this one, so the forwarded port is
+  taken here and the forward listens on another.  `rexel-elate-tunnels` lists the
+  tunnel blocks the server has.
 - A terminal Emacs has no drops and no image clipboard.  `rexel-elate-dnd` calls the
   `dnd` dispatch of X11 and pgtk, `rexel-elate-drop` queues the `drag-n-drop` event of
   NS and w32, and `rexel-elate-yank-media` calls the handler `yank-media` registered.

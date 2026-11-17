@@ -888,5 +888,155 @@ sees it unchanged."
             reads (cdr reads)))
     longest))
 
+;;; Port forwards
+
+(defun rexel-elate-server-file ()
+  "Return the script of the HTTP server the scenarios run in a block.
+It answers GET /file/PATH with the file PATH, any other GET with
+\"served PORT PATH\", and a POST with the MD5 of what was posted."
+  (let ((file (expand-file-name "serve.py" rexel-elate-files-dir)))
+    (unless (file-exists-p file)
+      (make-directory rexel-elate-files-dir t)
+      (with-temp-file file
+        (insert "import hashlib, http.server, sys, urllib.parse
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def reply(self, body):
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        if self.path.startswith('/file/'):
+            self.reply(open(urllib.parse.unquote(self.path[5:]), 'rb').read())
+        else:
+            self.reply(('served %d %s\\n' % (self.server.server_port, self.path)).encode())
+    def do_POST(self):
+        n = int(self.headers['Content-Length'])
+        h = hashlib.md5()
+        while n > 0:
+            d = self.rfile.read(min(n, 65536))
+            h.update(d)
+            n -= len(d)
+        self.reply(('md5 %s\\n' % h.hexdigest()).encode())
+http.server.ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
+")))
+    file))
+
+(defun rexel-elate-serve (port)
+  "Start the HTTP server of `rexel-elate-server-file' on PORT in the block.
+It runs as a background job of the block's shell."
+  (rexel-elate-send (format "python3 %s %d &\n"
+                            (shell-quote-argument (rexel-elate-server-file)) port)))
+
+(defun rexel-elate-serve-stop (port)
+  "Stop the block's HTTP server on PORT."
+  (rexel-elate-send (format "pkill -f 'serve.py %d'\n" port)))
+
+(defun rexel-elate-listed-p (port)
+  "Return non-nil when the server listed PORT for the block."
+  (with-current-buffer (rexel-elate-block)
+    (and (listp rexel--ports) (assq port rexel--ports) t)))
+
+(defun rexel-elate-forward (port)
+  "Return the forward to PORT of the block's machine once its tunnel exists."
+  (seq-find (lambda (forward)
+              (and (eql port (rexel--forward-port forward))
+                   (rexel--forward-block forward)))
+            rexel--forwards))
+
+(defun rexel-elate-local (port)
+  "Return the local port of the forward to PORT."
+  (rexel--forward-local-port (rexel-elate-forward port)))
+
+(defun rexel-elate-tunnels ()
+  "Return the (LABEL . OWNER) of the tunnel blocks in the block's session."
+  (with-current-buffer (rexel-elate-block)
+    (delq nil
+          (mapcar (lambda (block)
+                    (and (equal (alist-get 'creator_name block)
+                                "com.superlogical.tunnel")
+                         (cons (alist-get 'label block) (alist-get 'owner block))))
+                  (alist-get 'blocks
+                             (rexel-elate-call
+                              "session.list_blocks"
+                              `((session_id . ,rexel--session-id))))))))
+
+(defvar rexel-elate--curl nil
+  "The (EXIT-STATUS . OUTPUT) of the last `rexel-elate-curl', nil while it runs.")
+
+(defun rexel-elate-curl (&rest args)
+  "Run curl with ARGS in the background, for `rexel-elate-curled'."
+  (setq rexel-elate--curl nil)
+  (let ((buf (generate-new-buffer " rexel-elate-curl")))
+    (make-process
+     :name "rexel-elate-curl" :buffer buf :noquery t
+     :command (append '("curl" "-s" "-m" "30") args)
+     :sentinel (lambda (process _change)
+                 (unless (process-live-p process)
+                   (setq rexel-elate--curl
+                         (cons (process-exit-status process)
+                               (with-current-buffer buf (buffer-string))))
+                   (kill-buffer buf))))))
+
+(defun rexel-elate-get (port path &rest args)
+  "Request PATH from PORT of this machine with curl and its ARGS."
+  (apply #'rexel-elate-curl
+         (append args (list (format "http://127.0.0.1:%d%s" port path)))))
+
+(defun rexel-elate-curled (&optional regexp)
+  "Return non-nil once curl ended, with output matching REGEXP if given."
+  (and rexel-elate--curl
+       (or (null regexp) (string-match-p regexp (cdr rexel-elate--curl)))
+       t))
+
+(defun rexel-elate-curl-failed-p ()
+  "Return non-nil once curl ended without an answer."
+  (and rexel-elate--curl (/= 0 (car rexel-elate--curl))))
+
+(defun rexel-elate-md5 (file)
+  "Return the MD5 of FILE's bytes."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file)
+    (md5 (current-buffer) nil nil 'binary)))
+
+(defvar rexel-elate-browsed nil
+  "The URLs `browse-url' was asked to open, newest first.")
+
+(setq browse-url-browser-function
+      (lambda (url &rest _) (push url rexel-elate-browsed)))
+
+(defun rexel-elate-link (text)
+  "Return the position and the URI of the link whose text has TEXT, or nil.
+The link is one ghostel found in the block buffer."
+  (with-current-buffer (rexel-elate-block)
+    (save-excursion
+      (goto-char (point-min))
+      (when (search-forward text nil t)
+        (when-let* ((uri (ghostel--uri-at-pos (match-beginning 0))))
+          (cons (match-beginning 0) uri))))))
+
+(defun rexel-elate-open-link (text)
+  "Open the link whose text has TEXT in the block buffer, as RET on it does."
+  (with-current-buffer (rexel-elate-block)
+    (save-excursion
+      (goto-char (car (rexel-elate-link text)))
+      (ghostel-open-link-at-point))))
+
+(defun rexel-elate-leave-tunnel (label)
+  "Leave a tunnel block labelled LABEL without an owner in the block's session.
+Another client makes it and disconnects."
+  (let ((sid (buffer-local-value 'rexel--session-id (rexel-elate-block))))
+    (rexel-elate--control
+     (lambda (conn)
+       (rexel-elate-call "session.attach" `((session_id . ,sid)) conn)
+       (rexel-elate-call "session.new_block"
+                         `((session_id . ,sid)
+                           (flavor . "com.superlogical.tunnel.dial")
+                           (options . ((host . "localhost") (port . 9)))
+                           (label . ,label))
+                         conn)))))
+
 (provide 'rexel-setup)
 ;;; rexel-setup.el ends here

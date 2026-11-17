@@ -19,6 +19,8 @@ same session at the same time.
 - Survives dropped connections, sleep and network changes.
 - Drop or paste files onto a terminal to send them to the server's machine,
   and copy files from there.
+- Forward a port of the server's machine, such as a development server's,
+  and open links to localhost through the forward.
 - Directory tracking and command state from the processes Rex reports.
 - Your ghostel key bindings and settings apply in every block buffer.
 - Optional pickers with previews and Embark actions, see [[*Consult and Embark][Consult and Embark]].
@@ -77,7 +79,7 @@ The rest of this document covers each part in detail.
 
 * Requirements
 
-- Rex 0.1.0-preview.19 or later, for macOS, Linux or FreeBSD.  On macOS it
+- Rex 0.1.0-preview.20 or later, for macOS, Linux or FreeBSD.  On macOS it
   comes with the Rex Beta app, which need not run; rexel looks for
   =rexel-program= on =exec-path=, then for the copy inside the app.  The app
   does not put =rex= on =PATH=; for use in a shell, symlink it:
@@ -297,6 +299,7 @@ In a block buffer =C-c C-r= (=rexel-prefix-key=) prefixes:
 | ~=~        | ~rexel-sync-layout~, see [[*Layout and size][Layout and size]]       |
 | ~$~        | ~rexel-rename-session~                       |
 | ~u~        | ~rexel-upload-file~, see [[*Uploading files][Uploading files]]       |
+| ~f~        | ~rexel-port-forward~, see [[*Forwarding ports][Forwarding ports]]     |
 | ~x~        | ~rexel-close-block~, ends the program        |
 | ~d~        | ~rexel-detach~, keeps the session running    |
 
@@ -448,6 +451,50 @@ it is complete, with the permissions of a file it replaces.  A cancelled
 download, or one whose connection drops, leaves nothing behind and is
 not resumed.
 
+* Forwarding ports
+
+~rexel-port-forward~ (=C-c C-r f=) forwards a port that a program in a
+block of another machine's server listens on: Rexel listens on a port of
+this machine and relays each connection through the server to the block's
+machine.  A block that listens on one port has that port
+forwarded, and with several the command reads one of them.  Without any,
+or with a prefix argument, it reads a port, a =host:port= the server
+reaches, or a URL.  The URL of the local port is shown and put in the
+kill ring.
+
+The forward listens on the same port of this machine, so that
+=http://localhost:5173/= stays that, or on a free one when that port is
+taken.  It listens on 127.0.0.1 only.
+
+A link to localhost in such a block opens through a forward of its port,
+which is made when needed; =rexel-port-forward-links= turns that off.
+
+When a program in a block starts to listen on a port, the echo area names
+it.  With =rexel-port-forward-new-ports= set to =t= the port is forwarded
+at once, and with =nil= nothing happens.  This holds for ports opened
+while Rexel is attached to the session.
+
+When the block stops listening on a forwarded port, the forward closes,
+and it opens again on the same local port once the block listens on the
+port again, as after a restart of a development server.
+=rexel-port-forward-when-port-closes= can be =close=, which leaves it
+closed, or =keep=, which leaves it open.  The server sees the ports of
+the programs running in the block's terminal: on macOS not those of a
+daemon that left the terminal or of a program inside tmux.  A forward to
+such a port, or to another host, stays until
+=M-x rexel-port-forward-close=, which reads one of the open forwards, or
+until its block closes or the session is detached.
+
+A connection whose program on this machine ends its sending side, as
+=nc= does at the end of its input, is closed as a whole; what the other
+side still sends is lost.  Browsers and =curl= keep theirs open.  While
+a program on this machine takes what a forward delivers more slowly than
+it arrives, Emacs waits for it, and gives the connection up after ten
+seconds without progress.
+
+On this machine's server a block's ports are local already and nothing is
+forwarded.
+
 * Shell integration
 
 The Rex server starts the shell of a block, so ghostel cannot inject its
@@ -538,28 +585,31 @@ the blocks of a session that is detached or destroyed (=kill-buffer-hook=).
 
 * Customization
 
-| Option                           | Default                    | Meaning                                                      |
-|----------------------------------+----------------------------+--------------------------------------------------------------|
-| =rexel-hosts=                    | =nil=                      | Servers besides those =rex= knows, see [[*Servers][Servers]]               |
-| =rexel-attach-display=           | =ask=                      | What =rexel-attach= shows: =ask=, =focused= or =layout=      |
-| =rexel-default-session=          | ="emacs"=                  | Label of the session =M-x rexel= shows                       |
-| =rexel-default-session-function= | =nil=                      | Names the session of =M-x rexel= for a buffer                |
-| =rexel-tramp-hosts=              | =nil=                      | TRAMP prefixes of servers' machines, by server label         |
-| =rexel-session-label-function=   | =nil=                      | Rewrites the label given to =rexel-new-session=              |
-| =rexel-buffer-name-function=     | =rexel-buffer-name-by-tab= | Names a block buffer, see [[*Sessions][Sessions]]                           |
-| =rexel-kill-buffer-action=       | =close=                    | What killing a block buffer does: =close=, =keep= or =ask=   |
-| =rexel-destroy-empty-sessions=   | =t=                        | Destroy a session when its last block closes                 |
-| =rexel-prefix-key=               | ="C-c C-r"=                | Prefix for =rexel-prefix-map= in block buffers               |
-| =rexel-autostart-server=         | =ask=                      | Start a local server when none is found: =ask=, =t= or =nil= |
-| =rexel-program=                  | ="rex"=                    | The Rex command-line program                                 |
+| Option                                | Default                    | Meaning                                                      |
+|---------------------------------------+----------------------------+--------------------------------------------------------------|
+| =rexel-hosts=                         | =nil=                      | Servers besides those =rex= knows, see [[*Servers][Servers]]               |
+| =rexel-attach-display=                | =ask=                      | What =rexel-attach= shows: =ask=, =focused= or =layout=      |
+| =rexel-default-session=               | ="emacs"=                  | Label of the session =M-x rexel= shows                       |
+| =rexel-default-session-function=      | =nil=                      | Names the session of =M-x rexel= for a buffer                |
+| =rexel-tramp-hosts=                   | =nil=                      | TRAMP prefixes of servers' machines, by server label         |
+| =rexel-session-label-function=        | =nil=                      | Rewrites the label given to =rexel-new-session=              |
+| =rexel-buffer-name-function=          | =rexel-buffer-name-by-tab= | Names a block buffer, see [[*Sessions][Sessions]]                           |
+| =rexel-kill-buffer-action=            | =close=                    | What killing a block buffer does: =close=, =keep= or =ask=   |
+| =rexel-destroy-empty-sessions=        | =t=                        | Destroy a session when its last block closes                 |
+| =rexel-port-forward-new-ports=        | =message=                  | A block's new port: =message=, =t= to forward it or =nil=    |
+| =rexel-port-forward-when-port-closes= | =remember=                 | A forward whose port closed: =remember=, =close= or =keep=   |
+| =rexel-port-forward-links=            | =t=                        | Open links to localhost through a forward                    |
+| =rexel-prefix-key=                    | ="C-c C-r"=                | Prefix for =rexel-prefix-map= in block buffers               |
+| =rexel-autostart-server=              | =ask=                      | Start a local server when none is found: =ask=, =t= or =nil= |
+| =rexel-program=                       | ="rex"=                    | The Rex command-line program                                 |
 
 Block buffers run =rexel-block-mode=, whose hook =rexel-block-mode-hook= runs
 in each new one.
 
 * Status
 
-Attaching, typing, resizing, uploads, downloads and the basic layout
-commands work.
+Attaching, typing, resizing, uploads, downloads, port forwards and the
+basic layout commands work.
 
 A dropped data connection resumes its stream, and a lost control
 connection is redialled with backoff while sessions are attached; typing

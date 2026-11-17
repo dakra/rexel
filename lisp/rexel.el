@@ -32,6 +32,10 @@
 ;; file's own path is typed.  `rexel-download-file' copies a file from
 ;; the block's machine to this one.  Both are in rexel-transfer.el.
 ;;
+;; `rexel-port-forward' forwards a port of the block's machine to this
+;; one, and a link to localhost in a block buffer opens through such a
+;; forward.  That is in rexel-port-forward.el.
+;;
 ;; Both connections are WebSockets, on a server's Unix socket or on its
 ;; network address, such as the one Rex's built-in Tailscale gives it.
 ;; Servers come from `rexel-program' and `rexel-hosts'.
@@ -46,6 +50,7 @@
 (require 'ghostel)
 (require 'websocket)
 (require 'rexel-transfer)
+(require 'rexel-port-forward)
 
 (defvar ghostel-annotation-function)
 (defvar ghostel-buffer-name-function)
@@ -191,7 +196,7 @@ A write gets this long plus the time its size takes; see
 (defconst rexel--version (package-get-version)
   "This package's version, sent in the hello.")
 
-(defconst rexel--api-revision 14
+(defconst rexel--api-revision 16
   "Control API revision this client speaks.")
 
 (cl-defstruct (rexel--conn (:constructor rexel--make-conn))
@@ -719,6 +724,7 @@ reading until `rexel-attach' reuses them."
     (dolist (buf (buffer-list))
       (when (eq (buffer-local-value 'rexel--conn buf) conn)
         (rexel--end-stream buf "control connection closed")
+        (rexel--forwards-close (rexel--buffer-forwards buf))
         (with-current-buffer buf
           (setq rexel--conn nil)
           ;; A password typed now would go nowhere.
@@ -731,9 +737,11 @@ reading until `rexel-attach' reuses them."
 
 (defun rexel--leave-servers ()
   "Send every control connection a close frame, for `kill-emacs-hook'.
-The server then ends this client at once; one whose connection drops
-stays attached to its sessions for a minute.  A connection being written
-to is left to drop, as the frame would wait behind that write."
+The server then ends this client at once; one whose connection drops stays
+attached to its sessions for a minute.  A connection being written to is left
+to drop, as the frame would wait behind that write.  The tunnel blocks of the
+port forwards are closed first: the server keeps those of a client that left."
+  (ignore-errors (rexel--forwards-leave))
   (dolist (conn rexel--conns)
     (ignore-errors
       (let* ((ws (rexel--conn-ws conn))
@@ -771,6 +779,7 @@ response or repeat a change the view already has."
             (when-let* ((buf (gethash (alist-get 'block_id inner-payload)
                                       (rexel--conn-blocks conn))))
               (rexel--discard-buffer buf))
+            (rexel--forward-block-closed conn (alist-get 'block_id inner-payload))
             (when rexel-destroy-empty-sessions
               (rexel--destroy-if-empty conn sid)))
            ("session_view_changed"
@@ -982,6 +991,7 @@ block of it.")
          (message "rexel: session.attach: %s" (rexel--error-string err))
        (let ((view (alist-get 'view result)))
          (rexel--apply-view conn sid view)
+         (rexel--forward-close-leftovers conn sid)
          (funcall callback view))))))
 
 (defun rexel--attach-session (conn sid &optional display)
@@ -1359,15 +1369,23 @@ A block whose `data.connect' went with the connection is streamed again."
            (rexel--request conn "session.detach" `((session_id . ,sid)))))
         ((equal (alist-get 'code err) "session_not_found")
          (rexel--forget-session conn sid))
-        (err (message "rexel: session.attach: %s" (rexel--error-string err)))
+        (err
+         (message "rexel: session.attach: %s" (rexel--error-string err))
+         ;; Their tunnel blocks cannot be reached.
+         (rexel--forwards-close (rexel--session-forwards conn sid)))
         (t
          (dolist (buf (rexel--session-buffers sid))
            (rexel--flush-out buf))
          (rexel--apply-view conn sid (alist-get 'view result))
+         (rexel--forwards-resume conn sid)
+         (rexel--forward-close-leftovers conn sid)
          (dolist (buf (rexel--session-buffers sid))
            (with-current-buffer buf
              (rexel--sync-theme)
-             (rexel--sync-size)))))))))
+             (rexel--sync-size)
+             ;; A port may have opened or closed unseen meanwhile.
+             (when (and (eq rexel--conn conn) (rexel--conn-host conn))
+               (rexel--ports-fetch))))))))))
 
 (defun rexel--view-focused-block (view)
   "Return the ID of VIEW's focused terminal block, else of its first one."
@@ -1560,10 +1578,13 @@ BUFFER-OR-NAME is as for `ghostel-make-terminal'."
     ;; A block streamed again on its connection keeps its typed bytes
     ;; and the requests it has in flight.
     (unless (eq rexel--conn conn)
+      (rexel--forwards-close (rexel--buffer-forwards (current-buffer)))
       (setq rexel--out-pending nil
             rexel--out-inflight nil
             rexel--size-inflight nil
-            rexel--theme-inflight nil))
+            rexel--theme-inflight nil
+            rexel--ports 'unknown
+            rexel--forward-remembered nil))
     (setq rexel--conn conn
           rexel--session-id sid
           rexel--block-id bid
@@ -1588,6 +1609,7 @@ BUFFER-OR-NAME is as for `ghostel-make-terminal'."
     (rexel--open-data-connection conn (current-buffer))
     (unless (rexel--conn-host conn)
       (rexel--fetch-password-pid conn sid bid (current-buffer)))
+    (rexel--forward-setup)
     ;; An error in the mode's hook would end the view being applied.
     (with-demoted-errors "rexel: rexel-block-mode-hook: %S"
       (rexel-block-mode 1))
@@ -1682,6 +1704,7 @@ ran no query follows `rexel-kill-buffer-action', `ask' keeping the block."
     (remhash rexel--block-id (rexel--conn-blocks rexel--conn)))
   (rexel--upload-fail (current-buffer) "buffer killed")
   (rexel--fail-downloads (current-buffer) "buffer killed")
+  (rexel--forwards-close (rexel--buffer-forwards (current-buffer)))
   (rexel--close-stream))
 
 (defun rexel--window-selected (window)
@@ -1762,38 +1785,44 @@ Typing while a write is unanswered probes the block's connections."
 
 (defun rexel--on-block-event (conn payload)
   "Handle the block event PAYLOAD of a session on CONN.
-A terminal's `process_changed' event names the foreground process, in
-place of ghostel's PTY probe: a foreground other than the shell means a
-command is running, and the shell's cwd becomes `default-directory': as
-it is on this machine's server, and below the TRAMP prefix of another
-server that has one."
+A terminal's `process_changed' event names its foreground process and
+its `ports_changed' event lists the ports its programs listen on."
   (when-let* ((buf (gethash (alist-get 'block_id payload)
                             (rexel--conn-blocks conn)))
               ((buffer-live-p buf))
-              ((equal (alist-get 'creator_name payload) rexel--terminal-creator))
-              ((equal (alist-get 'name payload) "process_changed")))
-    (let* ((event (alist-get 'payload payload))
-           (fg (alist-get 'foreground event))
-           (shell (rexel--shell-process fg (alist-get 'ancestors event))))
+              ((equal (alist-get 'creator_name payload) rexel--terminal-creator)))
+    (let ((event (alist-get 'payload payload)))
       (with-current-buffer buf
-        ;; Rex leaves out the ancestors when there are too many or one
-        ;; exited, so FG without them counts as the shell only if none is
-        ;; known yet or it has the known shell's pid.
-        (when (and shell (or (not (eq shell fg)) (null rexel--shell-pid)
-                             (eql (alist-get 'pid fg) rexel--shell-pid)))
-          (rexel--note-shell shell))
-        ;; The cwd is a path on the server's machine.
-        (when-let* ((cwd (alist-get 'cwd shell)))
-          (if (null (rexel--conn-host conn))
-              (ghostel-set-directory cwd)
-            (when-let* ((prefix (rexel--conn-prefix conn)))
-              (ghostel-set-directory (concat prefix cwd)))))
-        ;; OSC 133 marks from the shell are exact and take over once seen.
-        (unless (let ((prompt (ghostel-last-prompt)))
-                  (and prompt (not (eq prompt rexel--stale-prompt))))
-          (ghostel-set-command-running
-           (and fg rexel--shell-pid
-                (not (eql (alist-get 'pid fg) rexel--shell-pid)))))))))
+        (pcase (alist-get 'name payload)
+          ("process_changed" (rexel--on-process-changed conn event))
+          ("ports_changed" (rexel--ports-update event)))))))
+
+(defun rexel--on-process-changed (conn event)
+  "Follow EVENT, which names the foreground process of this buffer's block.
+The block is one of CONN.  The event stands in for ghostel's PTY probe:
+a foreground other than the shell means a command is running, and the
+shell's cwd becomes `default-directory': as it is on this machine's
+server, and below the TRAMP prefix of another server that has one."
+  (let* ((fg (alist-get 'foreground event))
+         (shell (rexel--shell-process fg (alist-get 'ancestors event))))
+    ;; Rex leaves out the ancestors when there are too many or one
+    ;; exited, so FG without them counts as the shell only if none is
+    ;; known yet or it has the known shell's pid.
+    (when (and shell (or (not (eq shell fg)) (null rexel--shell-pid)
+                         (eql (alist-get 'pid fg) rexel--shell-pid)))
+      (rexel--note-shell shell))
+    ;; The cwd is a path on the server's machine.
+    (when-let* ((cwd (alist-get 'cwd shell)))
+      (if (null (rexel--conn-host conn))
+          (ghostel-set-directory cwd)
+        (when-let* ((prefix (rexel--conn-prefix conn)))
+          (ghostel-set-directory (concat prefix cwd)))))
+    ;; OSC 133 marks from the shell are exact and take over once seen.
+    (unless (let ((prompt (ghostel-last-prompt)))
+              (and prompt (not (eq prompt rexel--stale-prompt))))
+      (ghostel-set-command-running
+       (and fg rexel--shell-pid
+            (not (eql (alist-get 'pid fg) rexel--shell-pid)))))))
 
 (defun rexel--note-shell (shell)
   "Remember SHELL, this block's shell process as Rex reports it.
@@ -2852,10 +2881,19 @@ A nil or empty LABEL restores the label the server chose."
   (interactive)
   (unless rexel--conn
     (user-error "Not in a Rex block buffer"))
-  (when (rexel--ready-p rexel--conn)
-    (rexel--request rexel--conn "session.detach"
-                    `((session_id . ,rexel--session-id))))
-  (rexel--forget-session rexel--conn rexel--session-id))
+  (let ((conn rexel--conn)
+        (sid rexel--session-id)
+        answered)
+    ;; The server closes a tunnel block only for a client attached to its
+    ;; session, and a detach can overtake a request sent before it.
+    (cl-flet ((detach ()
+                (when (and answered (rexel--ready-p conn)
+                           (not (assoc sid (rexel--conn-sessions conn))))
+                  (rexel--request conn "session.detach" `((session_id . ,sid))))))
+      (rexel--forwards-close (rexel--session-forwards conn sid)
+                             (lambda () (setq answered t) (detach)))
+      (rexel--forget-session conn sid)
+      (detach))))
 
 (defun rexel--show-new-blocks (conn sid result err method &optional action)
   "Show the first block METHOD created on CONN in session SID.
@@ -3068,6 +3106,7 @@ empty shows its focused block alone."
                      ("=" . rexel-sync-layout)
                      ("$" . rexel-rename-session)
                      ("u" . rexel-upload-file)
+                     ("f" . rexel-port-forward)
                      ("x" . rexel-close-block)
                      ("d" . rexel-detach)))
       (define-key map (kbd key) command)

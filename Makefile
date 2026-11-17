@@ -15,6 +15,7 @@ CONSULT_REXEL = extensions/consult-rexel/consult-rexel
 REXEL         = lisp/rexel
 REXEL_PROJECT = lisp/rexel-project
 REXEL_TRANSFER = lisp/rexel-transfer
+REXEL_FORWARD = lisp/rexel-port-forward
 
 # ghostel's internal symbols that the packages may use.
 GHOSTEL_INTERNALS =
@@ -33,7 +34,11 @@ $(REXEL_TRANSFER).elc: $(REXEL_TRANSFER).el | $(GHOSTEL_DIR) $(WEBSOCKET_DIR)
 	$(EMACS) --batch $(EMACSFLAGS) -Q $(LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" -f batch-byte-compile $<
 
-$(REXEL).elc: $(REXEL).el $(REXEL_TRANSFER).elc | $(GHOSTEL_DIR) $(WEBSOCKET_DIR)
+$(REXEL_FORWARD).elc: $(REXEL_FORWARD).el $(REXEL_TRANSFER).elc | $(GHOSTEL_DIR) $(WEBSOCKET_DIR)
+	$(EMACS) --batch $(EMACSFLAGS) -Q $(LOAD_PATH) \
+		--eval "(setq byte-compile-error-on-warn t)" -f batch-byte-compile $<
+
+$(REXEL).elc: $(REXEL).el $(REXEL_TRANSFER).elc $(REXEL_FORWARD).elc | $(GHOSTEL_DIR) $(WEBSOCKET_DIR)
 	$(EMACS) --batch $(EMACSFLAGS) -Q $(LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" -f batch-byte-compile $<
 
@@ -51,11 +56,12 @@ $(CONSULT_REXEL).elc: $(CONSULT_REXEL).el $(REXEL).elc $(REXEL_PROJECT).elc | $(
 	$(EMACS) --batch $(EMACSFLAGS) -Q $(CONSULT_LOAD_PATH) \
 		--eval "(setq byte-compile-error-on-warn t)" -f batch-byte-compile $<
 
-byte-compile: $(REXEL).elc $(REXEL_TRANSFER).elc $(REXEL_PROJECT).elc $(CONSULT_REXEL).elc
+byte-compile: $(REXEL).elc $(REXEL_TRANSFER).elc $(REXEL_FORWARD).elc $(REXEL_PROJECT).elc $(CONSULT_REXEL).elc
 
 test: $(REXEL).elc $(REXEL_PROJECT).elc
 	$(EMACS) --batch $(EMACSFLAGS) -Q $(LOAD_PATH) -L test \
 		-l ert -l test/rexel-test.el -l test/rexel-transfer-test.el \
+		-l test/rexel-port-forward-test.el \
 		-l test/rexel-project-test.el \
 		-f ert-run-tests-batch-and-exit
 
@@ -77,20 +83,20 @@ $(LINT_DEPS_STAMP): Makefile | $(GHOSTEL_DIR)
 		--eval "(package-install-file (expand-file-name \"$(REXEL).el\"))"
 	@touch $@
 
-package-lint: $(LINT_DEPS_STAMP) $(REXEL).el $(REXEL_TRANSFER).el $(REXEL_PROJECT).el $(CONSULT_REXEL).el
+package-lint: $(LINT_DEPS_STAMP) $(REXEL).el $(REXEL_TRANSFER).el $(REXEL_FORWARD).el $(REXEL_PROJECT).el $(CONSULT_REXEL).el
 	$(EMACS) --batch $(EMACSFLAGS) -Q \
 		--eval "(setq package-user-dir \"$(LINT_ELPA_DIR)\")" \
 		--eval "(package-initialize)" \
 		--eval "(require 'package-lint)" \
 		--eval "(setq package-lint-main-file \"$(REXEL).el\")" \
-		-f package-lint-batch-and-exit $(REXEL).el $(REXEL_TRANSFER).el $(REXEL_PROJECT).el
+		-f package-lint-batch-and-exit $(REXEL).el $(REXEL_TRANSFER).el $(REXEL_FORWARD).el $(REXEL_PROJECT).el
 	$(EMACS) --batch $(EMACSFLAGS) -Q \
 		--eval "(setq package-user-dir \"$(LINT_ELPA_DIR)\")" \
 		--eval "(package-initialize)" \
 		--eval "(require 'package-lint)" \
 		-f package-lint-batch-and-exit $(CONSULT_REXEL).el
 
-checkdoc: $(REXEL).el $(REXEL_TRANSFER).el $(REXEL_PROJECT).el $(CONSULT_REXEL).el
+checkdoc: $(REXEL).el $(REXEL_TRANSFER).el $(REXEL_FORWARD).el $(REXEL_PROJECT).el $(CONSULT_REXEL).el
 	$(EMACS) --batch $(EMACSFLAGS) -Q \
 		--eval "(require 'checkdoc)" \
 		--eval "(let ((sentence-end-double-space nil) \
@@ -100,6 +106,7 @@ checkdoc: $(REXEL).el $(REXEL_TRANSFER).el $(REXEL_PROJECT).el $(CONSULT_REXEL).
 		  (let ((inhibit-message t)) \
 		    (checkdoc-file \"$(REXEL).el\") \
 		    (checkdoc-file \"$(REXEL_TRANSFER).el\") \
+		    (checkdoc-file \"$(REXEL_FORWARD).el\") \
 		    (checkdoc-file \"$(REXEL_PROJECT).el\") \
 		    (checkdoc-file \"$(CONSULT_REXEL).el\")) \
 		  (when (get-buffer \"*Warnings*\") \
@@ -107,7 +114,7 @@ checkdoc: $(REXEL).el $(REXEL_TRANSFER).el $(REXEL_PROJECT).el $(CONSULT_REXEL).
 		    (with-current-buffer \"*Warnings*\" (message \"%s\" (buffer-string)))) \
 		  (unless ok (kill-emacs 1)))"
 
-ghostel-internals: $(REXEL).el $(REXEL_TRANSFER).el $(REXEL_PROJECT).el $(CONSULT_REXEL).el
+ghostel-internals: $(REXEL).el $(REXEL_TRANSFER).el $(REXEL_FORWARD).el $(REXEL_PROJECT).el $(CONSULT_REXEL).el
 	@found=$$(grep -noE 'ghostel(-[a-z0-9]+)*--[A-Za-z0-9*?/<>=!+_:%&~^-]+' $^); \
 	[ $$? -le 1 ] || exit 2; \
 	other=$$(printf '%s\n' "$$found" | awk -F: -v allowed='$(GHOSTEL_INTERNALS)' \
@@ -119,4 +126,4 @@ ghostel-internals: $(REXEL).el $(REXEL_TRANSFER).el $(REXEL_PROJECT).el $(CONSUL
 	fi
 
 clean:
-	rm -f $(REXEL).elc $(REXEL_TRANSFER).elc $(REXEL_PROJECT).elc $(CONSULT_REXEL).elc
+	rm -f $(REXEL).elc $(REXEL_TRANSFER).elc $(REXEL_FORWARD).elc $(REXEL_PROJECT).elc $(CONSULT_REXEL).elc

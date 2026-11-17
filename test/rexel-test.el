@@ -2455,6 +2455,20 @@ The process was last read from SILENCE seconds ago, by default now."
                          sent)))
       (mapc #'rexel-test--ws-delete all))))
 
+(ert-deftest rexel-test-leave-servers-closes-forwards-first ()
+  "The tunnel blocks are closed while the connections still take requests."
+  (let* ((open (rexel-test--ws))
+         (rexel--conns (list (rexel--make-conn :ws open)))
+         order)
+    (unwind-protect
+        (cl-letf (((symbol-function 'rexel--forwards-leave)
+                   (lambda () (push 'forwards order)))
+                  ((symbol-function 'process-send-string)
+                   (lambda (&rest _) (push 'close-frame order))))
+          (rexel--leave-servers)
+          (should (equal '(forwards close-frame) (reverse order))))
+      (rexel-test--ws-delete open))))
+
 (ert-deftest rexel-test-leave-servers-does-not-redial ()
   "Neither the server's close in answer nor a stalled frame redials."
   (let* ((answered (rexel-test--ws))
@@ -3630,7 +3644,8 @@ passed on.  Return (PROMPTS . METHODS), the methods oldest first."
     (cl-letf (((symbol-function 'ghostel-make-terminal)
                (lambda (buffer &rest _) buffer))
               ((symbol-function 'rexel-block-mode) #'ignore)
-              ((symbol-function 'rexel--open-data-connection) #'ignore))
+              ((symbol-function 'rexel--open-data-connection) #'ignore)
+              ((symbol-function 'rexel--ports-fetch) #'ignore))
       (with-temp-buffer
         (setq default-directory "/usr/lib/")
         (rexel--attach-block-buffer conn "s" "block:00000a" (current-buffer))
